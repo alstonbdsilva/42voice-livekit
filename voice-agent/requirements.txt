@@ -1,0 +1,28 @@
+# Core Framework
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+
+# LiveKit
+livekit
+livekit-api
+livekit-agents
+
+# AI/ML Services
+groq
+httpx
+
+# Async Support
+aiohttp
+
+# Audio Processing
+numpy
+pydub
+
+# Utilities
+python-dotenv
+python-multipart
+
+# Logging
+loguru
