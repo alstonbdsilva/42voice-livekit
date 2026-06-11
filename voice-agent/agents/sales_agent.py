@@ -5,8 +5,11 @@ Handles sales-related queries and product information.
 
 import logging
 from typing import Dict, Any, Optional
-from services.openai_llm import OpenAILLM
+from livekit.agents import llm
 from session_manager import SessionManager
+
+if not hasattr(llm, 'ai_callable'):
+    llm.ai_callable = llm.function_tool
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +17,7 @@ logger = logging.getLogger(__name__)
 class SalesAgent:
     """Agent for handling sales-related conversations."""
     
-    def __init__(self, llm: OpenAILLM, session_manager: SessionManager):
-        self.llm = llm
+    def __init__(self, session_manager: SessionManager):
         self.session_manager = session_manager
         self.agent_name = "sales_agent"
         
@@ -31,110 +33,7 @@ Be enthusiastic, helpful, and customer-focused. Highlight benefits and value pro
 Always be honest about product capabilities and limitations.
 Guide customers toward solutions that best fit their needs."""
     
-    async def process_message(
-        self,
-        session_id: str,
-        user_message: str
-    ) -> str:
-        """
-        Process a user message and generate a response.
-        
-        Args:
-            session_id: Session identifier
-            user_message: User's message
-            
-        Returns:
-            Agent response
-        """
-        try:
-            # Get conversation history
-            history = self.session_manager.get_conversation_history(session_id)
-            
-            # Get session context
-            context = self.session_manager.get_context(session_id)
-            
-            # Build messages for LLM
-            messages = [{"role": "system", "content": self.system_prompt}]
-            
-            # Add conversation history
-            for msg in history[-10:]:  # Last 10 messages
-                messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"]
-                })
-            
-            # Add current user message
-            messages.append({"role": "user", "content": user_message})
-            
-            # Generate response
-            response = await self.llm.generate_with_history(messages)
-            
-            # Add messages to session
-            self.session_manager.add_message(
-                session_id,
-                role="user",
-                content=user_message,
-                agent=self.agent_name
-            )
-            self.session_manager.add_message(
-                session_id,
-                role="assistant",
-                content=response,
-                agent=self.agent_name
-            )
-            
-            # Extract and update sales context if detected
-            await self._extract_sales_context(session_id, user_message, response)
-            
-            logger.info(f"Sales agent processed message for session: {session_id}")
-            return response
-            
-        except Exception as e:
-            logger.error(f"Error in sales agent: {e}")
-            return "I apologize, but I encountered an error processing your request. Please try again."
-    
-    async def _extract_sales_context(
-        self,
-        session_id: str,
-        user_message: str,
-        agent_response: str
-    ):
-        """
-        Extract sales-related information and update context.
-        
-        Args:
-            session_id: Session identifier
-            user_message: User's message
-            agent_response: Agent's response
-        """
-        try:
-            # Use LLM to extract structured sales information
-            extraction_prompt = f"""Extract sales information from this conversation:
-User: {user_message}
-Agent: {agent_response}
-
-Extract these fields if present:
-- product_interest
-- budget_range
-- purchase_timeline
-- competitor_mentioned
-- feature_preferences
-- sales_stage (awareness/consideration/decision)
-
-Return as JSON or empty dict if no sales info found."""
-            
-            extracted = await self.llm.generate(
-                prompt=extraction_prompt,
-                temperature=0.1
-            )
-            
-            # Update context with extracted info (simplified)
-            if extracted and extracted != "{}":
-                self.session_manager.update_context(session_id, {"sales_info": extracted})
-                
-        except Exception as e:
-            logger.error(f"Error extracting sales context: {e}")
-    
+    @llm.ai_callable(description="Provide product recommendations based on user needs.")
     async def provide_product_recommendation(
         self,
         session_id: str,
@@ -142,40 +41,74 @@ Return as JSON or empty dict if no sales info found."""
     ) -> str:
         """
         Provide product recommendations based on user needs.
-        
-        Args:
-            session_id: Session identifier
-            user_needs: Description of user needs
-            
-        Returns:
-            Recommendation message
         """
         try:
-            recommendation_prompt = f"""Based on these user needs: {user_needs}
-Provide a personalized product recommendation with:
-1. Recommended product/service
-2. Key benefits for this user
-3. Pricing information
-4. Why this is the best fit"""
+            # Analyze user needs and provide appropriate recommendation
+            needs_lower = user_needs.lower()
             
-            recommendation = await self.llm.generate(
-                prompt=recommendation_prompt,
-                system_prompt=self.system_prompt
-            )
+            # Product catalog with recommendations
+            product_catalog = {
+                "basic": {
+                    "name": "Basic Plan",
+                    "price": "$29/month",
+                    "features": ["Core features", "Email support", "5GB storage"],
+                    "best_for": "Individual users with basic needs"
+                },
+                "professional": {
+                    "name": "Professional Plan",
+                    "price": "$79/month",
+                    "features": ["All Basic features", "Priority support", "50GB storage", "Advanced analytics"],
+                    "best_for": "Small teams and professionals"
+                },
+                "enterprise": {
+                    "name": "Enterprise Plan",
+                    "price": "Custom pricing",
+                    "features": ["All Professional features", "24/7 phone support", "Unlimited storage", "Custom integrations", "SLA guarantee"],
+                    "best_for": "Large organizations with complex needs"
+                }
+            }
+            
+            # Determine best fit based on needs
+            recommended_product = "professional"  # default
+            
+            if any(keyword in needs_lower for keyword in ["individual", "personal", "basic", "simple", "starter"]):
+                recommended_product = "basic"
+            elif any(keyword in needs_lower for keyword in ["team", "business", "company", "organization", "enterprise", "large"]):
+                recommended_product = "enterprise"
+            
+            product = product_catalog[recommended_product]
+            
+            # Update context with recommendation
+            self.session_manager.update_context(session_id, {
+                "recommended_product": recommended_product,
+                "user_needs": user_needs
+            })
+            
+            recommendation_msg = f"""Based on your needs, I recommend our {product['name']}.
+
+**Pricing:** {product['price']}
+
+**Key Features:**
+{chr(10).join(f"- {feature}" for feature in product['features'])}
+
+**Why this is the best fit:** {product['best_for']}
+
+Would you like me to provide more details about this plan or discuss other options?"""
             
             self.session_manager.add_message(
                 session_id,
                 role="assistant",
-                content=recommendation,
+                content=recommendation_msg,
                 agent=self.agent_name
             )
             
-            return recommendation
+            return recommendation_msg
             
         except Exception as e:
             logger.error(f"Error providing recommendation: {e}")
-            return "I apologize, but I couldn't generate a recommendation at this time."
+            return "I apologize, but I encountered an error while processing your recommendation request."
     
+    @llm.ai_callable(description="Retrieve pricing information for a specific product or service.")
     async def handle_pricing_inquiry(
         self,
         session_id: str,
@@ -183,40 +116,105 @@ Provide a personalized product recommendation with:
     ) -> str:
         """
         Handle pricing inquiries.
-        
-        Args:
-            session_id: Session identifier
-            product_or_service: Product or service name
-            
-        Returns:
-            Pricing information
         """
         try:
-            pricing_prompt = f"""Provide pricing information for: {product_or_service}
-Include:
-- Base pricing
-- Available packages/tiers
-- Any current promotions
-- Payment options"""
+            product_lower = product_or_service.lower()
             
-            pricing_info = await self.llm.generate(
-                prompt=pricing_prompt,
-                system_prompt=self.system_prompt
-            )
+            # Pricing information
+            pricing_data = {
+                "basic": {
+                    "name": "Basic Plan",
+                    "monthly": "$29/month",
+                    "annual": "$290/year (save 17%)",
+                    "features": ["Core features", "Email support", "5GB storage"],
+                    "add_ons": ["Additional storage: $5/GB/month", "Priority support: +$10/month"]
+                },
+                "professional": {
+                    "name": "Professional Plan",
+                    "monthly": "$79/month",
+                    "annual": "$790/year (save 17%)",
+                    "features": ["All Basic features", "Priority support", "50GB storage", "Advanced analytics"],
+                    "add_ons": ["Additional storage: $3/GB/month", "Custom integrations: +$25/month"]
+                },
+                "enterprise": {
+                    "name": "Enterprise Plan",
+                    "monthly": "Custom pricing",
+                    "annual": "Custom pricing",
+                    "features": ["All Professional features", "24/7 phone support", "Unlimited storage", "Custom integrations", "SLA guarantee"],
+                    "add_ons": ["Dedicated account manager", "On-premise deployment", "Custom training"]
+                }
+            }
+            
+            # Determine which product they're asking about
+            product_key = None
+            if "basic" in product_lower:
+                product_key = "basic"
+            elif "professional" in product_lower or "pro" in product_lower:
+                product_key = "professional"
+            elif "enterprise" in product_lower:
+                product_key = "enterprise"
+            else:
+                # If not specific, provide overview
+                overview_msg = """Here's our pricing overview:
+
+**Basic Plan** - $29/month ($290/year)
+- Core features, Email support, 5GB storage
+
+**Professional Plan** - $79/month ($790/year)
+- All Basic features, Priority support, 50GB storage, Advanced analytics
+
+**Enterprise Plan** - Custom pricing
+- All Professional features, 24/7 phone support, Unlimited storage, Custom integrations, SLA guarantee
+
+All annual plans save 17%. Would you like detailed information about a specific plan?"""
+                
+                self.session_manager.add_message(
+                    session_id,
+                    role="assistant",
+                    content=overview_msg,
+                    agent=self.agent_name
+                )
+                
+                return overview_msg
+            
+            product = pricing_data[product_key]
+            
+            # Update context
+            self.session_manager.update_context(session_id, {
+                "pricing_inquiry": product_key,
+                "pricing_details": product
+            })
+            
+            pricing_msg = f"""**{product['name']} Pricing:**
+
+**Monthly:** {product['monthly']}
+**Annual:** {product['annual']}
+
+**Included Features:**
+{chr(10).join(f"- {feature}" for feature in product['features'])}
+
+**Available Add-ons:**
+{chr(10).join(f"- {addon}" for addon in product['add_ons'])}
+
+**Payment Options:** Credit card, PayPal, bank transfer (for annual plans)
+**Free Trial:** 14-day free trial available for all plans
+
+Would you like to proceed with a subscription or do you have questions about specific features?"""
             
             self.session_manager.add_message(
                 session_id,
                 role="assistant",
-                content=pricing_info,
+                content=pricing_msg,
                 agent=self.agent_name
             )
             
-            return pricing_info
+            return pricing_msg
             
         except Exception as e:
             logger.error(f"Error handling pricing inquiry: {e}")
-            return "I apologize, but I couldn't retrieve pricing information at this time."
+            return "I apologize, but I encountered an error while retrieving pricing information."
     
+    @llm.ai_callable(description="Escalate the conversation to a human sales representative.")
     async def escalate_to_human(
         self,
         session_id: str,
@@ -224,13 +222,6 @@ Include:
     ) -> str:
         """
         Escalate to a human sales representative.
-        
-        Args:
-            session_id: Session identifier
-            reason: Reason for escalation
-            
-        Returns:
-            Escalation message
         """
         try:
             # Update context
@@ -240,10 +231,7 @@ Include:
                 "escalation_agent": self.agent_name
             })
             
-            escalation_msg = f"""I understand you'd like to speak with a human representative regarding: {reason}
-
-I'm connecting you with our sales team now. They'll be able to provide more personalized assistance.
-Is there anything specific you'd like me to note before the transfer?"""
+            escalation_msg = f"""I understand you'd like to speak with a human representative regarding: {reason}. I'm connecting you with our sales team now. They'll be able to provide more personalized assistance. Is there anything specific you'd like me to note before the transfer?"""
             
             self.session_manager.add_message(
                 session_id,
@@ -256,4 +244,4 @@ Is there anything specific you'd like me to note before the transfer?"""
             
         except Exception as e:
             logger.error(f"Error handling escalation: {e}")
-            return "I apologize, but there was an error processing your request to speak with a representative."
+            return "Error: Failed to process escalation."

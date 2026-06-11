@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # Server Configuration
     host: str = Field(default="0.0.0.0", env="HOST")
     port: int = Field(default=8000, env="PORT")
-    reload: bool = Field(default=sys.platform != "win32", env="RELOAD")
+    reload: bool = Field(default=True, env="RELOAD")
     
     # Deepgram Configuration
     deepgram_stt_model: str = Field(default="nova-2", env="DEEPGRAM_STT_MODEL")

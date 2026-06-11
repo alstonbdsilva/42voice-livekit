@@ -1,28 +1,13 @@
-# Core Framework
+livekit>=0.11.0
+livekit-api>=0.2.0
+livekit-agents==1.5.13
+livekit-plugins-deepgram
+livekit-plugins-elevenlabs
+livekit-plugins-openai
+livekit-plugins-silero
 fastapi
 uvicorn[standard]
 pydantic
 pydantic-settings
-
-# LiveKit
-livekit
-livekit-api
-livekit-agents
-
-# AI/ML Services
-groq
-httpx
-
-# Async Support
-aiohttp
-
-# Audio Processing
-numpy
-pydub
-
-# Utilities
+redis
 python-dotenv
-python-multipart
-
-# Logging
-loguru
