@@ -39,12 +39,12 @@ class Settings(BaseSettings):
     
     # Deepgram Configuration
     deepgram_stt_model: str = Field(default="nova-2", env="DEEPGRAM_STT_MODEL")
-    deepgram_stt_language: str = Field(default="hi", env="DEEPGRAM_STT_LANGUAGE")
+    deepgram_stt_language: str = Field(default="en-US", env="DEEPGRAM_STT_LANGUAGE")
     
     # ElevenLabs Configuration
     elevenlabs_tts_model: str = Field(default="eleven_multilingual_v2", env="ELEVENLABS_TTS_MODEL")
     elevenlabs_tts_voice_id: str = Field(default="21m00Tcm4TlvDq8ikWAM", env="ELEVENLABS_TTS_VOICE_ID")
-    elevenlabs_tts_language: str = Field(default="hi", env="ELEVENLABS_TTS_LANGUAGE")
+    elevenlabs_tts_language: str = Field(default="en", env="ELEVENLABS_TTS_LANGUAGE")
     
     # OpenAI Configuration
     openai_model: str = Field(default="gpt-4-turbo", env="OPENAI_MODEL")

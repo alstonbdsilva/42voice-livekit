@@ -27,11 +27,14 @@ async def entrypoint(ctx: JobContext):
     settings = get_settings()
     room_name = ctx.room.name
     
-    logger.info(f"Connecting to room {room_name}")
+    logger.info(f"[DEBUG] Starting entrypoint for room: {room_name}")
+    logger.info(f"[DEBUG] About to call ctx.connect()")
     # Auto-subscribe to the caller's audio track
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+    logger.info(f"[DEBUG] ctx.connect() completed successfully")
 
     # Initialize services and context
+    logger.info(f"[DEBUG] Initializing services...")
     from session_manager import SessionManager
     from orchestrator import Orchestrator
     from agents.booking_agent import BookingAgent
@@ -48,8 +51,10 @@ async def entrypoint(ctx: JobContext):
         sales_agent,
         support_agent
     )
+    logger.info(f"[DEBUG] Services initialized")
     
-    # Initialize the VoicePipelineAgent using LiveKit 1.5.x syntax
+    # Initialize the VoicePipelineAgent
+    logger.info(f"[DEBUG] Creating VoicePipelineAgent...")
     agent = VoicePipelineAgent(
         vad=silero.VAD.load(),
         stt=deepgram.STT(language="en-US"),
@@ -65,12 +70,16 @@ async def entrypoint(ctx: JobContext):
         tools=[orchestrator_ctx],
         instructions="You are the orchestrator agent. Start by asking how you can help the user today. Use your tools to route requests or handle booking, sales, and support."
     )
+    logger.info(f"[DEBUG] VoicePipelineAgent created")
     
-    agent.start(ctx.room, participant=None)
+    logger.info(f"[DEBUG] Starting agent...")
+    agent.start(ctx.room)
+    logger.info(f"[DEBUG] Agent started")
     
     # Send an initial greeting
-    await asyncio.sleep(1)
+    logger.info(f"[DEBUG] Sending initial greeting...")
     await agent.say("Hello, how can I help you today?", allow_interruptions=True)
+    logger.info(f"[DEBUG] Initial greeting sent")
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
