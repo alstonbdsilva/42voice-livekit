@@ -1,6 +1,6 @@
 """
 Session Manager.
-Handles shared session context and conversation history across agents using Redis.
+Handles shared session context and conversation history across agents using Redis with in-memory fallback.
 """
 
 import json
@@ -15,15 +15,25 @@ logger = logging.getLogger(__name__)
 
 
 class SessionManager:
-    """Manages session state and conversation history using Redis."""
+    """Manages session state and conversation history using Redis with in-memory fallback."""
     
     def __init__(self):
         self.settings = get_settings()
         self.session_timeout = self.settings.session_timeout
         self.max_history = self.settings.max_conversation_history
         
-        # Initialize Redis client synchronously to avoid cascading async rewrites
-        self.redis = redis.Redis.from_url("redis://localhost:6379", decode_responses=True)
+        # Try to initialize Redis, fall back to in-memory storage
+        self.redis = None
+        self.in_memory_storage = {}  # Fallback in-memory storage
+        
+        try:
+            self.redis = redis.Redis.from_url("redis://localhost:6379", decode_responses=True, socket_connect_timeout=2)
+            # Test connection
+            self.redis.ping()
+            logger.info("Redis connection established")
+        except Exception as e:
+            logger.warning(f"Redis unavailable, using in-memory storage: {e}")
+            self.redis = None
     
     def create_session(
         self,
@@ -31,72 +41,80 @@ class SessionManager:
         user_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Create a new session in Redis."""
-        try:
-            session_data = {
-                "session_id": session_id,
-                "user_id": user_id,
-                "created_at": datetime.utcnow().isoformat(),
-                "updated_at": datetime.utcnow().isoformat(),
-                "conversation_history": [],
-                "current_agent": "orchestrator",
-                "context": {},
-                "metadata": metadata or {}
-            }
-            
-            self.redis.set(
-                f"session:{session_id}",
-                json.dumps(session_data),
-                ex=self.session_timeout
-            )
-            
-            logger.info(f"Session created: {session_id}")
-            return session_data
-            
-        except Exception as e:
-            logger.error(f"Error creating session: {e}")
-            raise
+        """Create a new session in Redis or in-memory storage."""
+        session_data = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+            "conversation_history": [],
+            "current_agent": "orchestrator",
+            "context": {},
+            "metadata": metadata or {}
+        }
+        
+        if self.redis:
+            try:
+                self.redis.set(
+                    f"session:{session_id}",
+                    json.dumps(session_data),
+                    ex=self.session_timeout
+                )
+                logger.info(f"Session created in Redis: {session_id}")
+            except Exception as e:
+                logger.warning(f"Redis write failed, using in-memory: {e}")
+                self.in_memory_storage[session_id] = session_data
+        else:
+            self.in_memory_storage[session_id] = session_data
+            logger.info(f"Session created in-memory: {session_id}")
+        
+        return session_data
     
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve session data from Redis."""
-        try:
-            data = self.redis.get(f"session:{session_id}")
-            if data:
-                return json.loads(data)
-            return None
-        except Exception as e:
-            logger.error(f"Error getting session: {e}")
-            return None
+        """Retrieve session data from Redis or in-memory storage."""
+        if self.redis:
+            try:
+                data = self.redis.get(f"session:{session_id}")
+                if data:
+                    return json.loads(data)
+            except Exception as e:
+                logger.warning(f"Redis read failed, checking in-memory: {e}")
+        
+        # Fallback to in-memory
+        return self.in_memory_storage.get(session_id)
     
     def update_session(
         self,
         session_id: str,
         updates: Dict[str, Any]
     ) -> bool:
-        """Update session data in Redis."""
-        try:
-            session_data = self.get_session(session_id)
-            if not session_data:
-                logger.warning(f"Session not found: {session_id}")
-                return False
-            
-            for key, value in updates.items():
-                session_data[key] = value
-            
-            session_data["updated_at"] = datetime.utcnow().isoformat()
-            
-            self.redis.set(
-                f"session:{session_id}",
-                json.dumps(session_data),
-                ex=self.session_timeout
-            )
-            
-            logger.info(f"Session updated: {session_id}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error updating session: {e}")
+        """Update session data in Redis or in-memory storage."""
+        session_data = self.get_session(session_id)
+        if not session_data:
+            logger.warning(f"Session not found: {session_id}")
             return False
+        
+        for key, value in updates.items():
+            session_data[key] = value
+        
+        session_data["updated_at"] = datetime.utcnow().isoformat()
+        
+        if self.redis:
+            try:
+                self.redis.set(
+                    f"session:{session_id}",
+                    json.dumps(session_data),
+                    ex=self.session_timeout
+                )
+                logger.info(f"Session updated in Redis: {session_id}")
+                return True
+            except Exception as e:
+                logger.warning(f"Redis update failed, using in-memory: {e}")
+        
+        # Fallback to in-memory
+        self.in_memory_storage[session_id] = session_data
+        logger.info(f"Session updated in-memory: {session_id}")
+        return True
     
     def add_message(
         self,
@@ -211,6 +229,24 @@ class SessionManager:
     def cleanup_expired_sessions(self):
         """No-op, Redis handles expiration via EX param."""
         pass
+    
+    def clear_all_sessions(self):
+        """Clear all sessions from Redis and in-memory storage for fresh call state."""
+        # Clear in-memory storage
+        self.in_memory_storage.clear()
+        logger.info("Cleared in-memory sessions")
+        
+        # Clear Redis if available
+        if self.redis:
+            try:
+                keys = self.redis.keys("session:*")
+                if keys:
+                    self.redis.delete(*keys)
+                    logger.info(f"Cleared {len(keys)} sessions from Redis")
+                else:
+                    logger.info("No Redis sessions to clear")
+            except Exception as e:
+                logger.warning(f"Redis clear failed (may not be running): {e}")
     
     def close(self):
         """Close Redis connection."""
