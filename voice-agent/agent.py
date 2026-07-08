@@ -24,6 +24,7 @@ from livekit.plugins import deepgram, openai, silero
 # from livekit.plugins import elevenlabs
 
 from config import get_settings
+from transcript_service import transcript_service
 
 logger = logging.getLogger("voice-agent")
 
@@ -46,6 +47,10 @@ class VoiceAgent(Agent):
             "support": "support_agent",
             "general": "orchestrator"
         }
+        
+        # Transcript tracking
+        self.transcript_session_id = None
+        self.settings = get_settings()
         
         logger.info("STT initialized")
         
@@ -77,10 +82,34 @@ class VoiceAgent(Agent):
     async def on_enter(self):
         """Greet the user when the agent joins the room."""
         logger.info("on_enter called")
+        
+        # Initialize transcript session
+        if self.settings.enable_transcripts:
+            try:
+                room_name = getattr(self.session, 'room_name', 'unknown')
+                participant_id = getattr(self.session, 'participant_id', 'unknown')
+                self.transcript_session_id = transcript_service.create_transcript_session(
+                    room_name=room_name,
+                    participant_id=participant_id
+                )
+                logger.info(f"Transcript session initialized: {self.transcript_session_id}")
+            except Exception as e:
+                logger.error(f"Failed to initialize transcript session: {e}")
+        
         if not self._greeting_sent:
             try:
                 logger.info("Sending greeting")
-                self.session.say("Hello, how can I help you today?")
+                greeting = "Hello, how can I help you today?"
+                self.session.say(greeting)
+                
+                # Add greeting to transcript
+                if self.settings.enable_transcripts and self.transcript_session_id:
+                    transcript_service.add_transcript_entry(
+                        self.transcript_session_id, 
+                        speaker="agent", 
+                        text=greeting
+                    )
+                
                 self._greeting_sent = True
                 logger.info("Greeting sent")
             except Exception as e:
@@ -92,6 +121,37 @@ class VoiceAgent(Agent):
         """Clean up when the agent exits."""
         logger.info("on_exit called - cleaning up session")
         self._greeting_sent = False
+        
+        # Finalize and save transcript
+        if self.settings.enable_transcripts and self.transcript_session_id:
+            try:
+                # Create final transcript data
+                transcript_data = transcript_service.finalize_transcript(
+                    self.transcript_session_id,
+                    summary="Voice agent conversation completed"
+                )
+                
+                # Add session metadata
+                transcript_data.update({
+                    "room_name": getattr(self.session, 'room_name', 'unknown'),
+                    "participant_id": getattr(self.session, 'participant_id', 'unknown'),
+                    "agent_type": self.agent_name
+                })
+                
+                # Save to S3
+                success = await transcript_service.save_transcript_to_s3(
+                    self.transcript_session_id,
+                    transcript_data
+                )
+                
+                if success:
+                    logger.info(f"Transcript saved: {self.transcript_session_id}")
+                else:
+                    logger.error(f"Failed to save transcript: {self.transcript_session_id}")
+                    
+            except Exception as e:
+                logger.error(f"Error saving transcript: {e}")
+        
         # Clear session manager state for this call (safely)
         if hasattr(self, 'session_manager'):
             try:

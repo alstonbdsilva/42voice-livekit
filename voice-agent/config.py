@@ -58,6 +58,18 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     
+    # AWS S3 Configuration for Recording
+    aws_access_key_id: str = Field(..., env="AWS_ACCESS_KEY_ID")
+    aws_secret_access_key: str = Field(..., env="AWS_SECRET_ACCESS_KEY")
+    aws_region: str = Field(default="ap-southeast-6", env="AWS_REGION")
+    s3_bucket_name: str = Field(..., env="S3_BUCKET_NAME")
+    s3_bucket_path: str = Field(default="recordings/", env="S3_BUCKET_PATH")
+    
+    # Transcript Configuration
+    enable_transcripts: bool = Field(default=True, env="ENABLE_TRANSCRIPTS")
+    transcript_language: str = Field(default="en", env="TRANSCRIPT_LANGUAGE")
+    transcript_summary_enabled: bool = Field(default=True, env="TRANSCRIPT_SUMMARY_ENABLED")
+    
     class Config:
         # Get the directory where this config.py file is located
         _config_dir = os.path.dirname(os.path.abspath(__file__))
