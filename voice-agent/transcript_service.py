@@ -19,12 +19,19 @@ class TranscriptService:
     
     def __init__(self):
         self.settings = get_settings()
-        self.s3_client = boto3.client(
-            's3',
-            aws_access_key_id=self.settings.aws_access_key_id,
-            aws_secret_access_key=self.settings.aws_secret_access_key,
-            region_name=self.settings.aws_region
-        )
+        self.s3_client = None
+        self.sessions = {}
+    
+    def _get_s3_client(self):
+        """Get or create S3 client lazily."""
+        if self.s3_client is None:
+            self.s3_client = boto3.client(
+                's3',
+                aws_access_key_id=self.settings.aws_access_key_id,
+                aws_secret_access_key=self.settings.aws_secret_access_key,
+                region_name=self.settings.aws_region
+            )
+        return self.s3_client
         
     def create_transcript_session(self, room_name: str, participant_id: str) -> str:
         """
@@ -41,18 +48,7 @@ class TranscriptService:
         session_id = f"{room_name}_{participant_id}_{timestamp}"
         
         # Initialize transcript data
-        transcript_data = {
-            "session_id": session_id,
-            "room_name": room_name,
-            "participant_id": participant_id,
-            "start_time": datetime.utcnow().isoformat(),
-            "transcript": [],
-            "summary": None,
-            "metadata": {
-                "agent_type": "voice_assistant",
-                "language": "en"
-            }
-        }
+        self.sessions[session_id] = []
         
         logger.info(f"Created transcript session: {session_id}")
         return session_id
@@ -79,14 +75,14 @@ class TranscriptService:
             "confidence": confidence
         }
         
-        # In a real implementation, you'd store this in memory or database
-        # For now, we'll log it and prepare for S3 upload
+        if session_id in self.sessions:
+            self.sessions[session_id].append(entry)
+            
         logger.info(f"Transcript entry added to {session_id}: {speaker}: {text}")
-        
         return entry
     
     def finalize_transcript(self, session_id: str, summary: Optional[str] = None,
-                          recording_url: Optional[str] = None) -> Dict:
+                          recording_url: Optional[str] = None) -> dict:
         """
         Finalize and prepare transcript for storage.
         
@@ -98,14 +94,23 @@ class TranscriptService:
         Returns:
             Complete transcript data ready for storage
         """
+        entries = self.sessions.get(session_id, [])
+        full_text = "\n".join([f"{e['speaker'].upper()}: {e['text']}" for e in entries])
+        
         transcript_data = {
             "session_id": session_id,
             "end_time": datetime.utcnow().isoformat(),
             "summary": summary,
             "recording_url": recording_url,
-            "processed_at": datetime.utcnow().isoformat()
+            "processed_at": datetime.utcnow().isoformat(),
+            "lines": entries,
+            "full_text": full_text
         }
         
+        # Clean up session in-memory state
+        if session_id in self.sessions:
+            del self.sessions[session_id]
+            
         return transcript_data
     
     async def save_transcript_to_s3(self, session_id: str, transcript_data: Dict) -> bool:
@@ -128,7 +133,8 @@ class TranscriptService:
             json_data = json.dumps(transcript_data, indent=2, default=str)
             
             # Upload to S3
-            self.s3_client.put_object(
+            s3_client = self._get_s3_client()
+            s3_client.put_object(
                 Bucket=self.settings.s3_bucket_name,
                 Key=s3_key,
                 Body=json_data,
@@ -172,7 +178,8 @@ class TranscriptService:
                 
             s3_key = f"transcripts/{date}/{session_id}.json"
             
-            response = self.s3_client.get_object(
+            s3_client = self._get_s3_client()
+            response = s3_client.get_object(
                 Bucket=self.settings.s3_bucket_name,
                 Key=s3_key
             )
@@ -208,7 +215,8 @@ class TranscriptService:
             if date:
                 prefix += f"{date}/"
                 
-            response = self.s3_client.list_objects_v2(
+            s3_client = self._get_s3_client()
+            response = s3_client.list_objects_v2(
                 Bucket=self.settings.s3_bucket_name,
                 Prefix=prefix
             )

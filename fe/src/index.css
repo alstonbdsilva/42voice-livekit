@@ -1,0 +1,100 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Chivo:wght@400;500;600;700;800;900&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+:root {
+  --background: 0 0% 98%;
+  --foreground: 240 10% 4%;
+  --card: 0 0% 100%;
+  --card-foreground: 240 10% 4%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 240 10% 4%;
+  --primary: 240 6% 4%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 240 5% 96%;
+  --secondary-foreground: 240 6% 10%;
+  --muted: 240 5% 96%;
+  --muted-foreground: 240 4% 46%;
+  --accent: 240 5% 96%;
+  --accent-foreground: 240 6% 10%;
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 240 6% 90%;
+  --input: 240 6% 90%;
+  --ring: 240 6% 10%;
+  --chart-1: 240 6% 10%;
+  --chart-2: 142 71% 45%;
+  --chart-3: 38 92% 50%;
+  --chart-4: 0 84% 60%;
+  --chart-5: 217 91% 60%;
+  --radius: 0.25rem;
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 14px;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Chivo', sans-serif;
+  letter-spacing: -0.02em;
+}
+
+.font-display { font-family: 'Chivo', sans-serif; letter-spacing: -0.02em; }
+.font-mono-stat { font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; }
+
+.label-tiny {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: hsl(240 6% 85%); border-radius: 0; }
+::-webkit-scrollbar-thumb:hover { background: hsl(240 6% 70%); }
+
+::selection { background: hsl(240 6% 10%); color: hsl(0 0% 98%); }
+
+.bg-grid {
+  background-image:
+    linear-gradient(to right, hsl(240 6% 92%) 1px, transparent 1px),
+    linear-gradient(to bottom, hsl(240 6% 92%) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.bg-dot {
+  background-image: radial-gradient(circle, hsl(240 6% 85%) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.kpi-card {
+  background: white;
+  border: 1px solid hsl(var(--border));
+  padding: 1.25rem;
+  position: relative;
+  transition: border-color 0.15s ease;
+}
+.kpi-card:hover { border-color: hsl(240 6% 70%); }
+
+.status-dot {
+  width: 6px; height: 6px; border-radius: 9999px; display: inline-block;
+}

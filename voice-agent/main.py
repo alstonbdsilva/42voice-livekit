@@ -5,12 +5,13 @@ Provides REST API endpoints and LiveKit integration for the voice agent system.
 
 import asyncio
 import logging
+import uuid
 from contextlib import asynccontextmanager
+from typing import Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
-import uuid
 
 from config import get_settings
 from session_manager import SessionManager
@@ -19,6 +20,25 @@ from agents.booking_agent import BookingAgent
 from agents.sales_agent import SalesAgent
 from agents.support_agent import SupportAgent
 from livekit import api
+
+# Ported Backend Imports
+from api import database
+from api.middlewares.request_id import RequestIdMiddleware
+from api.middlewares.request_logger import RequestLoggerMiddleware
+from api.middlewares.rate_limiter import RateLimiterMiddleware
+from api.middlewares.error_handler import register_error_handlers
+
+from api.modules.auth.routes import router as auth_router
+from api.modules.users.routes import router as users_router
+from api.modules.resellers.routes import router as resellers_router
+from api.modules.clients.routes import router as clients_router
+from api.modules.agents.routes import router as agents_router
+from api.modules.conversations.routes import router as conversations_router
+from api.modules.recordings.routes import router as recordings_router
+from api.modules.transcripts.routes import router as transcripts_router
+from api.modules.audit.routes import router as audit_router
+from api.modules.health.routes import router as health_router
+from api.modules.sessions.routes import router as sessions_router
 
 # Configure logging
 logging.basicConfig(
@@ -35,12 +55,15 @@ orchestrator: Optional[Orchestrator] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
-    global session_manager, stt_service, tts_service, llm_service, livekit_service, orchestrator
+    global session_manager, orchestrator
     
     logger.info("Starting voice agent backend...")
     
     # Initialize services
     try:
+        # Initialize Database Pool (Ported from Express)
+        await database.init_pool()
+        
         session_manager = SessionManager()
         
         # Initialize agents
@@ -56,6 +79,10 @@ async def lifespan(app: FastAPI):
             support_agent
         )
         
+        # Bind components to app state for access in decoupled router layers
+        app.state.session_manager = session_manager
+        app.state.orchestrator = orchestrator
+        
         logger.info("All services initialized successfully")
         
         yield
@@ -68,7 +95,10 @@ async def lifespan(app: FastAPI):
         logger.info("Shutting down voice agent backend...")
         if session_manager:
             session_manager.close()
+        # Close Database Pool (Ported from Express)
+        await database.close_pool()
         logger.info("Shutdown complete")
+
 
 
 # Create FastAPI app
@@ -80,164 +110,46 @@ app = FastAPI(
 )
 
 
-# Pydantic models
-class SessionCreate(BaseModel):
-    user_id: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+# Configuration and Mounts
 
 
-class MessageRequest(BaseModel):
-    session_id: str
-    message: str
+# 1. Mount CORS Middlewares (Express settings replication)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex="https?://.*",
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
+    expose_headers=["X-Request-ID"],
+)
+
+# 2. Add Tracing, Logging, and Rate Limiting Middlewares (Reverse addition order for ASGI stack)
+app.add_middleware(RateLimiterMiddleware)
+app.add_middleware(RequestLoggerMiddleware)
+app.add_middleware(RequestIdMiddleware)
+
+# 3. Mount Custom Exceptional Catcher Caches
+register_error_handlers(app)
+
+# 4. Associate Module Routes
+app.include_router(auth_router, prefix="/api/v1/auth", tags=["Authentication"])
+app.include_router(users_router, prefix="/api/v1/users", tags=["Users"])
+app.include_router(resellers_router, prefix="/api/v1/resellers", tags=["Resellers"])
+app.include_router(clients_router, prefix="/api/v1/clients", tags=["Clients"])
+app.include_router(agents_router, prefix="/api/v1/agents", tags=["Agents"])
+app.include_router(conversations_router, prefix="/api/v1/conversations", tags=["Conversations"])
+app.include_router(recordings_router, prefix="/api/v1/recordings", tags=["Recordings"])
+app.include_router(transcripts_router, prefix="/api/v1/transcripts", tags=["Transcripts"])
+app.include_router(audit_router, prefix="/api/v1/audit-logs", tags=["Audit"])
+app.include_router(health_router, prefix="/api/v1/health", tags=["Health"])
+
+# Root-level health endpoint mount
+app.include_router(health_router, prefix="/health", tags=["Health"])
+
+# Mount sessions router (handles /sessions, /messages, etc.)
+app.include_router(sessions_router, prefix="/api/v1", tags=["Sessions"])
 
 
-class AudioTranscribeRequest(BaseModel):
-    audio_data: str  # base64 encoded
-    language: str = "hi-IN"
-
-
-class TextToSpeechRequest(BaseModel):
-    text: str
-    language: str = "hi-IN"
-
-
-class LiveKitConnectRequest(BaseModel):
-    room_name: str
-    participant_name: str
-    session_id: Optional[str] = None
-
-
-# Health check endpoint
-@app.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    return {
-        "status": "healthy",
-        "services": {
-            "session_manager": session_manager is not None,
-            "orchestrator": orchestrator is not None
-        }
-    }
-
-
-# Session management endpoints
-@app.post("/sessions")
-async def create_session(request: SessionCreate):
-    """Create a new session."""
-    try:
-        session_id = str(uuid.uuid4())
-        session_data = session_manager.create_session(
-            session_id=session_id,
-            user_id=request.user_id,
-            metadata=request.metadata
-        )
-        return {"session_id": session_id, "data": session_data}
-    except Exception as e:
-        logger.error(f"Error creating session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/sessions/{session_id}")
-async def get_session(session_id: str):
-    """Get session data."""
-    try:
-        session_data = session_manager.get_session(session_id)
-        if not session_data:
-            raise HTTPException(status_code=404, detail="Session not found")
-        return session_data
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/sessions/{session_id}")
-async def delete_session(session_id: str):
-    """Delete a session."""
-    try:
-        success = session_manager.delete_session(session_id)
-        if not success:
-            raise HTTPException(status_code=404, detail="Session not found")
-        return {"message": "Session deleted successfully"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/sessions/{session_id}/history")
-async def get_conversation_history(session_id: str, limit: Optional[int] = None):
-    """Get conversation history for a session."""
-    try:
-        history = session_manager.get_conversation_history(session_id, limit)
-        return {"session_id": session_id, "history": history}
-    except Exception as e:
-        logger.error(f"Error getting conversation history: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# Message processing endpoint
-@app.post("/messages")
-async def process_message(request: MessageRequest):
-    """Process a text message through the agent system."""
-    try:
-        if not orchestrator:
-            raise HTTPException(status_code=503, detail="Orchestrator not initialized")
-        
-        response = await orchestrator.process_message(
-            session_id=request.session_id,
-            user_message=request.message
-        )
-        
-        return {
-            "session_id": request.session_id,
-            "response": response,
-            "current_agent": session_manager.get_current_agent(request.session_id)
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error processing message: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-
-
-# Agent handoff endpoint
-@app.post("/agents/handoff")
-async def request_handoff(session_id: str, target_agent: str):
-    """Request a handoff to a specific agent."""
-    try:
-        if not orchestrator:
-            raise HTTPException(status_code=503, detail="Orchestrator not initialized")
-        
-        message = await orchestrator.request_agent_handoff(session_id, target_agent)
-        
-        return {"message": message, "current_agent": target_agent}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error requesting handoff: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/agents/return-to-orchestrator")
-async def return_to_orchestrator(session_id: str):
-    """Return control to the orchestrator."""
-    try:
-        if not orchestrator:
-            raise HTTPException(status_code=503, detail="Orchestrator not initialized")
-        
-        message = await orchestrator.return_to_orchestrator(session_id)
-        
-        return {"message": message, "current_agent": "orchestrator"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error returning to orchestrator: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

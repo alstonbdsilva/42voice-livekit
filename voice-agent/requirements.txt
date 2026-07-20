@@ -12,3 +12,8 @@ pydantic-settings
 redis
 python-dotenv
 boto3>=1.26.0
+httpx
+asyncpg
+PyJWT
+bcrypt
+email-validator

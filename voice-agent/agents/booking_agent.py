@@ -8,8 +8,7 @@ from typing import Dict, Any, Optional
 from livekit.agents import llm
 from session_manager import SessionManager
 
-if not hasattr(llm, 'ai_callable'):
-    llm.ai_callable = llm.function_tool
+ai_callable = getattr(llm, "ai_callable", llm.function_tool)
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ class BookingAgent:
 Be helpful, polite, and efficient. Ask for necessary details like date, time, service type, and contact information when making bookings.
 Always confirm booking details before finalizing."""
     
-    @llm.ai_callable(description="Confirm a booking with the user and save it to the system.")
+    @ai_callable(description="Confirm a booking with the user and save it to the system.")
     async def handle_booking_confirmation(
         self,
         session_id: str,
@@ -78,7 +77,7 @@ You will receive a confirmation shortly. Is there anything else I can help you w
             logger.error(f"Error handling booking confirmation: {e}")
             return "I apologize, but there was an error confirming your booking."
     
-    @llm.ai_callable(description="Cancel an existing booking using its reference number.")
+    @ai_callable(description="Cancel an existing booking using its reference number.")
     async def handle_booking_cancellation(
         self,
         session_id: str,

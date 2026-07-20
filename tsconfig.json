@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "node",
+    "jsx": "react-jsx",
+    "baseUrl": "./fe",
+    "paths": {
+      "@/*": ["src/*"]
+    },
+    "allowJs": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "noUncheckedSideEffectImports": false
+  },
+  "include": [
+    "fe/src"
+  ]
+}

@@ -1,0 +1,3 @@
+{"timestamp":"2026-07-09T19:59:18","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: da3da860-b95a-4107-8c45-3e369de164b5 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-09T20:02:01","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: da3da860-b95a-4107-8c45-3e369de164b5 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-19T00:51:47","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: da3da860-b95a-4107-8c45-3e369de164b5 - IP: 127.0.0.1 - Payload: None"}

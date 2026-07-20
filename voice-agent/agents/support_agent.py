@@ -8,8 +8,7 @@ from typing import Dict, Any, Optional
 from livekit.agents import llm
 from session_manager import SessionManager
 
-if not hasattr(llm, 'ai_callable'):
-    llm.ai_callable = llm.function_tool
+ai_callable = getattr(llm, "ai_callable", llm.function_tool)
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +32,7 @@ Be empathetic, patient, and solution-oriented. Acknowledge the user's frustratio
 If you cannot resolve an issue, escalate it appropriately with clear documentation.
 Always follow up to ensure the issue is resolved."""
     
-    @llm.ai_callable(description="Provide troubleshooting steps for a technical issue.")
+    @ai_callable(description="Provide troubleshooting steps for a technical issue.")
     async def troubleshoot_issue(
         self,
         session_id: str,
@@ -179,7 +178,7 @@ Please try these steps and let me know if the issue is resolved or if you need f
             logger.error(f"Error providing troubleshooting: {e}")
             return "I apologize, but I encountered an error while retrieving troubleshooting information."
     
-    @llm.ai_callable(description="Handle billing-related inquiries.")
+    @ai_callable(description="Handle billing-related inquiries.")
     async def handle_billing_inquiry(
         self,
         session_id: str,
@@ -298,7 +297,7 @@ Is there anything specific about this billing matter I can help you with, or wou
             logger.error(f"Error handling billing inquiry: {e}")
             return "I apologize, but I encountered an error while processing your billing inquiry."
     
-    @llm.ai_callable(description="Escalate an issue to a human support representative.")
+    @ai_callable(description="Escalate an issue to a human support representative.")
     async def escalate_issue(
         self,
         session_id: str,
@@ -342,7 +341,7 @@ A support representative will review your case and follow up within 24 hours. Is
             logger.error(f"Error handling issue escalation: {e}")
             return "Error: Failed to process escalation."
     
-    @llm.ai_callable(description="Confirm that an issue has been successfully resolved.")
+    @ai_callable(description="Confirm that an issue has been successfully resolved.")
     async def confirm_resolution(
         self,
         session_id: str,

@@ -8,8 +8,7 @@ from typing import Dict, Any, Optional
 from livekit.agents import llm
 from session_manager import SessionManager
 
-if not hasattr(llm, 'ai_callable'):
-    llm.ai_callable = llm.function_tool
+ai_callable = getattr(llm, "ai_callable", llm.function_tool)
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +32,7 @@ Be enthusiastic, helpful, and customer-focused. Highlight benefits and value pro
 Always be honest about product capabilities and limitations.
 Guide customers toward solutions that best fit their needs."""
     
-    @llm.ai_callable(description="Provide product recommendations based on user needs.")
+    @ai_callable(description="Provide product recommendations based on user needs.")
     async def provide_product_recommendation(
         self,
         session_id: str,
@@ -108,7 +107,7 @@ Would you like me to provide more details about this plan or discuss other optio
             logger.error(f"Error providing recommendation: {e}")
             return "I apologize, but I encountered an error while processing your recommendation request."
     
-    @llm.ai_callable(description="Retrieve pricing information for a specific product or service.")
+    @ai_callable(description="Retrieve pricing information for a specific product or service.")
     async def handle_pricing_inquiry(
         self,
         session_id: str,
@@ -214,7 +213,7 @@ Would you like to proceed with a subscription or do you have questions about spe
             logger.error(f"Error handling pricing inquiry: {e}")
             return "I apologize, but I encountered an error while retrieving pricing information."
     
-    @llm.ai_callable(description="Escalate the conversation to a human sales representative.")
+    @ai_callable(description="Escalate the conversation to a human sales representative.")
     async def escalate_to_human(
         self,
         session_id: str,

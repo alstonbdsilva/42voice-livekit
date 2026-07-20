@@ -27,7 +27,7 @@ class SessionManager:
         self.in_memory_storage = {}  # Fallback in-memory storage
         
         try:
-            self.redis = redis.Redis.from_url("redis://localhost:6379", decode_responses=True, socket_connect_timeout=2)
+            self.redis = redis.Redis.from_url(self.settings.redis_url, decode_responses=True, socket_connect_timeout=2)
             # Test connection
             self.redis.ping()
             logger.info("Redis connection established")
@@ -42,7 +42,7 @@ class SessionManager:
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Create a new session in Redis or in-memory storage."""
-        session_data = {
+        session_data: Dict[str, Any] = {
             "session_id": session_id,
             "user_id": user_id,
             "created_at": datetime.utcnow().isoformat(),
@@ -214,10 +214,19 @@ class SessionManager:
         return {}
     
     def delete_session(self, session_id: str) -> bool:
-        """Delete a session from Redis."""
+        """Delete a session from Redis or in-memory storage."""
+        deleted = False
         try:
-            result = self.redis.delete(f"session:{session_id}")
-            if result > 0:
+            if self.redis:
+                result = self.redis.delete(f"session:{session_id}")
+                if result > 0:
+                    deleted = True
+            
+            if session_id in self.in_memory_storage:
+                del self.in_memory_storage[session_id]
+                deleted = True
+                
+            if deleted:
                 logger.info(f"Session deleted: {session_id}")
                 return True
             return False
@@ -250,8 +259,9 @@ class SessionManager:
     
     def close(self):
         """Close Redis connection."""
-        try:
-            self.redis.close()
-            logger.info("Session manager Redis connection closed")
-        except Exception as e:
-            logger.error(f"Error closing session manager: {e}")
+        if self.redis:
+            try:
+                self.redis.close()
+                logger.info("Session manager Redis connection closed")
+            except Exception as e:
+                logger.error(f"Error closing session manager: {e}")

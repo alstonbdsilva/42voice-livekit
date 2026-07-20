@@ -1,0 +1,112 @@
+"""
+Asynchronous PostgreSQL database connector using asyncpg.
+"""
+
+import logging
+import asyncpg
+from typing import List, Dict, Any, Optional
+from config import get_settings
+
+logger = logging.getLogger("voice-agent.api.database")
+
+pool: Optional[asyncpg.Pool] = None
+
+
+async def init_pool() -> None:
+    """Initialize the PostgreSQL connection pool."""
+    global pool
+    if pool is not None:
+        return
+        
+    settings = get_settings()
+    logger.info(f"Connecting to PostgreSQL database at {settings.pghost}:{settings.pgport}...")
+    
+    try:
+        # Construct SSL context if necessary
+        ssl_ctx = None
+        if "supabase.co" in settings.pghost or settings.log_level != "DEBUG":
+            import ssl
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+            
+        pool = await asyncpg.create_pool(
+            host=settings.pghost,
+            port=settings.pgport,
+            database=settings.pgdatabase,
+            user=settings.pguser,
+            password=settings.pgpassword,
+            min_size=2,
+            max_size=settings.pgmax_connections,
+            max_inactive_connection_lifetime=30.0,
+            command_timeout=10.0,
+            ssl=ssl_ctx
+        )
+        logger.info("PostgreSQL connection pool initialized successfully")
+    except Exception as e:
+        logger.critical(f"Failed to initialize PostgreSQL pool: {e}")
+        raise
+
+
+async def close_pool() -> None:
+    """Close the database pool."""
+    global pool
+    if pool is None:
+        return
+        
+    logger.info("Closing PostgreSQL connection pool...")
+    await pool.close()
+    pool = None
+    logger.info("PostgreSQL connection pool terminated")
+
+
+async def query(query_text: str, params: Optional[List[Any]] = None, client: Optional[Any] = None) -> List[Dict[str, Any]]:
+    """
+    Run a raw parameterized SQL query and return rows as dictionaries.
+    Compatible with transaction connections (client) or pool fallback.
+    """
+    target = client if client is not None else pool
+    if target is None:
+        raise RuntimeError("Database pool has not been initialized.")
+        
+    args = params or []
+    try:
+        records = await target.fetch(query_text, *args)
+        return [dict(r) for r in records]
+    except Exception as e:
+        logger.error(f"Database Query Failed: {query_text.strip()} | Error: {e}")
+        raise
+
+
+async def transaction(callback_coro):
+    """
+    Executes a callback coroutine inside a database transaction block.
+    Passes the connection client to the callback.
+    """
+    if pool is None:
+        raise RuntimeError("Database pool has not been initialized.")
+        
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            logger.debug("Database Transaction Begin")
+            try:
+                result = await callback_coro(connection)
+                logger.debug("Database Transaction Committed")
+                return result
+            except Exception as e:
+                logger.error(f"Database Transaction Rollback due to error: {e}")
+                raise
+
+
+async def test_connection() -> bool:
+    """Tests the database connection health by executing a query."""
+    if pool is None:
+        return False
+    try:
+        async with pool.acquire() as conn:
+            val = await conn.fetchval("SELECT NOW()")
+            logger.info(f"Database connection test successful. Timestamp: {val}")
+            return True
+    except Exception as e:
+        logger.error(f"Database connection test failed: {e}")
+        return False
