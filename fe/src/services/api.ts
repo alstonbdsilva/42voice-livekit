@@ -2,9 +2,7 @@ import axios from "axios";
 import { API_ENDPOINTS } from "@/constants/apiEndpoints";
 import { tokenManager } from "./tokenManager";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
-// Normalize base URL: if it already includes /api, use it, otherwise append /api/v1
-export const API = BACKEND_URL.includes("/api") ? BACKEND_URL : `${BACKEND_URL}/api/v1`;
+export const API = process.env.REACT_APP_BACKEND_URL || "/api/v1";
 
 import { AxiosInstance, AxiosRequestConfig } from "axios";
 
