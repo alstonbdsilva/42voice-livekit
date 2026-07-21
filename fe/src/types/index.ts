@@ -16,10 +16,18 @@ export interface User {
 
 export type AgentStatus = "active" | "paused" | "testing" | string;
 
+export interface AgentEntityRef {
+  id: string | number;
+  name: string;
+}
+
 export interface Agent {
   id: string | number;
   name: string;
   type: string;
+  callType?: string;
+  useCase?: string;
+  activityDescription?: string;
   channels: string[];
   totalCalls: number;
   totalMessages: number;
@@ -32,6 +40,8 @@ export interface Agent {
   totalCost?: number;
   lastActivity?: string;
   clientId?: string | number;
+  assignedResellers?: AgentEntityRef[];
+  assignedClients?: AgentEntityRef[];
 }
 
 export interface TranscriptLine {

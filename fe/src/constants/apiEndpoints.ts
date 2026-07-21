@@ -6,6 +6,7 @@ export const API_ENDPOINTS = {
   RESELLERS: "/resellers",
   CLIENTS: "/clients",
   USERS: "/users",
+  AGENTS: "/agents",
 } as const;
 
 export type ApiEndpoints = typeof API_ENDPOINTS;

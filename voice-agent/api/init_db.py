@@ -116,6 +116,9 @@ CREATE TABLE IF NOT EXISTS agents (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name VARCHAR(255) NOT NULL,
     type VARCHAR(100) NOT NULL,
+    call_type VARCHAR(50) NOT NULL DEFAULT 'inbound',
+    use_case VARCHAR(255),
+    activity_description TEXT,
     channels VARCHAR(50)[] NOT NULL,
     status VARCHAR(50) NOT NULL DEFAULT 'active',
     total_calls INTEGER NOT NULL DEFAULT 0,
@@ -131,6 +134,20 @@ CREATE TABLE IF NOT EXISTS agents (
     client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS agent_resellers (
+    agent_id UUID REFERENCES agents(id) ON DELETE CASCADE,
+    reseller_id UUID REFERENCES resellers(id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (agent_id, reseller_id)
+);
+
+CREATE TABLE IF NOT EXISTS agent_clients (
+    agent_id UUID REFERENCES agents(id) ON DELETE CASCADE,
+    client_id UUID REFERENCES clients(id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (agent_id, client_id)
 );
 
 CREATE TABLE IF NOT EXISTS conversations (
@@ -208,6 +225,11 @@ async def init_db() -> None:
         async with database.pool.acquire() as conn:
             await conn.execute(schema_sql)
             await conn.execute(seed_roles_sql)
+            await conn.execute("""
+                ALTER TABLE agents ADD COLUMN IF NOT EXISTS call_type VARCHAR(50) NOT NULL DEFAULT 'inbound';
+                ALTER TABLE agents ADD COLUMN IF NOT EXISTS use_case VARCHAR(255);
+                ALTER TABLE agents ADD COLUMN IF NOT EXISTS activity_description TEXT;
+            """)
             
         logger.info("Tables created and roles seeded successfully.")
         
