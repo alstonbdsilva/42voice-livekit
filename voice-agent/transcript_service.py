@@ -25,11 +25,13 @@ class TranscriptService:
     def _get_s3_client(self):
         """Get or create S3 client lazily."""
         if self.s3_client is None:
+            endpoint_url = f"https://s3.{self.settings.aws_region}.amazonaws.com" if self.settings.aws_region else None
             self.s3_client = boto3.client(
                 's3',
                 aws_access_key_id=self.settings.aws_access_key_id,
                 aws_secret_access_key=self.settings.aws_secret_access_key,
-                region_name=self.settings.aws_region
+                region_name=self.settings.aws_region,
+                endpoint_url=endpoint_url
             )
         return self.s3_client
         

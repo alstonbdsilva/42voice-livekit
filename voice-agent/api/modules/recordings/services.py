@@ -18,12 +18,14 @@ class RecordingsService:
         self.recording_repository = RecordingRepository()
         settings = get_settings()
         
-        # Configure AWS S3 Client
+        # Configure AWS S3 Client with region-specific endpoint
+        endpoint_url = f"https://s3.{settings.aws_region}.amazonaws.com" if settings.aws_region else None
         self.s3_client = boto3.client(
             "s3",
             aws_access_key_id=settings.aws_access_key_id,
             aws_secret_access_key=settings.aws_secret_access_key,
             region_name=settings.aws_region,
+            endpoint_url=endpoint_url,
             config=Config(signature_version="s3v4")
         )
 
