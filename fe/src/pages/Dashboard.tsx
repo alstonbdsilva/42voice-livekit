@@ -1,6 +1,8 @@
 import { DashboardSummary, Notification, Renewal, UserRole } from "@/types";
 import React, { useEffect, useState } from "react";
 import { api, fmtCurrency, fmtNumber } from "@/services/api";
+import { FinanceService } from "@/services/finance.service";
+import { RenewalService } from "@/services/renewal.service";
 import { useAuth } from "@/store/authStore";
 import PageHeader from "@/components/PageHeader";
 import KpiCard from "@/components/KpiCard";
@@ -17,9 +19,9 @@ export default function Dashboard() {
   const [renewals, setRenewals] = useState<Renewal[]>([]);
 
   useEffect(() => {
-    api.get("/dashboard/summary").then((r) => setData(r.data)).catch(() => {});
+    FinanceService.getDashboardSummary().then((data) => setData(data)).catch(() => {});
     api.get("/notifications").then((r) => setNotifications(r.data.slice(0, 6))).catch(() => {});
-    api.get("/renewals").then((r) => setRenewals(r.data.slice(0, 6))).catch(() => {});
+    RenewalService.getAll().then((data) => setRenewals(data.slice(0, 6))).catch(() => {});
   }, []);
 
   if (!data) return <div className="label-tiny" data-testid="dashboard-loading">Loading…</div>;

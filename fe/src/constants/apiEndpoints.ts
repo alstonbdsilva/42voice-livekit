@@ -7,6 +7,13 @@ export const API_ENDPOINTS = {
   CLIENTS: "/clients",
   USERS: "/users",
   AGENTS: "/agents",
+  INVOICES: "/invoices",
+  PAYMENTS: "/payments",
+  CONTRACTS: "/contracts",
+  RENEWALS: "/renewals",
+  COMMISSIONS: "/commissions",
+  DASHBOARD_MONEY: "/dashboard/money",
+  DASHBOARD_SUMMARY: "/dashboard/summary",
 } as const;
 
 export type ApiEndpoints = typeof API_ENDPOINTS;

@@ -1,13 +1,14 @@
 import { Commission } from "@/types";
 import React, { useEffect, useState } from "react";
-import { api, fmtCurrency, fmtDate } from "@/services/api";
+import { fmtCurrency, fmtDate } from "@/services/api";
+import { CommissionService } from "@/services/commission.service";
 import PageHeader from "@/components/PageHeader";
 import DataTable from "@/components/DataTable";
 import StatusBadge from "@/components/StatusBadge";
 
 export default function Commissions() {
   const [rows, setRows] = useState<Commission[]>([]);
-  useEffect(() => { api.get("/commissions").then((r) => setRows(r.data)).catch(() => {}); }, []);
+  useEffect(() => { CommissionService.getAll().then((data) => setRows(data)).catch(() => {}); }, []);
 
   const columns = [
     { key: "createdAt", label: "Date", render: (r: Commission) => <span className="text-xs">{fmtDate(r.createdAt || r.date)}</span> },

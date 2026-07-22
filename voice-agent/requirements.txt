@@ -17,3 +17,4 @@ asyncpg
 PyJWT
 bcrypt
 email-validator
+stripe

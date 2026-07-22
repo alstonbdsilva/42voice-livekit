@@ -1,7 +1,8 @@
 import { Contract } from "@/types";
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, fmtCurrency, fmtDate, daysFrom } from "@/services/api";
+import { fmtCurrency, fmtDate, daysFrom } from "@/services/api";
+import { ContractService } from "@/services/contract.service";
 import PageHeader from "@/components/PageHeader";
 import DataTable from "@/components/DataTable";
 import StatusBadge from "@/components/StatusBadge";
@@ -9,7 +10,7 @@ import StatusBadge from "@/components/StatusBadge";
 export default function Contracts() {
   const [rows, setRows] = useState<Contract[]>([]);
   const nav = useNavigate();
-  useEffect(() => { api.get("/contracts").then((r) => setRows(r.data)).catch(() => {}); }, []);
+  useEffect(() => { ContractService.getAll().then((data) => setRows(data)).catch(() => {}); }, []);
 
   const columns = [
     { key: "number", label: "Contract", render: (r: Contract) => <span className="font-mono-stat font-medium">{r.number ?? "Contract"}</span> },

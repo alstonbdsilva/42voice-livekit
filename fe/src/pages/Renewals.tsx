@@ -1,13 +1,14 @@
 import { Renewal } from "@/types";
 import React, { useEffect, useState } from "react";
-import { api, fmtCurrency, fmtDate, daysFrom } from "@/services/api";
+import { fmtCurrency, fmtDate, daysFrom } from "@/services/api";
+import { RenewalService } from "@/services/renewal.service";
 import PageHeader from "@/components/PageHeader";
 import DataTable from "@/components/DataTable";
 import StatusBadge from "@/components/StatusBadge";
 
 export default function Renewals() {
   const [rows, setRows] = useState<Renewal[]>([]);
-  useEffect(() => { api.get("/renewals").then((r) => setRows(r.data)).catch(() => {}); }, []);
+  useEffect(() => { RenewalService.getAll().then((data) => setRows(data)).catch(() => {}); }, []);
 
   const columns = [
     { key: "clientName", label: "Client" },

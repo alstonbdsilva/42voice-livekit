@@ -65,7 +65,8 @@ export const useAuth = () => useAuthStore();
 export const canSee = (user: User | null | undefined, allowed: string[] = []): boolean => {
   if (!user) return false;
   if (allowed.length === 0) return true;
-  return allowed.includes(user.role);
+  const userRole = user.role?.toLowerCase();
+  return allowed.map((r) => r.toLowerCase()).includes(userRole);
 };
 
 // Handle automatic logout from interceptor

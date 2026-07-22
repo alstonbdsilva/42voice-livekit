@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS resellers (
     commission_pct NUMERIC(5,2) NOT NULL DEFAULT 0.00,
     contact_email VARCHAR(255) UNIQUE NOT NULL,
     status VARCHAR(50) NOT NULL DEFAULT 'active',
+    minutes_balance INTEGER NOT NULL DEFAULT 0,
+    stripe_customer_id VARCHAR(255),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -102,6 +104,8 @@ CREATE TABLE IF NOT EXISTS clients (
     contact_email VARCHAR(255) NOT NULL,
     status VARCHAR(50) NOT NULL DEFAULT 'active',
     reseller_id UUID REFERENCES resellers(id) ON DELETE SET NULL,
+    minutes_balance INTEGER NOT NULL DEFAULT 0,
+    stripe_customer_id VARCHAR(255),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -190,6 +194,101 @@ CREATE TABLE IF NOT EXISTS transcripts (
     action_items JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS plans (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    price NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    minutes INTEGER NOT NULL DEFAULT 0,
+    is_custom BOOLEAN NOT NULL DEFAULT FALSE,
+    reseller_id UUID REFERENCES resellers(id) ON DELETE SET NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS reseller_plans (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    reseller_id UUID NOT NULL REFERENCES resellers(id) ON DELETE CASCADE,
+    plan_id UUID NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    client_price NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (reseller_id, plan_id)
+);
+
+CREATE TABLE IF NOT EXISTS invoices (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    number VARCHAR(100) UNIQUE NOT NULL,
+    client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
+    reseller_id UUID REFERENCES resellers(id) ON DELETE SET NULL,
+    amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    tax NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    total NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    paid_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    due_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    issue_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    line_items JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS payments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    invoice_id UUID REFERENCES invoices(id) ON DELETE SET NULL,
+    client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
+    reseller_id UUID REFERENCES resellers(id) ON DELETE SET NULL,
+    amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    method VARCHAR(50) NOT NULL DEFAULT 'card',
+    reference VARCHAR(255),
+    paid_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS contracts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    number VARCHAR(100) UNIQUE NOT NULL,
+    client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    contract_value NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    start_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    end_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    auto_renewal BOOLEAN NOT NULL DEFAULT FALSE,
+    payment_terms VARCHAR(100),
+    billing_cycle VARCHAR(50),
+    notice_period_days INTEGER DEFAULT 30,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS renewals (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    contract_id UUID NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
+    value NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    renewal_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    probability INTEGER DEFAULT 80,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS commissions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    reseller_id UUID NOT NULL REFERENCES resellers(id) ON DELETE CASCADE,
+    client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
+    invoice_id UUID REFERENCES invoices(id) ON DELETE SET NULL,
+    amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    commission_pct NUMERIC(5,2) NOT NULL DEFAULT 0.00,
+    status VARCHAR(50) NOT NULL DEFAULT 'payable',
+    date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 seed_roles_sql = """
@@ -229,6 +328,12 @@ async def init_db() -> None:
                 ALTER TABLE agents ADD COLUMN IF NOT EXISTS call_type VARCHAR(50) NOT NULL DEFAULT 'inbound';
                 ALTER TABLE agents ADD COLUMN IF NOT EXISTS use_case VARCHAR(255);
                 ALTER TABLE agents ADD COLUMN IF NOT EXISTS activity_description TEXT;
+                
+                ALTER TABLE resellers ADD COLUMN IF NOT EXISTS minutes_balance INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE resellers ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(255);
+                
+                ALTER TABLE clients ADD COLUMN IF NOT EXISTS minutes_balance INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE clients ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(255);
             """)
             
         logger.info("Tables created and roles seeded successfully.")

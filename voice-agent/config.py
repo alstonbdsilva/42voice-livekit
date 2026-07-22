@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     rate_limit_window_ms: int = Field(default=900000, validation_alias="RATE_LIMIT_WINDOW_MS")
     rate_limit_max: int = Field(default=100, validation_alias="RATE_LIMIT_MAX")
 
+    # Stripe Configuration
+    stripe_secret_key: str = Field(default="sk_test_mock", validation_alias="STRIPE_SECRET_KEY")
+    stripe_publishable_key: str = Field(default="pk_test_mock", validation_alias="STRIPE_PUBLISHABLE_KEY")
+    stripe_webhook_secret: str = Field(default="whsec_mock", validation_alias="STRIPE_WEBHOOK_SECRET")
+
     # SMTP Configuration (integrated from Express)
     smtp_host: Optional[str] = Field(default="smtp.mailtrap.io", validation_alias="SMTP_HOST")
     smtp_port: Optional[int] = Field(default=2525, validation_alias="SMTP_PORT")

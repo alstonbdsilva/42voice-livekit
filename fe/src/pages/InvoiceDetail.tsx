@@ -1,7 +1,9 @@
 import { Invoice, Payment } from "@/types";
 import React, { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { api, fmtCurrency, fmtDate } from "@/services/api";
+import { fmtCurrency, fmtDate } from "@/services/api";
+import { InvoiceService } from "@/services/invoice.service";
+import { PaymentService } from "@/services/payment.service";
 import PageHeader from "@/components/PageHeader";
 import StatusBadge from "@/components/StatusBadge";
 import { ArrowLeft } from "lucide-react";
@@ -13,8 +15,10 @@ export default function InvoiceDetail() {
   const [payments, setPayments] = useState<Payment[]>([]);
 
   useEffect(() => {
-    api.get(`/invoices/${id}`).then((r) => setInv(r.data)).catch(() => {});
-    api.get(`/payments`).then((r) => setPayments(r.data.filter((p: Payment) => p.invoiceId.toString() === id?.toString()))).catch(() => {});
+    if (id) {
+      InvoiceService.getById(id).then((data) => setInv(data)).catch(() => {});
+      PaymentService.getAll().then((data) => setPayments(data.filter((p: Payment) => p.invoiceId.toString() === id.toString()))).catch(() => {});
+    }
   }, [id]);
 
   if (!inv) return <div className="label-tiny">Loading…</div>;

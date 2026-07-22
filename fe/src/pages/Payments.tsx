@@ -1,13 +1,14 @@
 import { Payment } from "@/types";
 import React, { useEffect, useState } from "react";
-import { api, fmtCurrency, fmtDate } from "@/services/api";
+import { fmtCurrency, fmtDate } from "@/services/api";
+import { PaymentService } from "@/services/payment.service";
 import PageHeader from "@/components/PageHeader";
 import DataTable from "@/components/DataTable";
 import StatusBadge from "@/components/StatusBadge";
 
 export default function Payments() {
   const [rows, setRows] = useState<Payment[]>([]);
-  useEffect(() => { api.get("/payments").then((r) => setRows(r.data)).catch(() => {}); }, []);
+  useEffect(() => { PaymentService.getAll().then((data) => setRows(data)).catch(() => {}); }, []);
 
   const columns = [
     { key: "paidAt", label: "Date", render: (r: Payment) => <span className="text-xs font-mono-stat">{fmtDate(r.paidAt)}</span> },

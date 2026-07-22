@@ -37,6 +37,7 @@ const navItems: NavItem[] = [
   { to: "/recordings", label: "Recordings", icon: Mic, roles: [] },
   { to: "/messages", label: "Messages", icon: MessageSquare, roles: [] },
   { section: "FINANCE" },
+  { to: "/plans", label: "Plans", icon: ScrollText, roles: [] },
   { to: "/invoices", label: "Invoices", icon: Receipt, roles: [] },
   { to: "/payments", label: "Payments", icon: CreditCard, roles: ["super_admin", "finance_admin", "reseller"] },
   { to: "/contracts", label: "Contracts", icon: FileSignature, roles: [] },

@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 class ApiResponse:
     @staticmethod
-    def success(status_code: int, message: str, data: Any = None, meta: Any = None) -> JSONResponse:
+    def success(status_code: int = 200, message: str = "Success", data: Any = None, meta: Any = None) -> JSONResponse:
         """Standardized successful endpoint response."""
         payload = {
             "success": True,

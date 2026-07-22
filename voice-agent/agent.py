@@ -36,7 +36,7 @@ logger = logging.getLogger("voice-agent")
 class VoiceAgent(Agent):
     """Voice agent with orchestrator tools."""
     
-    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, vad=None):
+    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, vad=None, out_of_credits: bool = False):
         self.session_manager = session_manager
         self.booking_agent = booking_agent
         self.sales_agent = sales_agent
@@ -44,6 +44,7 @@ class VoiceAgent(Agent):
         self.room_name = room_name
         self.participant_id = participant_id
         self.agent_name = "orchestrator"
+        self.out_of_credits = out_of_credits
         self.intent_mapping = {
             "booking": "booking_agent",
             "sales": "sales_agent",
@@ -64,6 +65,12 @@ class VoiceAgent(Agent):
         # Use VAD from prewarm if provided, otherwise load it
         vad_instance = vad if vad else silero.VAD.load()
         
+        instructions = (
+            "You are a billing notice voice. State that the account is out of credits and goodbye."
+            if out_of_credits
+            else "You are the orchestrator agent. Start by asking how you can help the user today. Use your tools to route requests or handle booking, sales, and support."
+        )
+        
         super().__init__(
             vad=vad_instance,
             stt=deepgram.STT(
@@ -73,7 +80,7 @@ class VoiceAgent(Agent):
             ),
             llm=openai.LLM(model="gpt-4o-mini"),
             tts=deepgram.TTS(),
-            instructions="You are the orchestrator agent. Start by asking how you can help the user today. Use your tools to route requests or handle booking, sales, and support."
+            instructions=instructions
         )
         
         # Track if greeting has been sent to prevent duplicate greetings
@@ -102,6 +109,23 @@ class VoiceAgent(Agent):
             except Exception as e:
                 logger.error(f"Failed to initialize transcript session: {e}")
         
+        if self.out_of_credits:
+            try:
+                logger.info("Sending out of credits warning")
+                warning = "We are sorry, but this account has run out of call minutes. Please recharge your balance in the dashboard. Goodbye."
+                self.session.say(warning)
+                self._greeting_sent = True
+                
+                async def delayed_disconnect():
+                    await asyncio.sleep(6.0)
+                    logger.info("Disconnecting room due to out of credits balance")
+                    if self.session and self.session.room:
+                        await self.session.room.disconnect()
+                asyncio.create_task(delayed_disconnect())
+            except Exception as e:
+                logger.error(f"Error speaking out of credits warning: {e}")
+            return
+
         if not self._greeting_sent:
             try:
                 logger.info("Sending greeting")
@@ -499,6 +523,25 @@ async def entrypoint(ctx: JobContext):
     participant = await ctx.wait_for_participant()
     logger.info(f"PARTICIPANT CONNECTED: {participant.identity}")
     
+    # 1. Run credit check
+    import httpx
+    backend_url = getattr(settings, 'backend_url', 'http://localhost:5000/api/v1')
+    out_of_credits = False
+    
+    try:
+        async with httpx.AsyncClient() as http_client:
+            credit_check_resp = await http_client.get(
+                f"{backend_url}/billing/check-credits?agent_name=orchestrator",
+                timeout=10.0
+            )
+            if credit_check_resp.status_code == 200:
+                credit_data = credit_check_resp.json()
+                if not credit_data.get("has_credits", True):
+                    logger.warning(f"Rejecting call: client/reseller has no minutes left. Balance: {credit_data.get('minutes_balance', 0)}")
+                    out_of_credits = True
+    except Exception as e:
+        logger.error(f"Error checking minutes balance: {e}")
+
     session_manager = SessionManager()
     booking_agent = BookingAgent(session_manager)
     sales_agent = SalesAgent(session_manager)
@@ -523,7 +566,8 @@ async def entrypoint(ctx: JobContext):
         settings=settings,
         room_name=ctx.room.name,
         participant_id=participant.identity,
-        vad=ctx.proc.userdata["vad"]  # Pass VAD from prewarm to avoid duplicate loading
+        vad=ctx.proc.userdata["vad"],
+        out_of_credits=out_of_credits
     )
     
     # Initialize recording state

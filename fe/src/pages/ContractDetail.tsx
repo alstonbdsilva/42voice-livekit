@@ -1,7 +1,8 @@
 import { Contract } from "@/types";
 import React, { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { api, fmtCurrency, fmtDate, daysFrom } from "@/services/api";
+import { fmtCurrency, fmtDate, daysFrom } from "@/services/api";
+import { ContractService } from "@/services/contract.service";
 import PageHeader from "@/components/PageHeader";
 import KpiCard from "@/components/KpiCard";
 import StatusBadge from "@/components/StatusBadge";
@@ -11,7 +12,7 @@ export default function ContractDetail() {
   const { id } = useParams();
   const nav = useNavigate();
   const [c, setC] = useState<Contract | null>(null);
-  useEffect(() => { api.get(`/contracts/${id}`).then((r) => setC(r.data)).catch(() => {}); }, [id]);
+  useEffect(() => { if (id) ContractService.getById(id).then((data) => setC(data)).catch(() => {}); }, [id]);
   if (!c) return <div className="label-tiny">Loading…</div>;
   const days = daysFrom(c.endDate);
 

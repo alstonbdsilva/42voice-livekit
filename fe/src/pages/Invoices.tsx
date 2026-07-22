@@ -1,7 +1,8 @@
 import { Invoice } from "@/types";
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, fmtCurrency, fmtDate } from "@/services/api";
+import { fmtCurrency, fmtDate } from "@/services/api";
+import { InvoiceService } from "@/services/invoice.service";
 import PageHeader from "@/components/PageHeader";
 import DataTable from "@/components/DataTable";
 import StatusBadge from "@/components/StatusBadge";
@@ -9,7 +10,7 @@ import StatusBadge from "@/components/StatusBadge";
 export default function Invoices() {
   const [rows, setRows] = useState<Invoice[]>([]);
   const nav = useNavigate();
-  useEffect(() => { api.get("/invoices").then((r) => setRows(r.data)).catch(() => {}); }, []);
+  useEffect(() => { InvoiceService.getAll().then((data) => setRows(data)).catch(() => {}); }, []);
 
   const columns = [
     { key: "number", label: "Invoice", render: (r: Invoice) => <span className="font-mono-stat font-medium">{r.number ?? "Invoice"}</span> },

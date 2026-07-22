@@ -41,38 +41,43 @@ class ConversationsService:
         """
         async def trans_cb(conn):
             # 1. Resolve agent by name (case-insensitive)
-            agent_name = dto["agentName"]
-            agent = await self.agent_repository.find_by_name(agent_name)
+            agent_name = (dto.get("agentName") or "Voice Agent").strip()
+            agent = await self.agent_repository.find_by_name(agent_name, client=conn)
             
             if not agent:
                 # Create a new agent dynamically if not found
                 agent = await self.agent_repository.create({
                     "name": agent_name,
                     "type": dto.get("intent") or "general",
-                    "channels": [dto["channel"]],
+                    "channels": [dto.get("channel") or "voice"],
                     "status": "active",
                     "userId": dto.get("userId"),
                     "clientId": dto.get("clientId")
-                })
+                }, client=conn)
+                
+            # Safety check to ensure agent is not None
+            if not agent:
+                logger.error(f"Failed to find or create agent '{agent_name}'.")
+                raise ValueError(f"Agent '{agent_name}' could not be resolved or created.")
                 
             # 2. Create the conversation record
             conv_data = {
                 "agentId": agent["id"],
-                "customerName": dto["customerName"],
+                "customerName": dto.get("customerName") or "Customer",
                 "customerContact": dto.get("customerContact"),
-                "channel": dto["channel"],
-                "duration": dto["duration"],
-                "cost": dto["cost"],
-                "sentiment": dto["sentiment"],
-                "outcome": dto["outcome"],
+                "channel": dto.get("channel") or "voice",
+                "duration": dto.get("duration") or 0,
+                "cost": dto.get("cost") or 0.0,
+                "sentiment": dto.get("sentiment") or "neutral",
+                "outcome": dto.get("outcome") or "resolved",
                 "summary": dto.get("summary"),
                 "intent": dto.get("intent"),
                 "leadScore": dto.get("leadScore", 0),
                 "sentimentScore": dto.get("sentimentScore", 0.00),
                 "humanHandoff": dto.get("humanHandoff", False),
                 "escalationReason": dto.get("escalationReason"),
-                "userId": dto.get("userId") or agent["user_id"],
-                "clientId": dto.get("clientId") or agent["client_id"]
+                "userId": dto.get("userId") or agent.get("user_id"),
+                "clientId": dto.get("clientId") or agent.get("client_id")
             }
             conv = await self.conversation_repository.create(conv_data, client=conn)
             
@@ -114,8 +119,29 @@ class ConversationsService:
                     "cost": float(dto["cost"]),
                     "is_success": is_success,
                     "is_escalated": is_escalated
-                }
+                },
+                client=conn
             )
+            
+            # 6. Deduct minutes from Client / Reseller balance
+            resolved_client_id = dto.get("clientId") or agent.get("client_id")
+            if resolved_client_id:
+                await conn.execute(
+                    "UPDATE clients SET minutes_balance = GREATEST(minutes_balance - $1, 0) WHERE id = $2",
+                    duration_minutes, resolved_client_id
+                )
+                logger.info(f"Deducted {duration_minutes} minutes from Client {resolved_client_id} balance.")
+            else:
+                user_id = dto.get("userId") or agent.get("user_id")
+                if user_id:
+                    reseller_rows = await conn.fetch("SELECT reseller_id FROM users WHERE id = $1", user_id)
+                    if reseller_rows and reseller_rows[0]["reseller_id"]:
+                        res_id = reseller_rows[0]["reseller_id"]
+                        await conn.execute(
+                            "UPDATE resellers SET minutes_balance = GREATEST(minutes_balance - $1, 0) WHERE id = $2",
+                            duration_minutes, res_id
+                        )
+                        logger.info(f"Deducted {duration_minutes} minutes from Reseller {res_id} balance.")
             
             # Retrieve complete conversation for payload formatting
             full_conv = await self.conversation_repository.find_by_id(conv["id"], client=conn)

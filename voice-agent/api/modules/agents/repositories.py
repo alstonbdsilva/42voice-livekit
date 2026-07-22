@@ -67,19 +67,21 @@ class AgentRepository:
             [user_id]
         )
 
-    async def find_by_id(self, agent_id: str) -> Optional[Dict[str, Any]]:
+    async def find_by_id(self, agent_id: Any, client: Optional[Any] = None) -> Optional[Dict[str, Any]]:
         """Find a single agent by ID."""
         rows = await database.query(
             f"{self.select_query_base} WHERE a.id = $1",
-            [agent_id]
+            [agent_id],
+            client=client
         )
         return rows[0] if rows else None
 
-    async def find_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+    async def find_by_name(self, name: str, client: Optional[Any] = None) -> Optional[Dict[str, Any]]:
         """Find a single agent by name (case-insensitive)."""
         rows = await database.query(
             f"{self.select_query_base} WHERE LOWER(a.name) = LOWER($1)",
-            [name.strip()]
+            [name.strip()],
+            client=client
         )
         return rows[0] if rows else None
 
@@ -93,7 +95,7 @@ class AgentRepository:
         )
         return await self.find_by_id(agent_id)
 
-    async def create(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def create(self, data: Dict[str, Any], client: Optional[Any] = None) -> Optional[Dict[str, Any]]:
         """Create a new agent record and associate multi-reseller/client assignments."""
         status = data.get("status", "active")
         channels = data.get("channels", ["voice"])
@@ -120,7 +122,8 @@ class AgentRepository:
                 status,
                 user_id,
                 client_id
-            ]
+            ],
+            client=client
         )
         agent_id = rows[0]["id"]
 
@@ -128,17 +131,43 @@ class AgentRepository:
         for rid in reseller_ids:
             await database.query(
                 "INSERT INTO agent_resellers (agent_id, reseller_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                [agent_id, rid]
+                [agent_id, rid],
+                client=client
             )
 
         # Insert client assignments
         for cid in client_ids:
             await database.query(
                 "INSERT INTO agent_clients (agent_id, client_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                [agent_id, cid]
+                [agent_id, cid],
+                client=client
             )
 
-        return await self.find_by_id(str(agent_id))
+        agent = await self.find_by_id(agent_id, client=client)
+        if not agent:
+            agent = {
+                "id": agent_id,
+                "name": data["name"].strip(),
+                "type": agent_type,
+                "call_type": call_type,
+                "use_case": use_case,
+                "activity_description": activity_description,
+                "channels": channels,
+                "status": status,
+                "total_calls": 0,
+                "total_messages": 0,
+                "total_minutes": 0,
+                "success_rate": Decimal("0.00"),
+                "escalation_rate": Decimal("0.00"),
+                "prompt_version": 1,
+                "kb_version": 1,
+                "total_cost": Decimal("0.0000"),
+                "user_id": user_id,
+                "client_id": client_id,
+                "assigned_resellers": reseller_ids,
+                "assigned_clients": client_ids
+            }
+        return agent
 
     async def update_assignments(self, agent_id: str, reseller_ids: Optional[List[str]] = None, client_ids: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
         """Update reseller and client assignments for an agent."""
@@ -214,9 +243,9 @@ class AgentRepository:
         await database.query(query, params)
         return await self.find_by_id(agent_id)
 
-    async def increment_stats(self, agent_id: str, stats: Dict[str, Any]) -> None:
+    async def increment_stats(self, agent_id: Any, stats: Dict[str, Any], client: Optional[Any] = None) -> None:
         """Increment call and message metrics for an agent."""
-        agent = await self.find_by_id(agent_id)
+        agent = await self.find_by_id(agent_id, client=client)
         if not agent:
             return
             
@@ -257,5 +286,6 @@ class AgentRepository:
                 Decimal(str(new_success_rate)), 
                 Decimal(str(new_escalation_rate)), 
                 agent_id
-            ]
+            ],
+            client=client
         )

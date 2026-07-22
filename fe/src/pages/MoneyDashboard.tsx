@@ -1,6 +1,7 @@
 import { DashboardMoney } from "@/types";
 import React, { useEffect, useState } from "react";
-import { api, fmtCurrency, fmtNumber } from "@/services/api";
+import { fmtCurrency, fmtNumber } from "@/services/api";
+import { FinanceService } from "@/services/finance.service";
 import PageHeader from "@/components/PageHeader";
 import KpiCard from "@/components/KpiCard";
 
@@ -8,7 +9,7 @@ export default function MoneyDashboard() {
   const [data, setData] = useState<DashboardMoney | null>(null);
 
   useEffect(() => {
-    api.get("/dashboard/money").then((r) => setData(r.data)).catch(() => {});
+    FinanceService.getDashboardMoney().then((data) => setData(data)).catch(() => {});
   }, []);
 
   if (!data) return <div className="label-tiny" data-testid="money-loading">Loading…</div>;
