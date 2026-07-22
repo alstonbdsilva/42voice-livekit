@@ -1,5 +1,6 @@
 import { Renewal } from "@/types";
 import React, { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { fmtCurrency, fmtDate, daysFrom } from "@/services/api";
 import { RenewalService } from "@/services/renewal.service";
 import PageHeader from "@/components/PageHeader";
@@ -8,7 +9,13 @@ import StatusBadge from "@/components/StatusBadge";
 
 export default function Renewals() {
   const [rows, setRows] = useState<Renewal[]>([]);
-  useEffect(() => { RenewalService.getAll().then((data) => setRows(data)).catch(() => {}); }, []);
+  const nav = useNavigate();
+
+  useEffect(() => {
+    RenewalService.getAll()
+      .then((data) => setRows(data))
+      .catch(() => {});
+  }, []);
 
   const columns = [
     { key: "clientName", label: "Client" },
@@ -27,7 +34,13 @@ export default function Renewals() {
   return (
     <div data-testid="renewals-page">
       <PageHeader title="Renewals pipeline" subtitle="Contracts up for renewal in the next 90 days" />
-      <DataTable testId="renewals-table" columns={columns} rows={rows} searchKeys={["clientName", "owner"]} />
+      <DataTable 
+        testId="renewals-table" 
+        columns={columns} 
+        rows={rows} 
+        searchKeys={["clientName", "owner"]} 
+        onRowClick={(r) => nav(`/contracts/${r.contractId.toString()}`)}
+      />
     </div>
   );
 }
