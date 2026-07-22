@@ -5,3 +5,10 @@
 {"timestamp":"2026-07-21T16:05:14","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
 {"timestamp":"2026-07-22T08:15:14","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
 {"timestamp":"2026-07-22T09:22:59","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: fcae4655-bbba-4329-87cb-b4edd52dfcd0 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-22T09:39:40","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-22T09:40:01","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 79f2676c-4677-4e79-9158-6b13ed4a45fe - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-22T10:03:54","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-22T10:04:08","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-22T10:04:22","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-22T10:06:19","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 79f2676c-4677-4e79-9158-6b13ed4a45fe - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-22T18:58:29","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
