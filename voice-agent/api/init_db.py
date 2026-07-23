@@ -289,6 +289,61 @@ CREATE TABLE IF NOT EXISTS commissions (
     date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS calendar_integrations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    client_id UUID REFERENCES clients(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    provider VARCHAR(50) NOT NULL,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT,
+    event_type_url VARCHAR(512),
+    provider_user_id VARCHAR(255),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(client_id, provider),
+    UNIQUE(user_id, provider),
+    CHECK (client_id IS NOT NULL OR user_id IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS idx_calendar_integrations_client ON calendar_integrations(client_id, provider);
+CREATE INDEX IF NOT EXISTS idx_calendar_integrations_user ON calendar_integrations(user_id, provider);
+CREATE INDEX IF NOT EXISTS idx_calendar_integrations_active ON calendar_integrations(is_active);
+
+CREATE TABLE IF NOT EXISTS calendar_bookings (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    integration_id UUID NOT NULL REFERENCES calendar_integrations(id) ON DELETE CASCADE,
+    invitee_uri VARCHAR(512) NOT NULL,
+    event_type_uri VARCHAR(512) NOT NULL,
+    scheduled_event_uri VARCHAR(512),
+    invitee_email VARCHAR(255) NOT NULL,
+    invitee_name VARCHAR(255) NOT NULL,
+    start_time TIMESTAMP WITH TIME ZONE NOT NULL,
+    end_time TIMESTAMP WITH TIME ZONE,
+    timezone VARCHAR(100),
+    status VARCHAR(50) NOT NULL DEFAULT 'scheduled',
+    cancellation_reason TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_calendar_bookings_integration ON calendar_bookings(integration_id);
+CREATE INDEX IF NOT EXISTS idx_calendar_bookings_status ON calendar_bookings(status);
+CREATE INDEX IF NOT EXISTS idx_calendar_bookings_invitee_uri ON calendar_bookings(invitee_uri);
+
+CREATE TABLE IF NOT EXISTS calendar_webhooks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    integration_id UUID NOT NULL REFERENCES calendar_integrations(id) ON DELETE CASCADE,
+    webhook_id VARCHAR(255),
+    event_type VARCHAR(100) NOT NULL,
+    payload JSONB NOT NULL,
+    processed BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_calendar_webhooks_integration ON calendar_webhooks(integration_id);
+CREATE INDEX IF NOT EXISTS idx_calendar_webhooks_processed ON calendar_webhooks(processed);
 """
 
 seed_roles_sql = """

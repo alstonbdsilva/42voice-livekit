@@ -114,9 +114,29 @@ async def initiate_calendly_auth(user_id: str, client_id: Optional[str] = None):
     Generates a secure state parameter and redirects to Calendly authorization page.
     """
     settings = get_settings()
-    if not settings.calendly_client_id or not settings.calendly_redirect_uri:
-        raise HTTPException(status_code=500, detail="Calendly OAuth credentials are not configured in backend .env")
-        
+    
+    # Validate all required Calendly credentials are configured
+    if not settings.calendly_client_id:
+        logger.error("CALENDLY_CLIENT_ID is not configured in environment variables")
+        raise HTTPException(status_code=500, detail="Calendly OAuth is not configured: missing CALENDLY_CLIENT_ID")
+    
+    if not settings.calendly_client_secret:
+        logger.error("CALENDLY_CLIENT_SECRET is not configured in environment variables")
+        raise HTTPException(status_code=500, detail="Calendly OAuth is not configured: missing CALENDLY_CLIENT_SECRET")
+    
+    if not settings.calendly_redirect_uri:
+        logger.error("CALENDLY_REDIRECT_URI is not configured in environment variables")
+        raise HTTPException(status_code=500, detail="Calendly OAuth is not configured: missing CALENDLY_REDIRECT_URI")
+    
+    if not settings.calendly_encryption_key:
+        logger.error("CALENDLY_ENCRYPTION_KEY is not configured in environment variables")
+        raise HTTPException(status_code=500, detail="Calendly OAuth is not configured: missing CALENDLY_ENCRYPTION_KEY")
+    
+    # Ensure client_id is not a mock value
+    if "mock" in settings.calendly_client_id.lower():
+        logger.error(f"CALENDLY_CLIENT_ID appears to be a mock value: {settings.calendly_client_id}")
+        raise HTTPException(status_code=500, detail="Calendly OAuth is not properly configured: CALENDLY_CLIENT_ID is a mock value")
+    
     state = CalendlyAuthService.generate_state_token(user_id, client_id)
     auth_url = (
         f"https://auth.calendly.com/oauth/authorize"
@@ -252,6 +272,327 @@ async def get_calendly_status(current_user: Dict[str, Any] = Depends(get_current
             "tokenMask": masked_token
         }
     )
+
+
+@router.get("/calendly/event-types")
+async def get_calendly_event_types(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Fetch all event types for the connected Calendly account."""
+    client_id = current_user.get("client_id")
+    user_id = current_user.get("id")
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    access_token = await CalendlyAuthService.get_active_token(client_id, user_id)
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Calendly not connected")
+    
+    client = CalendlyClient(access_token)
+    user_uri = await client.get_user_uri()
+    
+    if not user_uri:
+        raise HTTPException(status_code=400, detail="Failed to fetch user profile")
+    
+    event_types = await client.get_event_types(user_uri)
+    
+    return ApiResponse.success(
+        status_code=200,
+        message="Event types retrieved",
+        data={"eventTypes": event_types}
+    )
+
+
+@router.get("/calendly/availability")
+async def get_calendly_availability(
+    event_type_uri: str,
+    start_date: str,
+    end_date: str,
+    timezone: str = "UTC",
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Fetch available time slots for a specific event type."""
+    client_id = current_user.get("client_id")
+    user_id = current_user.get("id")
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    access_token = await CalendlyAuthService.get_active_token(client_id, user_id)
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Calendly not connected")
+    
+    client = CalendlyClient(access_token)
+    availability = await client.get_availability(event_type_uri, start_date, end_date, timezone)
+    
+    if not availability:
+        raise HTTPException(status_code=400, detail="Failed to fetch availability")
+    
+    return ApiResponse.success(
+        status_code=200,
+        message="Availability retrieved",
+        data=availability
+    )
+
+
+class BookingRequest(BaseModel):
+    event_type_uri: str
+    start_time: str
+    invitee_email: str
+    invitee_name: str
+    timezone: str = "UTC"
+
+
+@router.post("/calendly/book")
+async def create_calendly_booking(
+    request: BookingRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Create a new booking in Calendly."""
+    client_id = current_user.get("client_id")
+    user_id = current_user.get("id")
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    access_token = await CalendlyAuthService.get_active_token(client_id, user_id)
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Calendly not connected")
+    
+    client = CalendlyClient(access_token)
+    invitee_response = await client.create_invitee(
+        request.event_type_uri,
+        request.start_time,
+        request.invitee_email,
+        request.invitee_name,
+        request.timezone
+    )
+    
+    if not invitee_response:
+        raise HTTPException(status_code=400, detail="Failed to create booking")
+    
+    invitee_data = invitee_response.get("resource", {})
+    invitee_uri = invitee_data.get("uri")
+    
+    # Get integration ID for storing booking
+    if client_id:
+        integration_rows = await database.query(
+            "SELECT id FROM calendar_integrations WHERE client_id = $1 AND provider = 'calendly'",
+            [uuid.UUID(client_id)]
+        )
+    else:
+        integration_rows = await database.query(
+            "SELECT id FROM calendar_integrations WHERE user_id = $1 AND provider = 'calendly'",
+            [uuid.UUID(user_id)]
+        )
+    
+    if integration_rows:
+        integration_id = integration_rows[0]["id"]
+        
+        # Store booking in database
+        await database.query(
+            """INSERT INTO calendar_bookings 
+               (integration_id, invitee_uri, event_type_uri, invitee_email, invitee_name, start_time, timezone, status)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'scheduled')""",
+            [
+                integration_id,
+                invitee_uri,
+                request.event_type_uri,
+                request.invitee_email,
+                request.invitee_name,
+                request.start_time,
+                request.timezone
+            ]
+        )
+    
+    return ApiResponse.success(
+        status_code=201,
+        message="Booking created successfully",
+        data={
+            "inviteeUri": invitee_uri,
+            "inviteeData": invitee_data
+        }
+    )
+
+
+class RescheduleRequest(BaseModel):
+    invitee_uri: str
+    new_start_time: str
+    timezone: str = "UTC"
+
+
+@router.patch("/calendly/reschedule")
+async def reschedule_calendly_booking(
+    request: RescheduleRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Reschedule an existing booking."""
+    client_id = current_user.get("client_id")
+    user_id = current_user.get("id")
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    access_token = await CalendlyAuthService.get_active_token(client_id, user_id)
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Calendly not connected")
+    
+    client = CalendlyClient(access_token)
+    result = await client.reschedule_booking(request.invitee_uri, request.new_start_time, request.timezone)
+    
+    if not result:
+        raise HTTPException(status_code=400, detail="Failed to reschedule booking")
+    
+    # Update booking in database
+    await database.query(
+        """UPDATE calendar_bookings SET start_time = $1, updated_at = CURRENT_TIMESTAMP 
+           WHERE invitee_uri = $2""",
+        [request.new_start_time, request.invitee_uri]
+    )
+    
+    return ApiResponse.success(
+        status_code=200,
+        message="Booking rescheduled successfully",
+        data=result.get("resource", {})
+    )
+
+
+class CancelRequest(BaseModel):
+    invitee_uri: str
+    reason: str = ""
+
+
+@router.delete("/calendly/cancel")
+async def cancel_calendly_booking(
+    request: CancelRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Cancel an existing booking."""
+    client_id = current_user.get("client_id")
+    user_id = current_user.get("id")
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    access_token = await CalendlyAuthService.get_active_token(client_id, user_id)
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Calendly not connected")
+    
+    client = CalendlyClient(access_token)
+    success = await client.cancel_booking(request.invitee_uri, request.reason)
+    
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to cancel booking")
+    
+    # Update booking status in database
+    await database.query(
+        """UPDATE calendar_bookings SET status = 'cancelled', cancellation_reason = $1, updated_at = CURRENT_TIMESTAMP 
+           WHERE invitee_uri = $2""",
+        [request.reason, request.invitee_uri]
+    )
+    
+    return ApiResponse.success(
+        status_code=200,
+        message="Booking cancelled successfully",
+        data={"cancelled": True}
+    )
+
+
+@router.post("/calendly/webhook")
+async def handle_calendly_webhook(request: Request):
+    """
+    Handle incoming Calendly webhooks for invitee events.
+    Supports: invitee.created, invitee.canceled, invitee.rescheduled
+    Handles duplicate webhook delivery safely using idempotency.
+    """
+    try:
+        payload = await request.json()
+    except Exception as e:
+        logger.error(f"Failed to parse webhook payload: {e}")
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    
+    event_type = payload.get("event")
+    data = payload.get("data", {})
+    webhook_id = payload.get("id")  # Calendly provides unique webhook ID
+    
+    if not event_type or not data:
+        raise HTTPException(status_code=400, detail="Missing event or data")
+    
+    try:
+        # Check if webhook was already processed (idempotency)
+        if webhook_id:
+            existing_webhook = await database.query(
+                "SELECT id FROM calendar_webhooks WHERE webhook_id = $1",
+                [webhook_id]
+            )
+            if existing_webhook:
+                logger.info(f"Webhook {webhook_id} already processed, skipping")
+                return ApiResponse.success(
+                    status_code=200,
+                    message="Webhook already processed"
+                )
+        
+        # Handle different webhook event types
+        if event_type == "invitee.created":
+            invitee_uri = data.get("uri")
+            if invitee_uri:
+                # Check if booking already exists
+                existing = await database.query(
+                    "SELECT id FROM calendar_bookings WHERE invitee_uri = $1",
+                    [invitee_uri]
+                )
+                if not existing:
+                    # Insert new booking from webhook
+                    await database.query(
+                        """INSERT INTO calendar_bookings 
+                           (integration_id, invitee_uri, event_type_uri, invitee_email, invitee_name, start_time, timezone, status)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7, 'scheduled')""",
+                        [
+                            None,
+                            invitee_uri,
+                            data.get("event_type", {}).get("uri"),
+                            data.get("email"),
+                            data.get("name"),
+                            data.get("start_time"),
+                            data.get("timezone", "UTC")
+                        ]
+                    )
+                    logger.info(f"Created booking from webhook: {invitee_uri}")
+        
+        elif event_type == "invitee.canceled":
+            invitee_uri = data.get("uri")
+            if invitee_uri:
+                result = await database.query(
+                    """UPDATE calendar_bookings SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP 
+                       WHERE invitee_uri = $1""",
+                    [invitee_uri]
+                )
+                logger.info(f"Cancelled booking from webhook: {invitee_uri}")
+        
+        elif event_type == "invitee.rescheduled":
+            invitee_uri = data.get("uri")
+            if invitee_uri:
+                await database.query(
+                    """UPDATE calendar_bookings SET start_time = $1, updated_at = CURRENT_TIMESTAMP 
+                       WHERE invitee_uri = $2""",
+                    [data.get("start_time"), invitee_uri]
+                )
+                logger.info(f"Rescheduled booking from webhook: {invitee_uri}")
+        
+        # Store webhook for audit trail and idempotency
+        await database.query(
+            """INSERT INTO calendar_webhooks (integration_id, webhook_id, event_type, payload, processed)
+               VALUES ($1, $2, $3, $4, TRUE)""",
+            [None, webhook_id, event_type, payload]
+        )
+        
+        return ApiResponse.success(
+            status_code=200,
+            message="Webhook processed successfully"
+        )
+    
+    except Exception as e:
+        logger.error(f"Error processing webhook: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process webhook")
 
 
 @router.delete("/calendly")
