@@ -36,13 +36,14 @@ logger = logging.getLogger("voice-agent")
 class VoiceAgent(Agent):
     """Voice agent with orchestrator tools."""
     
-    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, vad=None, out_of_credits: bool = False):
+    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, ctx: JobContext, vad=None, out_of_credits: bool = False):
         self.session_manager = session_manager
         self.booking_agent = booking_agent
         self.sales_agent = sales_agent
         self.support_agent = support_agent
         self.room_name = room_name
         self.participant_id = participant_id
+        self.ctx = ctx
         self.agent_name = "orchestrator"
         self.out_of_credits = out_of_credits
         self.intent_mapping = {
@@ -93,8 +94,8 @@ class VoiceAgent(Agent):
     async def on_enter(self):
         """Greet the user when the agent joins the room."""
         logger.info("on_enter called")
-        from datetime import datetime
-        self.call_start = datetime.utcnow()
+        from datetime import datetime, timezone
+        self.call_start = datetime.now(timezone.utc)
         
         # Initialize transcript session
         if self.settings.enable_transcripts:
@@ -119,8 +120,8 @@ class VoiceAgent(Agent):
                 async def delayed_disconnect():
                     await asyncio.sleep(6.0)
                     logger.info("Disconnecting room due to out of credits balance")
-                    if self.session and self.session.room:
-                        await self.session.room.disconnect()
+                    if self.ctx and self.ctx.room:
+                        await self.ctx.room.disconnect()
                 asyncio.create_task(delayed_disconnect())
             except Exception as e:
                 logger.error(f"Error speaking out of credits warning: {e}")
@@ -220,8 +221,8 @@ class VoiceAgent(Agent):
 
         # Dynamically register call details in database
         if self.call_start:
-            from datetime import datetime
-            call_end = datetime.utcnow()
+            from datetime import datetime, timezone
+            call_end = datetime.now(timezone.utc)
             asyncio.create_task(register_call_with_backend(self, self.call_start, call_end))
     
     @function_tool()
@@ -566,6 +567,7 @@ async def entrypoint(ctx: JobContext):
         settings=settings,
         room_name=ctx.room.name,
         participant_id=participant.identity,
+        ctx=ctx,
         vad=ctx.proc.userdata["vad"],
         out_of_credits=out_of_credits
     )

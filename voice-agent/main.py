@@ -41,6 +41,7 @@ from api.modules.health.routes import router as health_router
 from api.modules.sessions.routes import router as sessions_router
 from api.modules.billing.routes import router as billing_router
 from api.modules.finance.routes import router as finance_router
+from api.modules.integrations.routes import router as integrations_router
 
 # Configure logging
 logging.basicConfig(
@@ -146,6 +147,7 @@ app.include_router(audit_router, prefix="/api/v1/audit-logs", tags=["Audit"])
 app.include_router(health_router, prefix="/api/v1/health", tags=["Health"])
 app.include_router(billing_router, prefix="/api/v1/billing", tags=["Billing"])
 app.include_router(finance_router, prefix="/api/v1", tags=["Finance"])
+app.include_router(integrations_router, prefix="/api/v1/integrations", tags=["Integrations"])
 
 # Root-level health endpoint mount
 app.include_router(health_router, prefix="/health", tags=["Health"])

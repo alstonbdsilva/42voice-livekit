@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -6,6 +6,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { CheckCircle2, RefreshCw, Settings, Loader2 } from "lucide-react";
+import { api, API } from "@/services/api";
+import { useAuth } from "@/store/authStore";
 
 // HIGH FIDELITY BRAND LOGO COMPONENT RENDERERS
 const GoogleCalendarLogo = () => (
@@ -98,29 +100,9 @@ const providersList: Provider[] = [
   { name: "Square Appointments", desc: "Automate service bookings, client reminders, and retail point-of-sale calendars.", logo: SquareLogo },
 ];
 
-interface ComparisonRow {
-  provider: string;
-  availability: "supported" | "warning" | string;
-  create: "supported" | "warning" | string;
-  update: "supported" | "warning" | string;
-  delete: "supported" | "warning" | string;
-  notes: string;
-}
-
-const comparisonData: ComparisonRow[] = [
-  { provider: "Google Calendar", availability: "supported", create: "supported", update: "supported", delete: "supported", notes: "Full API support" },
-  { provider: "Microsoft Outlook", availability: "supported", create: "supported", update: "supported", delete: "supported", notes: "Microsoft Graph API" },
-  { provider: "Apple Calendar", availability: "supported", create: "supported", update: "supported", delete: "supported", notes: "Via CalDAV/iCloud" },
-  { provider: "Calendly", availability: "warning", create: "Booking based", update: "Limited", delete: "Limited", notes: "Focus on scheduling workflows" },
-  { provider: "Cal.com", availability: "supported", create: "supported", update: "supported", delete: "supported", notes: "Excellent APIs, self-host option" },
-  { provider: "Notion Calendar", availability: "warning", create: "Mostly via Google sync", update: "Limited", delete: "Limited", notes: "Standalone API is limited" },
-  { provider: "Zoho Calendar", availability: "supported", create: "supported", update: "supported", delete: "supported", notes: "Zoho APIs" },
-  { provider: "HubSpot Meetings", availability: "warning", create: "Booking workflow", update: "Limited", delete: "Limited", notes: "CRM-centric" },
-  { provider: "Acuity Scheduling", availability: "supported", create: "supported", update: "supported", delete: "supported", notes: "Scheduling APIs" },
-  { provider: "Square Appointments", availability: "supported", create: "supported", update: "supported", delete: "supported", notes: "Business appointments" },
-];
-
 export default function CalendarConnections() {
+  const { user } = useAuth();
+
   const [connectedProviders, setConnectedProviders] = useState<Record<string, boolean>>({
     "Google Calendar": false,
     "Microsoft Outlook": false,
@@ -131,13 +113,52 @@ export default function CalendarConnections() {
   const [activeCalendars, setActiveCalendars] = useState<Record<string, string>>({
     "Google Calendar": "primary",
     "Microsoft Outlook": "primary",
+    "Calendly": "primary",
   });
+
+  // Calendly OAuth integration states
+  const [isCalendlyConnected, setIsCalendlyConnected] = useState(false);
+  const [isCalendlyLoading, setIsCalendlyLoading] = useState(false);
+  const [calendlyUrl, setCalendlyUrl] = useState("");
 
   // Global settings
   const [syncBookings, setSyncBookings] = useState(true);
   const [checkConflicts, setCheckConflicts] = useState(true);
   const [sendInvites, setSendInvites] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+
+  // Load existing configuration status from API
+  const fetchCalendlyStatus = () => {
+    api.get("/integrations/calendly")
+      .then((res) => {
+        if (res.data && res.data.data && res.data.data.connected) {
+          setIsCalendlyConnected(true);
+          setCalendlyUrl(res.data.data.eventTypeUrl || "");
+        } else {
+          setIsCalendlyConnected(false);
+          setCalendlyUrl("");
+        }
+      })
+      .catch((err) => {
+        console.warn("Failed to retrieve Calendly connection status:", err);
+      });
+  };
+
+  useEffect(() => {
+    fetchCalendlyStatus();
+  }, []);
+
+  // Listen for callback redirection triggers from child popup window
+  useEffect(() => {
+    const handleOAuthMessage = (event: MessageEvent) => {
+      if (event.data?.type === "CALENDLY_CONNECTED") {
+        toast.success("Calendly successfully connected!");
+        fetchCalendlyStatus();
+      }
+    };
+    window.addEventListener("message", handleOAuthMessage);
+    return () => window.removeEventListener("message", handleOAuthMessage);
+  }, []);
 
   const simulateConnection = (providerName: string) => {
     const isCurrentlyConnected = connectedProviders[providerName];
@@ -161,6 +182,38 @@ export default function CalendarConnections() {
     }, 1000);
   };
 
+  // Launch secure OAuth authorization window
+  const handleConnectCalendly = () => {
+    const base = API.startsWith("http") ? API : `${window.location.origin}${API}`;
+    const authUrl = `${base}/integrations/calendly/auth?user_id=${user?.id}${user?.clientId ? `&client_id=${user.clientId}` : ""}`;
+    
+    const width = 580;
+    const height = 660;
+    const left = window.screen.width / 2 - width / 2;
+    const top = window.screen.height / 2 - height / 2;
+    
+    window.open(
+      authUrl,
+      "Connect Calendly",
+      `width=${width},height=${height},left=${left},top=${top},status=no,resizable=yes`
+    );
+  };
+
+  const handleDisconnectCalendly = async () => {
+    setIsCalendlyLoading(true);
+    const toastId = toast.loading("Disconnecting Calendly integration...");
+    try {
+      await api.delete("/integrations/calendly");
+      setIsCalendlyConnected(false);
+      setCalendlyUrl("");
+      toast.success("Successfully disconnected from Calendly", { id: toastId });
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || "Failed to disconnect", { id: toastId });
+    } finally {
+      setIsCalendlyLoading(false);
+    }
+  };
+
   const handleSyncNow = () => {
     setIsSyncing(true);
     const syncToast = toast.loading("Checking for calendar conflicts and sync updates...");
@@ -170,30 +223,7 @@ export default function CalendarConnections() {
     }, 1500);
   };
 
-  // Render checkbox checkmark or warning box
-  const renderStatusItem = (val: string) => {
-    if (val === "supported") {
-      return (
-        <div className="w-5 h-5 rounded bg-emerald-600 flex items-center justify-center text-white">
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="3.5" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-          </svg>
-        </div>
-      );
-    }
-    if (val === "warning") {
-      return (
-        <div className="w-5 h-5 flex items-center justify-center text-amber-500">
-          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-            <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-          </svg>
-        </div>
-      );
-    }
-    return <span className="text-zinc-600 font-medium text-xs font-mono-stat">{val}</span>;
-  };
-
-  const hasAnyConnection = Object.values(connectedProviders).some(Boolean);
+  const hasAnyConnection = Object.values(connectedProviders).some(Boolean) || isCalendlyConnected;
 
   return (
     <div className="space-y-8 w-full">
@@ -208,9 +238,10 @@ export default function CalendarConnections() {
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {providersList.map((prov) => {
-            const isConnected = !!connectedProviders[prov.name];
-            const isConnecting = !!connectingProviders[prov.name];
-            
+            const isGoogleOrOutlookOrApple = ["Google Calendar", "Microsoft Outlook", "Apple Calendar"].includes(prov.name);
+            const isConnected = prov.name === "Calendly" ? isCalendlyConnected : !!connectedProviders[prov.name];
+            const isConnecting = prov.name === "Calendly" ? isCalendlyLoading : !!connectingProviders[prov.name];
+
             return (
               <Card key={prov.name} className="border-zinc-200 shadow-none flex flex-col justify-between hover:border-zinc-300 transition-all duration-200 bg-white p-5 rounded-xl">
                 <div>
@@ -224,27 +255,39 @@ export default function CalendarConnections() {
                       <span className="text-[10px] text-zinc-400 font-medium uppercase font-mono-stat tracking-wider">Inactive</span>
                     )}
                   </div>
-                  
+
                   <h3 className="font-bold text-zinc-900 text-sm">{prov.name}</h3>
                   <p className="text-zinc-500 text-xs mt-1.5 leading-relaxed min-h-[48px] line-clamp-3">
-                    {prov.desc}
+                    {prov.name === "Calendly" && isConnected ? `Connected scheduling: ${calendlyUrl}` : prov.desc}
                   </p>
 
-                  {/* If connected and requires calendar selection */}
-                  {isConnected && prov.requiresCalSelector && (
+                  {/* Calendar/Event selector when connected */}
+                  {isConnected && (isGoogleOrOutlookOrApple || prov.name === "Calendly") && (
                     <div className="mt-3 pt-3 border-t border-zinc-100 space-y-1">
-                      <Label className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">Select Calendar</Label>
-                      <Select 
-                        value={activeCalendars[prov.name] || "primary"} 
-                        onValueChange={(val) => setActiveCalendars(prev => ({...prev, [prov.name]: val}))}
+                      <Label className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">
+                        {prov.name === "Calendly" ? "Sync Event Type" : "Select Calendar"}
+                      </Label>
+                      <Select
+                        value={activeCalendars[prov.name] || "primary"}
+                        onValueChange={(val) => setActiveCalendars(prev => ({ ...prev, [prov.name]: val }))}
                       >
                         <SelectTrigger className="h-7 text-[10px] shadow-none py-1">
-                          <SelectValue placeholder="Select calendar" />
+                          <SelectValue placeholder={prov.name === "Calendly" ? "Select Event Type" : "Select calendar"} />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="primary">Primary Calendar (Default)</SelectItem>
-                          <SelectItem value="work">Work Meetings</SelectItem>
-                          <SelectItem value="bookings">Voice Agent Bookings</SelectItem>
+                          {prov.name === "Calendly" ? (
+                            <>
+                              <SelectItem value="primary">Quick Consultation (Default)</SelectItem>
+                              <SelectItem value="work">Product Sales Demo</SelectItem>
+                              <SelectItem value="bookings">15 Min Support Sync</SelectItem>
+                            </>
+                          ) : (
+                            <>
+                              <SelectItem value="primary">Primary Calendar (Default)</SelectItem>
+                              <SelectItem value="work">Work Meetings</SelectItem>
+                              <SelectItem value="bookings">Voice Agent Bookings</SelectItem>
+                            </>
+                          )}
                         </SelectContent>
                       </Select>
                     </div>
@@ -255,7 +298,17 @@ export default function CalendarConnections() {
                   <Button
                     variant={isConnected ? "outline" : "default"}
                     size="sm"
-                    onClick={() => simulateConnection(prov.name)}
+                    onClick={() => {
+                      if (prov.name === "Calendly") {
+                        if (isConnected) {
+                          handleDisconnectCalendly();
+                        } else {
+                          handleConnectCalendly();
+                        }
+                      } else {
+                        simulateConnection(prov.name);
+                      }
+                    }}
                     disabled={isConnecting}
                     className="w-full text-xs h-8 font-semibold shadow-none"
                   >
@@ -303,7 +356,7 @@ export default function CalendarConnections() {
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            
+
             {/* Toggle 1: Auto Schedule */}
             <div className="flex items-center justify-between p-3 rounded-lg border border-zinc-150 bg-zinc-50 hover:bg-zinc-100/50 transition-colors">
               <div className="space-y-0.5">

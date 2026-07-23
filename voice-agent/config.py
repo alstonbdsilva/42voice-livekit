@@ -118,6 +118,11 @@ class Settings(BaseSettings):
     # Fallback Media Configuration
     fallback_audio_url: str = Field(default="https://www.w3schools.com/html/horse.mp3", validation_alias="FALLBACK_AUDIO_URL")
 
+    # Calendly Integration Settings
+    calendly_client_id: Optional[str] = Field(default=None, validation_alias="CALENDLY_CLIENT_ID")
+    calendly_client_secret: Optional[str] = Field(default=None, validation_alias="CALENDLY_CLIENT_SECRET")
+    calendly_redirect_uri: Optional[str] = Field(default=None, validation_alias="CALENDLY_REDIRECT_URI")
+    calendly_encryption_key: Optional[str] = Field(default=None, validation_alias="CALENDLY_ENCRYPTION_KEY")
     
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
