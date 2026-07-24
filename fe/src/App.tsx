@@ -32,6 +32,8 @@ import AuditLogs from "@/pages/AuditLogs";
 import Settings from "@/pages/Settings";
 import Commissions from "@/pages/Commissions";
 import Plans from "@/pages/Plans";
+import PhoneNumbers from "@/pages/PhoneNumbers";
+import Outbound from "@/pages/Outbound";
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
@@ -61,6 +63,8 @@ export default function App() {
           <Route path="/conversations/:id" element={<Shell><ConversationDetail /></Shell>} />
           <Route path="/recordings" element={<Shell><Recordings /></Shell>} />
           <Route path="/messages" element={<Shell><Messages /></Shell>} />
+          <Route path="/phone-numbers" element={<Shell><PhoneNumbers /></Shell>} />
+          <Route path="/outbound" element={<Shell><Outbound /></Shell>} />
           <Route path="/invoices" element={<Shell><Invoices /></Shell>} />
           <Route path="/invoices/:id" element={<Shell><InvoiceDetail /></Shell>} />
           <Route path="/plans" element={<Shell><Plans /></Shell>} />

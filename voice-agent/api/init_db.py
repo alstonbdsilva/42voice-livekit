@@ -389,6 +389,9 @@ async def init_db() -> None:
                 
                 ALTER TABLE clients ADD COLUMN IF NOT EXISTS minutes_balance INTEGER NOT NULL DEFAULT 0;
                 ALTER TABLE clients ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(255);
+
+                ALTER TABLE calendar_integrations ADD COLUMN IF NOT EXISTS refresh_token TEXT;
+                ALTER TABLE calendar_integrations ADD COLUMN IF NOT EXISTS provider_user_id VARCHAR(255);
             """)
             
         logger.info("Tables created and roles seeded successfully.")

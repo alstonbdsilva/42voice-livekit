@@ -5,7 +5,7 @@ import { LucideIcon } from "lucide-react";
 import {
   LayoutDashboard, Users, Briefcase, Bot, MessageSquare, Mic, FileText,
   Receipt, CreditCard, FileSignature, RefreshCw, Bell, BarChart3, Settings,
-  ChevronDown, Search, LogOut, Wallet, ScrollText
+  ChevronDown, Search, LogOut, Wallet, ScrollText, Phone, PhoneCall
 } from "lucide-react";
 
 interface NavLinkItem {
@@ -14,6 +14,7 @@ interface NavLinkItem {
   icon: LucideIcon;
   roles: string[];
   section?: never;
+  comingSoon?: boolean;
 }
 
 interface NavSectionItem {
@@ -36,6 +37,8 @@ const navItems: NavItem[] = [
   { to: "/conversations", label: "Conversations", icon: MessageSquare, roles: [] },
   { to: "/recordings", label: "Recordings", icon: Mic, roles: [] },
   { to: "/messages", label: "Messages", icon: MessageSquare, roles: [] },
+  { to: "/phone-numbers", label: "Phone Numbers", icon: Phone, roles: [], comingSoon: true },
+  { to: "/outbound", label: "Outbound Dialer", icon: PhoneCall, roles: [] },
   { section: "FINANCE" },
   { to: "/plans", label: "Plans", icon: ScrollText, roles: [] },
   { to: "/invoices", label: "Invoices", icon: Receipt, roles: [] },
@@ -72,6 +75,37 @@ function Sidebar() {
           if (it.to === undefined) return null;
           if (!canSee(user, it.roles)) return null;
           const Icon = it.icon;
+          if (it.comingSoon) {
+            return (
+              <NavLink
+                key={it.to}
+                to={it.to}
+                data-testid={`nav-${it.to.replace("/", "")}`}
+                className={({ isActive }) =>
+                  `flex items-center justify-between px-3 py-2 text-sm rounded-sm transition-colors ${isActive
+                    ? "bg-zinc-950 text-white"
+                    : "text-zinc-700 hover:bg-zinc-100 hover:text-zinc-950"
+                  }`
+                }
+              >
+                {({ isActive }) => (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <Icon className="w-4 h-4" />
+                      <span>{it.label}</span>
+                    </div>
+                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-sm uppercase tracking-wider scale-90 origin-right transition-colors ${
+                      isActive 
+                        ? "bg-zinc-800 text-zinc-300" 
+                        : "bg-zinc-100 text-zinc-500"
+                    }`}>
+                      Soon
+                    </span>
+                  </>
+                )}
+              </NavLink>
+            );
+          }
           return (
             <NavLink
               key={it.to}

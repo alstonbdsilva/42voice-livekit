@@ -16,3 +16,13 @@
 {"timestamp":"2026-07-23T18:12:04","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
 {"timestamp":"2026-07-23T18:27:09","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
 {"timestamp":"2026-07-23T18:33:00","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-23T18:47:43","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-24T06:37:46","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-24T06:57:29","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-24T06:57:29","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-24T06:57:36","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-24T07:02:35","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-24T07:02:48","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 79f2676c-4677-4e79-9158-6b13ed4a45fe - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-24T07:17:05","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 79f2676c-4677-4e79-9158-6b13ed4a45fe - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-24T07:17:05","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 79f2676c-4677-4e79-9158-6b13ed4a45fe - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-24T07:17:15","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: fcae4655-bbba-4329-87cb-b4edd52dfcd0 - IP: 127.0.0.1 - Payload: None"}

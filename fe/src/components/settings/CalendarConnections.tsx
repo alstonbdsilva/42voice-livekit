@@ -130,10 +130,10 @@ export default function CalendarConnections() {
   // Load existing configuration status from API
   const fetchCalendlyStatus = () => {
     api.get("/integrations/calendly")
-      .then((res) => {
-        if (res.data && res.data.data && res.data.data.connected) {
+      .then((res: any) => {
+        if (res && res.data && res.data.connected) {
           setIsCalendlyConnected(true);
-          setCalendlyUrl(res.data.data.eventTypeUrl || "");
+          setCalendlyUrl(res.data.eventTypeUrl || "");
         } else {
           setIsCalendlyConnected(false);
           setCalendlyUrl("");
