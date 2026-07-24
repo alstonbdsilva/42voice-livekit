@@ -124,6 +124,12 @@ class Settings(BaseSettings):
     calendly_redirect_uri: Optional[str] = Field(default=None, validation_alias="CALENDLY_REDIRECT_URI")
     calendly_encryption_key: Optional[str] = Field(default=None, validation_alias="CALENDLY_ENCRYPTION_KEY")
     
+    # Google Calendar Integration Settings
+    google_calendar_client_id: Optional[str] = Field(default=None, validation_alias="GOOGLE_CALENDAR_CLIENT_ID")
+    google_calendar_client_secret: Optional[str] = Field(default=None, validation_alias="GOOGLE_CALENDAR_CLIENT_SECRET")
+    google_calendar_redirect_uri: Optional[str] = Field(default=None, validation_alias="GOOGLE_CALENDAR_REDIRECT_URI")
+    google_calendar_encryption_key: Optional[str] = Field(default=None, validation_alias="GOOGLE_CALENDAR_ENCRYPTION_KEY")
+    
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
         env_file_encoding="utf-8",

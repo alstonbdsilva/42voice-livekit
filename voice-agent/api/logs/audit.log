@@ -26,3 +26,4 @@
 {"timestamp":"2026-07-24T07:17:05","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 79f2676c-4677-4e79-9158-6b13ed4a45fe - IP: 127.0.0.1 - Payload: None"}
 {"timestamp":"2026-07-24T07:17:05","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 79f2676c-4677-4e79-9158-6b13ed4a45fe - IP: 127.0.0.1 - Payload: None"}
 {"timestamp":"2026-07-24T07:17:15","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: fcae4655-bbba-4329-87cb-b4edd52dfcd0 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-24T14:45:23","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}

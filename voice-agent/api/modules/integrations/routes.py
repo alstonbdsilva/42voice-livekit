@@ -13,6 +13,8 @@ from api.utils.api_response import ApiResponse
 from api.utils.encryption import token_encryptor
 from api.utils.calendly import CalendlyClient
 from config import get_settings
+import httpx
+import json
 
 logger = logging.getLogger("voice-agent.api.modules.integrations")
 router = APIRouter()
@@ -101,6 +103,101 @@ class CalendlyAuthService:
                     return new_tokens["access_token"]
             except Exception as e:
                 logger.error(f"Failed to auto-refresh Calendly credentials: {e}")
+                
+        return access_token
+
+
+class GoogleAuthService:
+    @staticmethod
+    def generate_state_token(user_id: str, client_id: Optional[str], provider: str = "google") -> str:
+        """Create a signed JWT state token for OAuth CSRF protection."""
+        settings = get_settings()
+        payload = {
+            "user_id": user_id,
+            "client_id": client_id,
+            "provider": provider,
+            "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=15)
+        }
+        return jwt.encode(payload, settings.jwt_access_secret, algorithm="HS256")
+
+    @staticmethod
+    def verify_state_token(state: str) -> Dict[str, Any]:
+        """Decode and verify the state token."""
+        settings = get_settings()
+        try:
+            return jwt.decode(state, settings.jwt_access_secret, algorithms=["HS256"])
+        except jwt.ExpiredSignatureError:
+            logger.error("OAuth state token has expired")
+            raise HTTPException(status_code=400, detail="State token expired")
+        except jwt.InvalidTokenError:
+            logger.error("OAuth state token is invalid")
+            raise HTTPException(status_code=400, detail="State token invalid")
+
+    @staticmethod
+    async def get_active_token(client_id: Optional[str], user_id: str, provider: str) -> Optional[str]:
+        """Retrieves a decrypted, validated access token."""
+        if client_id:
+            rows = await database.query(
+                "SELECT access_token, refresh_token, updated_at FROM calendar_integrations WHERE client_id = $1 AND provider = $2",
+                [uuid.UUID(client_id), provider]
+            )
+        else:
+            rows = await database.query(
+                "SELECT access_token, refresh_token, updated_at FROM calendar_integrations WHERE user_id = $1 AND provider = $2",
+                [uuid.UUID(user_id), provider]
+            )
+
+        if not rows:
+            return None
+
+        integration = rows[0]
+        encrypted_access = integration["access_token"]
+        encrypted_refresh = integration["refresh_token"]
+        updated_at = integration["updated_at"]
+
+        try:
+            access_token = token_encryptor.decrypt(encrypted_access)
+        except Exception:
+            logger.error(f"Failed to decrypt {provider} access token")
+            return None
+
+        # Google OAuth access tokens expire in 1 hour (3600 seconds)
+        age = datetime.datetime.now(datetime.timezone.utc) - updated_at.astimezone(datetime.timezone.utc)
+        if age > datetime.timedelta(minutes=50) and encrypted_refresh:
+            try:
+                refresh_token = token_encryptor.decrypt(encrypted_refresh)
+                logger.info(f"{provider} access token expired. Attempting refresh...")
+                
+                settings = get_settings()
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        "https://oauth2.googleapis.com/token",
+                        data={
+                            "client_id": settings.google_calendar_client_id,
+                            "client_secret": settings.google_calendar_client_secret,
+                            "refresh_token": refresh_token,
+                            "grant_type": "refresh_token"
+                        }
+                    )
+                
+                if response.status_code == 200:
+                    tokens = response.json()
+                    new_access = token_encryptor.encrypt(tokens["access_token"])
+                    new_refresh = token_encryptor.encrypt(tokens.get("refresh_token", refresh_token))
+                    
+                    if client_id:
+                        await database.query(
+                            "UPDATE calendar_integrations SET access_token = $1, refresh_token = $2, updated_at = CURRENT_TIMESTAMP WHERE client_id = $3 AND provider = $4",
+                            [new_access, new_refresh, uuid.UUID(client_id), provider]
+                        )
+                    else:
+                        await database.query(
+                            "UPDATE calendar_integrations SET access_token = $1, refresh_token = $2, updated_at = CURRENT_TIMESTAMP WHERE user_id = $3 AND provider = $4",
+                            [new_access, new_refresh, uuid.UUID(user_id), provider]
+                        )
+                    return tokens["access_token"]
+            except Exception as e:
+                logger.error(f"Failed to auto-refresh {provider} credentials: {e}")
                 
         return access_token
 
@@ -620,6 +717,311 @@ async def disconnect_calendly(current_user: Dict[str, Any] = Depends(get_current
         message="Calendly integration disconnected successfully",
         data={"connected": False}
     )
+
+
+@router.get("/google/auth")
+async def initiate_google_auth(user_id: str, client_id: Optional[str] = None):
+    """Initiates Google Calendar OAuth flow."""
+    settings = get_settings()
+    
+    if not settings.google_calendar_client_id or not settings.google_calendar_redirect_uri:
+        raise HTTPException(status_code=500, detail="Google Calendar OAuth not configured")
+    
+    state = GoogleAuthService.generate_state_token(user_id, client_id, "google")
+    auth_url = (
+        f"https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={settings.google_calendar_client_id}"
+        f"&redirect_uri={settings.google_calendar_redirect_uri}"
+        f"&response_type=code"
+        f"&scope=https://www.googleapis.com/auth/calendar"
+        f"&access_type=offline"
+        f"&state={state}"
+    )
+    return RedirectResponse(auth_url)
+
+
+@router.get("/google/callback")
+async def google_oauth_callback(code: str, state: str):
+    """Callback endpoint handles code-token exchange."""
+    state_payload = GoogleAuthService.verify_state_token(state)
+    user_id = state_payload["user_id"]
+    client_id = state_payload.get("client_id")
+    
+    settings = get_settings()
+    
+    # Exchange code for tokens
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": settings.google_calendar_client_id,
+                "client_secret": settings.google_calendar_client_secret,
+                "code": code,
+                "grant_type": "authorization_code",
+                "redirect_uri": settings.google_calendar_redirect_uri
+            }
+        )
+    
+    if response.status_code != 200:
+        return HTMLResponse(
+            status_code=400,
+            content=get_error_html("Failed to exchange authorization code for tokens.")
+        )
+    
+    tokens = response.json()
+    access_token = tokens["access_token"]
+    refresh_token = tokens.get("refresh_token", "")
+    
+    # Encrypt tokens
+    encrypted_access = token_encryptor.encrypt(access_token)
+    encrypted_refresh = token_encryptor.encrypt(refresh_token)
+    
+    client_uuid = uuid.UUID(client_id) if client_id else None
+    user_uuid = uuid.UUID(user_id)
+    
+    # Store in database
+    if client_uuid:
+        await database.query(
+            """INSERT INTO calendar_integrations (client_id, provider, access_token, refresh_token, event_type_url, is_active)
+               VALUES ($1, 'google', $2, $3, 'primary', TRUE)
+               ON CONFLICT (client_id, provider) 
+               DO UPDATE SET access_token = $2, refresh_token = $3, is_active = TRUE, updated_at = CURRENT_TIMESTAMP""",
+            [client_uuid, encrypted_access, encrypted_refresh]
+        )
+    else:
+        await database.query(
+            """INSERT INTO calendar_integrations (user_id, provider, access_token, refresh_token, event_type_url, is_active)
+               VALUES ($1, 'google', $2, $3, 'primary', TRUE)
+               ON CONFLICT (user_id, provider) 
+               DO UPDATE SET access_token = $2, refresh_token = $3, is_active = TRUE, updated_at = CURRENT_TIMESTAMP""",
+            [user_uuid, encrypted_access, encrypted_refresh]
+        )
+    
+    return HTMLResponse(content="""
+        <html>
+          <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #fafafa;">
+            <div style="text-align: center; border: 1px solid #e4e4e7; background: white; padding: 2.5rem; border-radius: 16px; max-width: 380px;">
+              <div style="width: 48px; height: 48px; border-radius: 50%; background: #ecfdf5; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 1rem;">
+                <svg style="width: 24px; height: 24px; color: #10b981;" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <h2 style="color: #18181b; margin: 0 0 0.5rem 0; font-size: 1.25rem; font-weight: 700;">Google Calendar Connected!</h2>
+              <p style="color: #71717a; margin: 0; font-size: 0.875rem; line-height: 1.5;">You have successfully connected Google Calendar. This window will close automatically.</p>
+              <script>
+                window.opener.postMessage({ type: "GOOGLE_CALENDAR_CONNECTED" }, "*");
+                setTimeout(() => window.close(), 1500);
+              </script>
+            </div>
+          </body>
+        </html>
+    """)
+
+
+@router.get("/google/status")
+async def get_google_status(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Fetches Google Calendar connection status."""
+    client_id = current_user.get("client_id")
+    user_id = current_user.get("id")
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    access_token = await GoogleAuthService.get_active_token(client_id, user_id, "google")
+    if not access_token:
+        return ApiResponse.success(
+            status_code=200,
+            message="Google Calendar not connected",
+            data={"connected": False}
+        )
+    
+    return ApiResponse.success(
+        status_code=200,
+        message="Google Calendar connected",
+        data={"connected": True}
+    )
+
+
+@router.delete("/google")
+async def disconnect_google(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Disconnects Google Calendar integration."""
+    client_id = current_user.get("client_id")
+    user_id = current_user.get("id")
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    if client_id:
+        await database.query(
+            "DELETE FROM calendar_integrations WHERE client_id = $1 AND provider = 'google'",
+            [uuid.UUID(client_id)]
+        )
+    else:
+        await database.query(
+            "DELETE FROM calendar_integrations WHERE user_id = $1 AND provider = 'google'",
+            [uuid.UUID(user_id)]
+        )
+    
+    return ApiResponse.success(
+        status_code=200,
+        message="Google Calendar disconnected successfully"
+    )
+
+
+@router.get("/calendars")
+async def list_calendars(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """List all connected calendar integrations."""
+    user_id = current_user.get("id")
+    client_id = current_user.get("client_id")
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    calendars = []
+    
+    try:
+        # Fetch Calendly
+        if client_id:
+            calendly_rows = await database.query(
+                "SELECT id, provider, is_active FROM calendar_integrations WHERE client_id = $1 AND provider = 'calendly'",
+                [uuid.UUID(client_id)]
+            )
+        else:
+            calendly_rows = await database.query(
+                "SELECT id, provider, is_active FROM calendar_integrations WHERE user_id = $1 AND provider = 'calendly'",
+                [uuid.UUID(user_id)]
+            )
+        
+        for row in calendly_rows:
+            if row["is_active"]:
+                calendars.append({
+                    "id": str(row["id"]),
+                    "provider": "Calendly",
+                    "name": "Calendly"
+                })
+        
+        # Fetch Google Calendar
+        if client_id:
+            google_rows = await database.query(
+                "SELECT id, provider, is_active FROM calendar_integrations WHERE client_id = $1 AND provider = 'google'",
+                [uuid.UUID(client_id)]
+            )
+        else:
+            google_rows = await database.query(
+                "SELECT id, provider, is_active FROM calendar_integrations WHERE user_id = $1 AND provider = 'google'",
+                [uuid.UUID(user_id)]
+            )
+        
+        for row in google_rows:
+            if row["is_active"]:
+                calendars.append({
+                    "id": str(row["id"]),
+                    "provider": "Google Calendar",
+                    "name": "Google Calendar"
+                })
+        
+        return ApiResponse.success(
+            status_code=200,
+            message="Calendars retrieved successfully",
+            data={"calendars": calendars}
+        )
+    
+    except Exception as e:
+        logger.error(f"Error listing calendars: {e}")
+        return ApiResponse.success(
+            status_code=200,
+            message="No calendars found",
+            data={"calendars": []}
+        )
+
+
+@router.get("/knowledge-bases")
+async def list_knowledge_bases(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """List all knowledge bases for the current user."""
+    user_id = current_user.get("id")
+    client_id = current_user.get("client_id")
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    knowledge_bases = []
+    
+    try:
+        if client_id:
+            kb_rows = await database.query(
+                "SELECT id, name FROM knowledge_bases WHERE client_id = $1 ORDER BY created_at DESC",
+                [uuid.UUID(client_id)]
+            )
+        else:
+            kb_rows = await database.query(
+                "SELECT id, name FROM knowledge_bases WHERE user_id = $1 ORDER BY created_at DESC",
+                [uuid.UUID(user_id)]
+            )
+        
+        for row in kb_rows:
+            knowledge_bases.append({
+                "id": str(row["id"]),
+                "name": row["name"]
+            })
+        
+        return ApiResponse.success(
+            status_code=200,
+            message="Knowledge bases retrieved successfully",
+            data={"knowledgeBases": knowledge_bases}
+        )
+    
+    except Exception as e:
+        logger.error(f"Error listing knowledge bases: {e}")
+        return ApiResponse.success(
+            status_code=200,
+            message="No knowledge bases found",
+            data={"knowledgeBases": []}
+        )
+
+
+@router.get("/phone-numbers")
+async def list_phone_numbers(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """List all phone numbers available for the current user."""
+    user_id = current_user.get("id")
+    client_id = current_user.get("client_id")
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    phone_numbers = []
+    
+    try:
+        if client_id:
+            phone_rows = await database.query(
+                "SELECT id, number, name FROM phone_numbers WHERE client_id = $1 AND is_active = TRUE ORDER BY created_at DESC",
+                [uuid.UUID(client_id)]
+            )
+        else:
+            phone_rows = await database.query(
+                "SELECT id, number, name FROM phone_numbers WHERE user_id = $1 AND is_active = TRUE ORDER BY created_at DESC",
+                [uuid.UUID(user_id)]
+            )
+        
+        for row in phone_rows:
+            phone_numbers.append({
+                "id": str(row["id"]),
+                "number": row["number"],
+                "name": row["name"]
+            })
+        
+        return ApiResponse.success(
+            status_code=200,
+            message="Phone numbers retrieved successfully",
+            data={"phoneNumbers": phone_numbers}
+        )
+    
+    except Exception as e:
+        logger.error(f"Error listing phone numbers: {e}")
+        return ApiResponse.success(
+            status_code=200,
+            message="No phone numbers found",
+            data={"phoneNumbers": []}
+        )
 
 
 def get_error_html(detail_msg: str) -> str:
