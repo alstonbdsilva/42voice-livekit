@@ -79,10 +79,10 @@ async def get_all_numbers(
             query_str += " AND status = 'available'"
     elif role == "CLIENT":
         if client_id:
-            query_str += " AND client_id = $1"
+            query_str += " AND (client_id = $1 OR status = 'available')"
             params.append(uuid.UUID(str(client_id)))
         else:
-            query_str += " AND 1=0"  # No access if client id missing
+            query_str += " AND status = 'available'"
     else:
         query_str += " AND 1=0"
         
