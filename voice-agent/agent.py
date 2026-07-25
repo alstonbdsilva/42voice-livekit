@@ -4,7 +4,7 @@ Listens for SIP room creation and manages the AI audio pipeline.
 """
 import asyncio
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -36,7 +36,7 @@ logger = logging.getLogger("voice-agent")
 class VoiceAgent(Agent):
     """Voice agent with orchestrator tools."""
     
-    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, ctx: JobContext, vad=None, out_of_credits: bool = False):
+    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, ctx: JobContext, vad=None, out_of_credits: bool = False, custom_prompt: Optional[str] = None, agent_name: str = "orchestrator"):
         self.session_manager = session_manager
         self.booking_agent = booking_agent
         self.sales_agent = sales_agent
@@ -44,13 +44,13 @@ class VoiceAgent(Agent):
         self.room_name = room_name
         self.participant_id = participant_id
         self.ctx = ctx
-        self.agent_name = "orchestrator"
+        self.agent_name = agent_name
         self.out_of_credits = out_of_credits
         self.intent_mapping = {
             "booking": "booking_agent",
             "sales": "sales_agent",
             "support": "support_agent",
-            "general": "orchestrator"
+            "general": agent_name
         }
         
         # Transcript tracking
@@ -69,7 +69,7 @@ class VoiceAgent(Agent):
         instructions = (
             "You are a billing notice voice. State that the account is out of credits and goodbye."
             if out_of_credits
-            else "You are the orchestrator agent. Start by asking how you can help the user today. Use your tools to route requests or handle booking, sales, and support."
+            else (custom_prompt if custom_prompt else "You are the orchestrator agent. Start by asking how you can help the user today. Use your tools to route requests or handle booking, sales, and support.")
         )
         
         super().__init__(
@@ -524,24 +524,55 @@ async def entrypoint(ctx: JobContext):
     participant = await ctx.wait_for_participant()
     logger.info(f"PARTICIPANT CONNECTED: {participant.identity}")
     
-    # 1. Run credit check
+    # 1. Run dynamic phone number configuration lookup and credit check
     import httpx
     backend_url = getattr(settings, 'backend_url', 'http://localhost:5000/api/v1')
     out_of_credits = False
+    custom_prompt = None
+    agent_name = "orchestrator"
     
-    try:
-        async with httpx.AsyncClient() as http_client:
-            credit_check_resp = await http_client.get(
-                f"{backend_url}/billing/check-credits?agent_name=orchestrator",
-                timeout=10.0
-            )
-            if credit_check_resp.status_code == 200:
-                credit_data = credit_check_resp.json()
-                if not credit_data.get("has_credits", True):
-                    logger.warning(f"Rejecting call: client/reseller has no minutes left. Balance: {credit_data.get('minutes_balance', 0)}")
-                    out_of_credits = True
-    except Exception as e:
-        logger.error(f"Error checking minutes balance: {e}")
+    # Try to resolve called number from participant attributes
+    called_number = participant.attributes.get("sip.trunkPhoneNumber")
+    logger.info(f"Checking incoming participant attributes: {participant.attributes}")
+    
+    if called_number:
+        logger.info(f"Inbound SIP call detected for number: {called_number}. Performing lookup...")
+        try:
+            async with httpx.AsyncClient() as http_client:
+                # Call internal lookup endpoint
+                lookup_resp = await http_client.get(
+                    f"{backend_url}/phone-numbers/lookup?number={called_number}",
+                    timeout=10.0
+                )
+                if lookup_resp.status_code == 200:
+                    lookup_data = lookup_resp.json()
+                    if lookup_data.get("exists", False):
+                        logger.info(f"Phone number config found: {lookup_data}")
+                        if not lookup_data.get("has_credits", True):
+                            logger.warning(f"Rejecting call: client/reseller has no credits balance. Balance: {lookup_data.get('minutes_balance', 0)}")
+                            out_of_credits = True
+                        custom_prompt = lookup_data.get("prompt")
+                        agent_name = lookup_data.get("agent_name", "orchestrator")
+                    else:
+                        logger.info("Dialed phone number is not registered in this system, using default orchestrator.")
+        except Exception as e:
+            logger.error(f"Error executing phone number lookup on backend: {e}")
+    else:
+        # Fallback to standard agent credits verification if not a SIP call
+        logger.info("No called number attribute found (non-SIP/Web connection). Performing standard check.")
+        try:
+            async with httpx.AsyncClient() as http_client:
+                credit_check_resp = await http_client.get(
+                    f"{backend_url}/billing/check-credits?agent_name=orchestrator",
+                    timeout=10.0
+                )
+                if credit_check_resp.status_code == 200:
+                    credit_data = credit_check_resp.json()
+                    if not credit_data.get("has_credits", True):
+                        logger.warning(f"Rejecting call: client/reseller has no minutes left. Balance: {credit_data.get('minutes_balance', 0)}")
+                        out_of_credits = True
+        except Exception as e:
+            logger.error(f"Error checking minutes balance: {e}")
 
     session_manager = SessionManager()
     booking_agent = BookingAgent(session_manager)
@@ -569,7 +600,9 @@ async def entrypoint(ctx: JobContext):
         participant_id=participant.identity,
         ctx=ctx,
         vad=ctx.proc.userdata["vad"],
-        out_of_credits=out_of_credits
+        out_of_credits=out_of_credits,
+        custom_prompt=custom_prompt,
+        agent_name=agent_name
     )
     
     # Initialize recording state

@@ -4,11 +4,12 @@ import { toast } from "sonner";
 import { 
   ArrowLeft, Phone, Info, Shield, Check, Server,
   Lock, Settings, HelpCircle, ToggleLeft, ToggleRight, Sparkles,
-  Users, Globe, DollarSign, Search, PlusCircle, RefreshCw
+  Users, Globe, DollarSign, Search, PlusCircle, RefreshCw, AlertCircle
 } from "lucide-react";
 import ClientService from "@/services/client.service";
 import ResellerService from "@/services/reseller.service";
 import TwilioService from "@/services/twilio.service";
+import PhoneNumberService from "@/services/phone-number.service";
 import { Client, Reseller } from "@/types";
 
 interface SIPConfig {
@@ -158,64 +159,34 @@ export default function AddPhoneNumber() {
 
     setIsActivating(true);
 
-    setTimeout(() => {
-      // Load numbers
-      const stored = localStorage.getItem("42voice_phone_numbers");
-      const currentNumbers = stored ? JSON.parse(stored) : [];
-
-      let finalStatus: "active" | "available" | "pending_sip" | "inactive" = "available";
-      let ownerId = "";
-      let ownerName = "";
-
-      if (statusOverride) {
-        finalStatus = statusOverride;
-      } else {
-        if (allocation === "me") {
-          finalStatus = "active";
-          ownerId = "super_admin";
-          ownerName = "Superadmin (Internal)";
-        } else if (allocation === "client") {
-          finalStatus = "active";
-          ownerId = assignedId;
-          ownerName = clients.find(c => String(c.id) === assignedId)?.name || "Assigned Client";
-        } else if (allocation === "reseller") {
-          finalStatus = "active";
-          ownerId = assignedId;
-          ownerName = resellers.find(r => String(r.id) === assignedId)?.name || "Assigned Reseller";
+    // Call PhoneNumberService to register number on backend and provision LiveKit
+    PhoneNumberService.register({
+      number: number.trim(),
+      name: name.trim() || `${provider} DID Line`,
+      provider: provider,
+      monthlyCost: parseFloat(monthlyCost) || 0,
+      setupCost: parseFloat(setupCost) || 0,
+      capabilities: { voice: voiceCapable, sms: smsCapable },
+      sipConfig: sipConfig,
+      allocation: allocation,
+      assignedId: assignedId || undefined,
+      draft: !!statusOverride
+    })
+      .then((res) => {
+        setIsActivating(false);
+        const warning = res?.data?.warning || res?.warning;
+        if (warning) {
+          toast.warning(`Registered but LiveKit warning: ${warning}`);
         } else {
-          finalStatus = "available"; // Published to Public Pool
+          toast.success(`DID ${number} registered and provisioned successfully!`);
         }
-      }
-
-      const newNumber = {
-        id: `num-${Date.now()}`,
-        number: number.trim(),
-        name: name.trim() || `${provider} DID Line`,
-        agentId: "",
-        status: finalStatus,
-        capabilities: { voice: voiceCapable, sms: smsCapable },
-        provider: provider,
-        monthlyCost: `$${parseFloat(monthlyCost).toFixed(2)}`,
-        setupCost: `$${parseFloat(setupCost).toFixed(2)}`,
-        ownerId,
-        ownerName,
-        sipConfig: finalStatus !== "inactive" ? sipConfig : undefined,
-        createdAt: new Date().toISOString()
-      };
-
-      localStorage.setItem("42voice_phone_numbers", JSON.stringify([...currentNumbers, newNumber]));
-      setIsActivating(false);
-      
-      if (finalStatus === "available") {
-        toast.success(`DID ${number} published to public lease pool successfully!`);
-      } else if (finalStatus === "active") {
-        toast.success(`DID ${number} registered and assigned to ${ownerName}!`);
-      } else {
-        toast.info(`DID ${number} registered as draft.`);
-      }
-      
-      navigate("/phone-numbers");
-    }, 1050);
+        navigate("/phone-numbers");
+      })
+      .catch((err) => {
+        setIsActivating(false);
+        const errMsg = err?.response?.data?.message || err?.message || "Failed to register number.";
+        toast.error(`Registration failed: ${errMsg}`);
+      });
   };
 
   return (
@@ -290,6 +261,23 @@ export default function AddPhoneNumber() {
                   className="w-full bg-zinc-50 border border-zinc-200 rounded-sm pl-8 pr-3 py-1.5 text-xs focus:outline-none focus:border-zinc-950 focus:bg-white font-mono"
                 />
               </div>
+              {(() => {
+                const cleanNum = number.replace(/[\s\-\(\)]/g, "");
+                const match = cleanNum.match(/^\+(\d{1,3})0(\d+)/);
+                if (match) {
+                  const countryCode = match[1];
+                  const suggested = `+${countryCode}${cleanNum.substring(countryCode.length + 2)}`;
+                  return (
+                    <div className="mt-1.5 p-2 bg-amber-50/80 border border-amber-200/60 rounded-sm flex items-start gap-2">
+                      <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5 animate-bounce" />
+                      <div className="text-[10px] text-amber-700 leading-normal">
+                        <strong>Formatting Alert:</strong> E.164 standard formats omit the local trunk prefix <code>0</code>. Use <strong>{suggested}</strong> instead of <strong>{cleanNum}</strong> (the system will normalize this automatically).
+                      </div>
+                    </div>
+                  );
+                }
+                return null;
+              })()}
             </div>
 
             {/* Name Input */}

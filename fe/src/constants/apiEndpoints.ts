@@ -14,6 +14,7 @@ export const API_ENDPOINTS = {
   COMMISSIONS: "/commissions",
   DASHBOARD_MONEY: "/dashboard/money",
   DASHBOARD_SUMMARY: "/dashboard/summary",
+  PHONE_NUMBERS: "/phone-numbers",
 } as const;
 
 export type ApiEndpoints = typeof API_ENDPOINTS;

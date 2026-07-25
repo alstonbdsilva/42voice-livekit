@@ -344,6 +344,29 @@ CREATE TABLE IF NOT EXISTS calendar_webhooks (
 
 CREATE INDEX IF NOT EXISTS idx_calendar_webhooks_integration ON calendar_webhooks(integration_id);
 CREATE INDEX IF NOT EXISTS idx_calendar_webhooks_processed ON calendar_webhooks(processed);
+
+CREATE TABLE IF NOT EXISTS phone_numbers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    number VARCHAR(50) UNIQUE NOT NULL,
+    name VARCHAR(255),
+    provider VARCHAR(50) NOT NULL,
+    monthly_cost NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    setup_cost NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    status VARCHAR(50) NOT NULL DEFAULT 'available',
+    capabilities JSONB NOT NULL DEFAULT '{"voice": true, "sms": true}'::jsonb,
+    client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
+    reseller_id UUID REFERENCES resellers(id) ON DELETE SET NULL,
+    agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
+    sip_config JSONB,
+    lk_sip_trunk_id VARCHAR(255),
+    lk_sip_dispatch_rule_id VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_phone_numbers_number ON phone_numbers(number);
+CREATE INDEX IF NOT EXISTS idx_phone_numbers_client ON phone_numbers(client_id);
+CREATE INDEX IF NOT EXISTS idx_phone_numbers_agent ON phone_numbers(agent_id);
 """
 
 seed_roles_sql = """

@@ -43,6 +43,34 @@ async def init_pool() -> None:
             ssl=ssl_ctx
         )
         logger.info("PostgreSQL connection pool initialized successfully")
+        
+        # Self-healing migration for phone_numbers table
+        logger.info("Verifying phone_numbers table exists...")
+        async with pool.acquire() as conn:
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS phone_numbers (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                number VARCHAR(50) UNIQUE NOT NULL,
+                name VARCHAR(255),
+                provider VARCHAR(50) NOT NULL,
+                monthly_cost NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+                setup_cost NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+                status VARCHAR(50) NOT NULL DEFAULT 'available',
+                capabilities JSONB NOT NULL DEFAULT '{"voice": true, "sms": true}'::jsonb,
+                client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
+                reseller_id UUID REFERENCES resellers(id) ON DELETE SET NULL,
+                agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
+                sip_config JSONB,
+                lk_sip_trunk_id VARCHAR(255),
+                lk_sip_dispatch_rule_id VARCHAR(255),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_phone_numbers_number ON phone_numbers(number);
+            CREATE INDEX IF NOT EXISTS idx_phone_numbers_client ON phone_numbers(client_id);
+            CREATE INDEX IF NOT EXISTS idx_phone_numbers_agent ON phone_numbers(agent_id);
+            """)
+        logger.info("Verified phone_numbers table and indexes.")
     except Exception as e:
         logger.critical(f"Failed to initialize PostgreSQL pool: {e}")
         raise

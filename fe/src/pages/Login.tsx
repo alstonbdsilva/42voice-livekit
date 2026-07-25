@@ -43,7 +43,7 @@ export default function Login() {
         <div className="relative z-10">
           <div className="label-tiny text-zinc-400 mb-4">ENTERPRISE OPERATIONS</div>
           <h1 className="font-display text-5xl font-bold leading-[1.05] tracking-tight">
-            The financial<br />command centre<br />for AI voice.
+            The 42Voice<br />command centre<br />for AI voice.
           </h1>
           <p className="mt-6 text-zinc-400 text-sm max-w-md leading-relaxed">
             Manage every reseller, client, agent, invoice and renewal in one disciplined workspace.

@@ -32,3 +32,6 @@
 {"timestamp":"2026-07-24T14:39:00","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
 {"timestamp":"2026-07-24T17:00:48","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
 {"timestamp":"2026-07-25T17:44:05","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-25T18:49:34","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-25T18:49:37","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-25T18:52:12","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
