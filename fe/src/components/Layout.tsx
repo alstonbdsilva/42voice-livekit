@@ -31,13 +31,13 @@ const navItems: NavItem[] = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, roles: [] },
   { to: "/money", label: "Money Dashboard", icon: Wallet, roles: ["super_admin", "finance_admin"] },
   { section: "OPERATIONS" },
-  { to: "/resellers", label: "partners", icon: Users, roles: ["super_admin", "finance_admin"] },
+  { to: "/resellers", label: "Partners", icon: Users, roles: ["super_admin", "finance_admin"] },
   { to: "/clients", label: "Clients", icon: Briefcase, roles: ["super_admin", "finance_admin", "reseller"] },
   { to: "/agents", label: "AI Agents", icon: Bot, roles: [] },
   { to: "/conversations", label: "Conversations", icon: MessageSquare, roles: [] },
   { to: "/recordings", label: "Recordings", icon: Mic, roles: [] },
   { to: "/messages", label: "Messages", icon: MessageSquare, roles: [] },
-  { to: "/phone-numbers", label: "Phone Numbers", icon: Phone, roles: [], comingSoon: true },
+  { to: "/phone-numbers", label: "Phone Numbers", icon: Phone, roles: [] },
   { to: "/outbound", label: "Outbound Dialer", icon: PhoneCall, roles: [] },
   { section: "FINANCE" },
   { to: "/plans", label: "Plans", icon: ScrollText, roles: [] },
@@ -94,11 +94,10 @@ function Sidebar() {
                       <Icon className="w-4 h-4" />
                       <span>{it.label}</span>
                     </div>
-                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-sm uppercase tracking-wider scale-90 origin-right transition-colors ${
-                      isActive 
-                        ? "bg-zinc-800 text-zinc-300" 
+                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-sm uppercase tracking-wider scale-90 origin-right transition-colors ${isActive
+                        ? "bg-zinc-800 text-zinc-300"
                         : "bg-zinc-100 text-zinc-500"
-                    }`}>
+                      }`}>
                       Soon
                     </span>
                   </>
@@ -186,7 +185,7 @@ export default function Layout({ children }: { children: ReactNode }) {
       <Sidebar />
       <div className="flex-1 min-w-0 flex flex-col">
         <Topbar />
-        <main className="flex-1 p-6 md:p-8 max-w-[1600px] w-full mx-auto" data-testid="page-content">{children}</main>
+        <main className="flex-1 p-6 md:p-8 w-full" data-testid="page-content">{children}</main>
       </div>
     </div>
   );

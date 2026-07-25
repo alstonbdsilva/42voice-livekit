@@ -33,6 +33,7 @@ import Settings from "@/pages/Settings";
 import Commissions from "@/pages/Commissions";
 import Plans from "@/pages/Plans";
 import PhoneNumbers from "@/pages/PhoneNumbers";
+import AddPhoneNumber from "@/pages/AddPhoneNumber";
 import Outbound from "@/pages/Outbound";
 
 function Shell({ children }: { children: React.ReactNode }) {
@@ -46,40 +47,41 @@ function Shell({ children }: { children: React.ReactNode }) {
 export default function App() {
   return (
     <BrowserRouter>
-        <Toaster richColors position="top-right" />
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/forgot-password" element={<ForgotPassword />} />
-          <Route path="/" element={<Navigate to="/dashboard" replace />} />
-          <Route path="/dashboard" element={<Shell><Dashboard /></Shell>} />
-          <Route path="/money" element={<Shell><MoneyDashboard /></Shell>} />
-          <Route path="/clients" element={<Shell><Clients /></Shell>} />
-          <Route path="/clients/:id" element={<Shell><ClientDetail /></Shell>} />
-          <Route path="/resellers" element={<Shell><Resellers /></Shell>} />
-          <Route path="/resellers/:id" element={<Shell><ResellerDetail /></Shell>} />
-          <Route path="/agents" element={<Shell><Agents /></Shell>} />
-          <Route path="/agents/:id" element={<Shell><AgentDetail /></Shell>} />
-          <Route path="/conversations" element={<Shell><Conversations /></Shell>} />
-          <Route path="/conversations/:id" element={<Shell><ConversationDetail /></Shell>} />
-          <Route path="/recordings" element={<Shell><Recordings /></Shell>} />
-          <Route path="/messages" element={<Shell><Messages /></Shell>} />
-          <Route path="/phone-numbers" element={<Shell><PhoneNumbers /></Shell>} />
-          <Route path="/outbound" element={<Shell><Outbound /></Shell>} />
-          <Route path="/invoices" element={<Shell><Invoices /></Shell>} />
-          <Route path="/invoices/:id" element={<Shell><InvoiceDetail /></Shell>} />
-          <Route path="/plans" element={<Shell><Plans /></Shell>} />
-          <Route path="/payments" element={<Shell><Payments /></Shell>} />
-          <Route path="/contracts" element={<Shell><Contracts /></Shell>} />
-          <Route path="/contracts/:id" element={<Shell><ContractDetail /></Shell>} />
-          <Route path="/renewals" element={<Shell><Renewals /></Shell>} />
-          <Route path="/commissions" element={<Shell><Commissions /></Shell>} />
-          <Route path="/notifications" element={<Shell><Notifications /></Shell>} />
-          <Route path="/reports" element={<Shell><Reports /></Shell>} />
-          <Route path="/settings" element={<Shell><Settings /></Shell>} />
-          <Route path="/users" element={<Shell><Users /></Shell>} />
-          <Route path="/audit" element={<Shell><AuditLogs /></Shell>} />
-          <Route path="*" element={<Navigate to="/dashboard" replace />} />
-        </Routes>
-      </BrowserRouter>
+      <Toaster richColors position="top-right" />
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/dashboard" element={<Shell><Dashboard /></Shell>} />
+        <Route path="/money" element={<Shell><MoneyDashboard /></Shell>} />
+        <Route path="/clients" element={<Shell><Clients /></Shell>} />
+        <Route path="/clients/:id" element={<Shell><ClientDetail /></Shell>} />
+        <Route path="/resellers" element={<Shell><Resellers /></Shell>} />
+        <Route path="/resellers/:id" element={<Shell><ResellerDetail /></Shell>} />
+        <Route path="/agents" element={<Shell><Agents /></Shell>} />
+        <Route path="/agents/:id" element={<Shell><AgentDetail /></Shell>} />
+        <Route path="/conversations" element={<Shell><Conversations /></Shell>} />
+        <Route path="/conversations/:id" element={<Shell><ConversationDetail /></Shell>} />
+        <Route path="/recordings" element={<Shell><Recordings /></Shell>} />
+        <Route path="/messages" element={<Shell><Messages /></Shell>} />
+        <Route path="/phone-numbers" element={<Shell><PhoneNumbers /></Shell>} />
+        <Route path="/phone-numbers/add" element={<Shell><AddPhoneNumber /></Shell>} />
+        <Route path="/outbound" element={<Shell><Outbound /></Shell>} />
+        <Route path="/invoices" element={<Shell><Invoices /></Shell>} />
+        <Route path="/invoices/:id" element={<Shell><InvoiceDetail /></Shell>} />
+        <Route path="/plans" element={<Shell><Plans /></Shell>} />
+        <Route path="/payments" element={<Shell><Payments /></Shell>} />
+        <Route path="/contracts" element={<Shell><Contracts /></Shell>} />
+        <Route path="/contracts/:id" element={<Shell><ContractDetail /></Shell>} />
+        <Route path="/renewals" element={<Shell><Renewals /></Shell>} />
+        <Route path="/commissions" element={<Shell><Commissions /></Shell>} />
+        <Route path="/notifications" element={<Shell><Notifications /></Shell>} />
+        <Route path="/reports" element={<Shell><Reports /></Shell>} />
+        <Route path="/settings" element={<Shell><Settings /></Shell>} />
+        <Route path="/users" element={<Shell><Users /></Shell>} />
+        <Route path="/audit" element={<Shell><AuditLogs /></Shell>} />
+        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
