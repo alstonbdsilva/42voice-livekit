@@ -83,9 +83,13 @@ export function ClientOwnedTab({
                     <select
                       value={num.agentId}
                       onChange={(e) => onAgentChange(num.id, e.target.value)}
-                      className="bg-zinc-50 border border-zinc-200 rounded-sm px-2 py-1 text-xs text-zinc-800 focus:outline-none focus:border-zinc-950 font-medium"
+                      className={`bg-zinc-50 border rounded-sm px-2 py-1 text-xs focus:outline-none focus:border-zinc-950 font-medium ${
+                        num.agentId 
+                          ? "border-zinc-200 text-zinc-800" 
+                          : "border-red-300 text-red-600 bg-red-50"
+                      }`}
                     >
-                      <option value="">-- Sandbox Router --</option>
+                      <option value="">-- Unassigned (No Agent) --</option>
                       {agents.map((agent) => (
                         <option key={agent.id} value={agent.id}>
                           {agent.name}

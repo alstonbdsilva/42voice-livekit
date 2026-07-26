@@ -359,6 +359,9 @@ async def release_number(id: str, current_user: Dict[str, Any] = Depends(get_cur
 async def assign_agent(id: str, req_body: AssignAgentRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     Assign an AI Agent to a leased phone number.
+    
+    IMPORTANT: An agent MUST be explicitly assigned. Phone numbers cannot remain unassigned.
+    If agentId is None/null, the phone number will remain in Unassigned state and will not accept calls.
     """
     role = current_user.get("role")
     client_id = current_user.get("client_id")
@@ -392,6 +395,9 @@ async def assign_agent(id: str, req_body: AssignAgentRequest, current_user: Dict
         agent_record = agent_rows[0]
         if not is_superadmin and client_id and str(agent_record["client_id"]) != str(client_id):
             return ApiResponse.error(403, "You cannot assign an agent that belongs to another client.", "FORBIDDEN_AGENT_ASSIGNMENT")
+    else:
+        # If no agent is provided, return validation error
+        return ApiResponse.error(400, "No agents found. Please create an agent before assigning a phone number.", "NO_AGENT_PROVIDED")
             
     try:
         await database.query(
@@ -409,13 +415,14 @@ async def lookup_number(number: str):
     """
     Internal API Endpoint to lookup phone number metadata for incoming LiveKit SIP calls.
     Returns: client_id, agent_id, agent prompt configurations, and credits availability.
+    
+    IMPORTANT: Phone numbers MUST have an explicitly assigned agent.
+    Unassigned phone numbers are not routed and return an error response.
     """
     clean_number = number.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
     logger.info(f"Looking up phone routing for incoming SIP caller number: {clean_number}")
     
     # Query database matching the number
-    # We strip characters from db number in matching or do exact comparison since numbers in db are stored in clean format
-    # We will do a double match check: exact or stripped
     rows = await database.query(
         """SELECT * FROM phone_numbers 
            WHERE REPLACE(REPLACE(REPLACE(REPLACE(number, ' ', ''), '-', ''), '(', ''), ')', '') = $1
@@ -430,13 +437,30 @@ async def lookup_number(number: str):
             "has_credits": False,
             "client_id": None,
             "agent_id": None,
-            "prompt": "You are a standard voice agent. State that the number dialed is not configured."
+            "agent_name": None,
+            "agent_type": None,
+            "prompt": "This phone number is not configured in the system.",
+            "error": "PHONE_NUMBER_NOT_FOUND"
         }
         
     num_record = rows[0]
     client_uuid = num_record["client_id"]
     reseller_uuid = num_record["reseller_id"]
     agent_uuid = num_record["agent_id"]
+    
+    # CRITICAL: Verify agent is assigned. Unassigned phone numbers cannot accept calls.
+    if not agent_uuid:
+        logger.warning(f"Inbound call rejected: phone number {number} has no assigned agent (Unassigned state).")
+        return {
+            "exists": True,
+            "has_credits": False,
+            "client_id": str(client_uuid) if client_uuid else None,
+            "agent_id": None,
+            "agent_name": None,
+            "agent_type": None,
+            "prompt": "This phone number is not configured yet. Please contact support.",
+            "error": "UNASSIGNED_PHONE_NUMBER"
+        }
     
     # Check Credits Status
     has_credits = True
@@ -454,24 +478,31 @@ async def lookup_number(number: str):
             has_credits = minutes_balance > 0
             
     # Resolve linked agent details
-    prompt = "You are the default 42Voice orchestrator. Welcome the caller."
-    agent_name = "orchestrator"
-    agent_type = "general"
+    agent_rows = await database.query("SELECT * FROM agents WHERE id = $1", [agent_uuid])
+    if not agent_rows:
+        logger.error(f"Agent {agent_uuid} referenced by phone number {number} not found in database.")
+        return {
+            "exists": True,
+            "has_credits": False,
+            "client_id": str(client_uuid) if client_uuid else None,
+            "agent_id": str(agent_uuid),
+            "agent_name": None,
+            "agent_type": None,
+            "prompt": "The assigned agent is not available.",
+            "error": "AGENT_NOT_FOUND"
+        }
     
-    if agent_uuid:
-        agent_rows = await database.query("SELECT * FROM agents WHERE id = $1", [agent_uuid])
-        if agent_rows:
-            agent_record = agent_rows[0]
-            agent_name = agent_record["name"]
-            agent_type = agent_record["call_type"] or "general"
-            prompt = agent_record["activity_description"] or agent_record["use_case"] or prompt
+    agent_record = agent_rows[0]
+    agent_name = agent_record["name"]
+    agent_type = agent_record["call_type"] or "general"
+    prompt = agent_record["activity_description"] or agent_record["use_case"] or f"You are {agent_name}. Help the caller."
             
     return {
         "exists": True,
         "has_credits": has_credits,
         "minutes_balance": minutes_balance,
         "client_id": str(client_uuid) if client_uuid else None,
-        "agent_id": str(agent_uuid) if agent_uuid else None,
+        "agent_id": str(agent_uuid),
         "agent_name": agent_name,
         "agent_type": agent_type,
         "prompt": prompt

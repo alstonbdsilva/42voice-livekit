@@ -152,9 +152,13 @@ export function ClientBrowseTab({
               <select
                 value={agentId}
                 onChange={(e) => setAgentId(e.target.value)}
-                className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2 py-1.5 text-xs text-zinc-800 focus:outline-none focus:border-zinc-950 font-medium"
+                className={`w-full border rounded-sm px-2 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-medium ${
+                  agentId 
+                    ? "bg-zinc-50 border-zinc-200 text-zinc-800" 
+                    : "bg-red-50 border-red-300 text-red-600"
+                }`}
               >
-                <option value="">-- Sandbox Router --</option>
+                <option value="">-- Unassigned (No Agent) --</option>
                 {agents.map((agent) => (
                   <option key={agent.id} value={agent.id}>
                     {agent.name}

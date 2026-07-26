@@ -38,6 +38,10 @@ class ConversationsService:
         """
         Register a new call session, recording, and transcript.
         Executes inside a database transaction block and dynamically increments agent stats.
+        
+        IMPORTANT: Agent must already exist in the database.
+        Agents are created explicitly through the Agents API, not implicitly during call registration.
+        This maintains data integrity and ensures proper agent configuration.
         """
         async def trans_cb(conn):
             # 1. Resolve agent by name (case-insensitive)
@@ -45,20 +49,9 @@ class ConversationsService:
             agent = await self.agent_repository.find_by_name(agent_name, client=conn)
             
             if not agent:
-                # Create a new agent dynamically if not found
-                agent = await self.agent_repository.create({
-                    "name": agent_name,
-                    "type": dto.get("intent") or "general",
-                    "channels": [dto.get("channel") or "voice"],
-                    "status": "active",
-                    "userId": dto.get("userId"),
-                    "clientId": dto.get("clientId")
-                }, client=conn)
-                
-            # Safety check to ensure agent is not None
-            if not agent:
-                logger.error(f"Failed to find or create agent '{agent_name}'.")
-                raise ValueError(f"Agent '{agent_name}' could not be resolved or created.")
+                logger.error(f"Agent '{agent_name}' not found in database. Cannot register call without explicit agent. "
+                           f"Client: {dto.get('clientId')}, User: {dto.get('userId')}")
+                raise ValueError(f"Agent '{agent_name}' does not exist. Agents must be created explicitly before calls can be registered.")
                 
             # 2. Create the conversation record
             conv_data = {

@@ -36,7 +36,7 @@ logger = logging.getLogger("voice-agent")
 class VoiceAgent(Agent):
     """Voice agent with orchestrator tools."""
     
-    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, ctx: JobContext, vad=None, out_of_credits: bool = False, custom_prompt: Optional[str] = None, agent_name: str = "orchestrator"):
+    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, ctx: JobContext, vad=None, out_of_credits: bool = False, custom_prompt: Optional[str] = None, agent_name: Optional[str] = None, unassigned_number: bool = False):
         self.session_manager = session_manager
         self.booking_agent = booking_agent
         self.sales_agent = sales_agent
@@ -44,13 +44,15 @@ class VoiceAgent(Agent):
         self.room_name = room_name
         self.participant_id = participant_id
         self.ctx = ctx
-        self.agent_name = agent_name
+        # agent_name must be explicitly set from phone number lookup; None indicates unassigned
+        self.agent_name = agent_name or "unknown"
         self.out_of_credits = out_of_credits
+        self.unassigned_number = unassigned_number
         self.intent_mapping = {
             "booking": "booking_agent",
             "sales": "sales_agent",
             "support": "support_agent",
-            "general": agent_name
+            "general": self.agent_name
         }
         
         # Transcript tracking
@@ -109,6 +111,24 @@ class VoiceAgent(Agent):
                 logger.info(f"Transcript session initialized: {self.transcript_session_id}")
             except Exception as e:
                 logger.error(f"Failed to initialize transcript session: {e}")
+        
+        # Handle unassigned phone numbers - reject the call
+        if self.unassigned_number:
+            try:
+                logger.warning("Rejecting call: phone number is unassigned (no agent configured)")
+                message = "This phone number is not configured yet. Please contact support."
+                self.session.say(message)
+                self._greeting_sent = True
+                
+                async def delayed_disconnect():
+                    await asyncio.sleep(3.0)
+                    logger.info("Disconnecting room due to unassigned phone number")
+                    if self.ctx and self.ctx.room:
+                        await self.ctx.room.disconnect()
+                asyncio.create_task(delayed_disconnect())
+            except Exception as e:
+                logger.error(f"Error speaking unassigned number message: {e}")
+            return
         
         if self.out_of_credits:
             try:
@@ -330,16 +350,9 @@ async def register_call_with_backend(agent, started_at, ended_at):
         duration = int((ended_at - started_at).total_seconds())
         room_name = getattr(agent, 'room_name', 'unknown')
         
-        agent_name = "Voice Agent"
-        # Try to get agent names from settings, with fallback to default
-        agent_names_str = getattr(agent.settings, 'agent_names', 'Voice Agent')
-        if agent_names_str:
-            agent_names = agent_names_str.split(",")
-            for name in agent_names:
-                name = name.strip()
-                if name.lower().replace(" ", "") in room_name.lower().replace("_", "").replace("-", ""):
-                    agent_name = name
-                    break
+        # Use the actual agent_name from the VoiceAgent instance (set from phone number lookup)
+        # This ensures we register the call against the correct agent that handled it
+        agent_name = getattr(agent, 'agent_name', 'Voice Agent')
         
         lines = []
         full_text = ""
@@ -529,7 +542,8 @@ async def entrypoint(ctx: JobContext):
     backend_url = getattr(settings, 'backend_url', 'http://localhost:5000/api/v1')
     out_of_credits = False
     custom_prompt = None
-    agent_name = "orchestrator"
+    agent_name = None  # Must be explicitly set from phone number lookup
+    unassigned_number = False
     
     # Try to resolve called number from participant attributes
     called_number = participant.attributes.get("sip.trunkPhoneNumber")
@@ -546,33 +560,40 @@ async def entrypoint(ctx: JobContext):
                 )
                 if lookup_resp.status_code == 200:
                     lookup_data = lookup_resp.json()
-                    if lookup_data.get("exists", False):
+                    
+                    # Check for unassigned phone number error
+                    if lookup_data.get("error") == "UNASSIGNED_PHONE_NUMBER":
+                        logger.warning(f"Rejecting call: phone number {called_number} is in Unassigned state (no agent configured).")
+                        unassigned_number = True
+                        custom_prompt = lookup_data.get("prompt", "This phone number is not configured yet. Please contact support.")
+                    elif lookup_data.get("error") == "PHONE_NUMBER_NOT_FOUND":
+                        logger.warning(f"Rejecting call: phone number {called_number} not found in system.")
+                        unassigned_number = True
+                        custom_prompt = lookup_data.get("prompt", "This phone number is not configured in the system.")
+                    elif lookup_data.get("error") == "AGENT_NOT_FOUND":
+                        logger.error(f"Rejecting call: assigned agent not found for phone number {called_number}.")
+                        unassigned_number = True
+                        custom_prompt = lookup_data.get("prompt", "The assigned agent is not available.")
+                    elif lookup_data.get("exists", False):
                         logger.info(f"Phone number config found: {lookup_data}")
                         if not lookup_data.get("has_credits", True):
                             logger.warning(f"Rejecting call: client/reseller has no credits balance. Balance: {lookup_data.get('minutes_balance', 0)}")
                             out_of_credits = True
                         custom_prompt = lookup_data.get("prompt")
-                        agent_name = lookup_data.get("agent_name", "orchestrator")
+                        agent_name = lookup_data.get("agent_name")
                     else:
-                        logger.info("Dialed phone number is not registered in this system, using default orchestrator.")
+                        logger.warning(f"Phone number {called_number} exists but has no agent assigned.")
+                        unassigned_number = True
+                        custom_prompt = lookup_data.get("prompt", "This phone number is not configured yet.")
         except Exception as e:
             logger.error(f"Error executing phone number lookup on backend: {e}")
+            unassigned_number = True
+            custom_prompt = "An error occurred while processing your call. Please try again later."
     else:
-        # Fallback to standard agent credits verification if not a SIP call
-        logger.info("No called number attribute found (non-SIP/Web connection). Performing standard check.")
-        try:
-            async with httpx.AsyncClient() as http_client:
-                credit_check_resp = await http_client.get(
-                    f"{backend_url}/billing/check-credits?agent_name=orchestrator",
-                    timeout=10.0
-                )
-                if credit_check_resp.status_code == 200:
-                    credit_data = credit_check_resp.json()
-                    if not credit_data.get("has_credits", True):
-                        logger.warning(f"Rejecting call: client/reseller has no minutes left. Balance: {credit_data.get('minutes_balance', 0)}")
-                        out_of_credits = True
-        except Exception as e:
-            logger.error(f"Error checking minutes balance: {e}")
+        # Non-SIP call without phone number - reject as unassigned
+        logger.warning("No called number attribute found (non-SIP/Web connection). Rejecting call as unassigned.")
+        unassigned_number = True
+        custom_prompt = "This call cannot be routed. Please dial a configured phone number."
 
     session_manager = SessionManager()
     booking_agent = BookingAgent(session_manager)
@@ -602,7 +623,8 @@ async def entrypoint(ctx: JobContext):
         vad=ctx.proc.userdata["vad"],
         out_of_credits=out_of_credits,
         custom_prompt=custom_prompt,
-        agent_name=agent_name
+        agent_name=agent_name,
+        unassigned_number=unassigned_number
     )
     
     # Initialize recording state

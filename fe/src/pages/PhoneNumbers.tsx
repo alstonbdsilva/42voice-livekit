@@ -132,14 +132,20 @@ export default function PhoneNumbers() {
   };
 
   const handleAgentChange = (id: string, agentId: string) => {
+    if (!agentId) {
+      toast.error("No agents found. Please create an agent before assigning a phone number.");
+      return;
+    }
+    
     PhoneNumberService.assignAgent(id, agentId)
       .then(() => {
-        const agentName = agents.find(a => a.id === agentId)?.name || "Unassigned";
+        const agentName = agents.find(a => a.id === agentId)?.name || "Unknown Agent";
         toast.success(`DID assigned to AI Agent: ${agentName}`);
         fetchNumbers();
       })
-      .catch(() => {
-        toast.error("Failed to assign agent routing on backend.");
+      .catch((err) => {
+        const errMsg = err?.response?.data?.message || "Failed to assign agent routing on backend.";
+        toast.error(errMsg);
       });
   };
 
