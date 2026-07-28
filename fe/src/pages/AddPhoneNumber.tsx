@@ -456,211 +456,253 @@ export default function AddPhoneNumber() {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Domain / Realm */}
-              <div>
-                <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Domain / Realm / Registrar Domain</label>
-                <input
-                  type="text"
-                  placeholder={provider === "CITL" ? "phone.c-tel.co.nz" : "your-domain.sip.twilio.com"}
-                  value={sipConfig.domain}
-                  onChange={(e) => handleSipChange("domain", e.target.value)}
-                  className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
-                />
-              </div>
-
-              {/* Proxy */}
-              <div>
-                <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">SIP Proxy Host</label>
-                <input
-                  type="text"
-                  placeholder={provider === "CITL" ? "phone.c-tel.co.nz" : "sip.twilio.com"}
-                  value={sipConfig.proxy}
-                  onChange={(e) => handleSipChange("proxy", e.target.value)}
-                  className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
-                />
-              </div>
-
-              {/* Username */}
-              <div>
-                <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">
-                  SIP Auth Username / ID (Login ID)
-                </label>
-                <input
-                  type="text"
-                  placeholder={number ? number : "e.g. +6498881234"}
-                  value={sipConfig.authUsername}
-                  onChange={(e) => handleSipChange("authUsername", e.target.value)}
-                  autoComplete="new-password"
-                  className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
-                />
-              </div>
-
-              {/* Password */}
-              <div>
-                <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">SIP Auth Password</label>
-                <input
-                  type="password"
-                  placeholder="••••••••••••"
-                  value={sipConfig.password}
-                  onChange={(e) => handleSipChange("password", e.target.value)}
-                  autoComplete="new-password"
-                  className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
-                />
-              </div>
-
-              {/* Outbound Proxy */}
-              <div>
-                <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Outbound Proxy (Leave empty if none)</label>
-                <input
-                  type="text"
-                  placeholder="e.g. phone.c-tel.co.nz"
-                  value={sipConfig.outboundProxy}
-                  onChange={(e) => handleSipChange("outboundProxy", e.target.value)}
-                  className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
-                />
-              </div>
-
-              {/* Outbound toggle */}
-              <div className="flex items-center justify-between border border-zinc-150 p-2 rounded-sm">
-                <div>
-                  <span className="block text-xs font-semibold text-zinc-900">Use Outbound Proxy</span>
-                  <span className="text-[10px] text-zinc-400 font-medium">CITL: Yes | Twilio: No</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleSipChange("useOutboundProxy", !sipConfig.useOutboundProxy)}
-                  className="text-zinc-650 focus:outline-none transition-colors"
-                >
-                  {sipConfig.useOutboundProxy ? (
-                    <ToggleRight className="w-8 h-8 text-zinc-950" />
-                  ) : (
-                    <ToggleLeft className="w-8 h-8 text-zinc-200" />
-                  )}
-                </button>
-              </div>
-
-              {/* Registration Expiry */}
-              <div>
-                <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Register Expires (Seconds)</label>
-                <input
-                  type="number"
-                  value={sipConfig.registerExpires}
-                  onChange={(e) => handleSipChange("registerExpires", parseInt(e.target.value) || 0)}
-                  className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
-                />
-              </div>
-
-              {/* NAT Keep alive */}
-              <div>
-                <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">NAT Keep-Alive (Seconds)</label>
-                <input
-                  type="number"
-                  value={sipConfig.natKeepAlive}
-                  onChange={(e) => handleSipChange("natKeepAlive", parseInt(e.target.value) || 0)}
-                  className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
-                />
-              </div>
-            </div>
-
-            <hr className="border-zinc-200" />
-
-            {/* Extra Audio/Device Settings */}
-            <div className="space-y-4">
-              <h4 className="text-xs font-bold text-zinc-900 flex items-center gap-1">
-                <Settings className="w-3.5 h-3.5 text-zinc-500" />
-                <span>Media Signals & Codecs</span>
-              </h4>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {/* DTMF Mode */}
-                <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">DTMF Signaling</label>
-                  <select
-                    value={sipConfig.dtmfMode}
-                    onChange={(e) => handleSipChange("dtmfMode", e.target.value)}
-                    className="w-full bg-zinc-50 border border-zinc-200 rounded-sm p-1.5 text-xs focus:outline-none focus:border-zinc-950"
-                  >
-                    <option value="RFC2833">RFC2833 (AVT Out-of-band)</option>
-                    <option value="inband">Inband (Recommended for Alarm/Fax)</option>
-                  </select>
-                </div>
-
-                {/* Preferred Codec */}
-                <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Preferred Codec</label>
-                  <select
-                    value={sipConfig.preferredCodec}
-                    onChange={(e) => handleSipChange("preferredCodec", e.target.value)}
-                    className="w-full bg-zinc-50 border border-zinc-200 rounded-sm p-1.5 text-xs focus:outline-none focus:border-zinc-950 font-medium"
-                  >
-                    <option value="G.711a">G.711a (alaw) - CITL Standard</option>
-                    <option value="G.711u">G.711u (ulaw) - Twilio Standard</option>
-                    <option value="G.722">G.722 (HD Audio)</option>
-                    <option value="G.729a">G.729a</option>
-                    <option value="GSM">GSM</option>
-                  </select>
-                </div>
-
-                {/* Secondary Codec */}
-                <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Secondary Codec</label>
-                  <select
-                    value={sipConfig.secondaryCodec}
-                    onChange={(e) => handleSipChange("secondaryCodec", e.target.value)}
-                    className="w-full bg-zinc-50 border border-zinc-200 rounded-sm p-1.5 text-xs focus:outline-none focus:border-zinc-950"
-                  >
-                    <option value="G.711u">G.711u (ulaw)</option>
-                    <option value="G.711a">G.711a (alaw)</option>
-                    <option value="G.722">G.722 (HD Audio)</option>
-                    <option value="G.729a">G.729a</option>
-                    <option value="GSM">GSM</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Toggles */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
-                <label className="flex items-center gap-2 p-2.5 border border-zinc-150 bg-zinc-50/50 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors">
-                  <input
-                    type="checkbox"
-                    checked={sipConfig.t38Support}
-                    onChange={(e) => handleSipChange("t38Support", e.target.checked)}
-                    className="rounded-sm border-zinc-300 text-zinc-900 focus:ring-zinc-900 w-3.5 h-3.5"
-                  />
+            {provider === "Twilio" ? (
+              <div className="space-y-4">
+                <div className="bg-red-50/50 border border-red-200 p-3.5 rounded-sm text-xs text-red-950 flex gap-2.5">
+                  <Info className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
                   <div>
-                    <span className="block text-xs font-semibold text-zinc-800">T.38 Fax Support</span>
-                    <span className="text-[9px] text-zinc-400">Re-route alarm & faxes</span>
+                    <p className="font-semibold mb-0.5 text-xs text-red-950">Twilio Account Authentication</p>
+                    <p className="text-red-900 leading-relaxed text-[11px]">
+                      Enter your Twilio API credentials to authorize outbound calling and automatic call routing configuration for this phone number.
+                    </p>
                   </div>
-                </label>
+                </div>
 
-                <label className="flex items-center gap-2 p-2.5 border border-zinc-150 bg-zinc-50/50 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors">
-                  <input
-                    type="checkbox"
-                    checked={sipConfig.echoCancellation}
-                    onChange={(e) => handleSipChange("echoCancellation", e.target.checked)}
-                    className="rounded-sm border-zinc-300 text-zinc-900 focus:ring-zinc-900 w-3.5 h-3.5"
-                  />
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Twilio Account SID */}
                   <div>
-                    <span className="block text-xs font-semibold text-zinc-800">Echo Cancellation</span>
-                    <span className="text-[9px] text-zinc-400">Reduce feedback audio</span>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Twilio Account SID</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Your Twilio Account SID"
+                      value={sipConfig.authUsername}
+                      onChange={(e) => handleSipChange("authUsername", e.target.value)}
+                      className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
+                    />
                   </div>
-                </label>
 
-                <label className="flex items-center gap-2 p-2.5 border border-zinc-150 bg-zinc-50/50 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors">
-                  <input
-                    type="checkbox"
-                    checked={sipConfig.silenceSuppression}
-                    onChange={(e) => handleSipChange("silenceSuppression", e.target.checked)}
-                    className="rounded-sm border-zinc-300 text-zinc-900 focus:ring-zinc-900 w-3.5 h-3.5"
-                  />
+                  {/* Twilio Auth Token */}
                   <div>
-                    <span className="block text-xs font-semibold text-zinc-800">Silence Suppression</span>
-                    <span className="text-[9px] text-zinc-400">Disable VAD packets</span>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Twilio Auth Token</label>
+                    <input
+                      type="password"
+                      placeholder="••••••••••••••••••••••••••••••••"
+                      value={sipConfig.password}
+                      onChange={(e) => handleSipChange("password", e.target.value)}
+                      className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
+                    />
                   </div>
-                </label>
+                </div>
               </div>
-            </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Domain / Realm */}
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Domain / Realm / Registrar Domain</label>
+                    <input
+                      type="text"
+                      placeholder="phone.c-tel.co.nz"
+                      value={sipConfig.domain}
+                      onChange={(e) => handleSipChange("domain", e.target.value)}
+                      className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
+                    />
+                  </div>
+
+                  {/* Proxy */}
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">SIP Proxy Host</label>
+                    <input
+                      type="text"
+                      placeholder="phone.c-tel.co.nz"
+                      value={sipConfig.proxy}
+                      onChange={(e) => handleSipChange("proxy", e.target.value)}
+                      className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
+                    />
+                  </div>
+
+                  {/* Username */}
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">
+                      SIP Auth Username / ID (Login ID)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder={number ? number : "e.g. +6498881234"}
+                      value={sipConfig.authUsername}
+                      onChange={(e) => handleSipChange("authUsername", e.target.value)}
+                      autoComplete="new-password"
+                      className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
+                    />
+                  </div>
+
+                  {/* Password */}
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">SIP Auth Password</label>
+                    <input
+                      type="password"
+                      placeholder="••••••••••••"
+                      value={sipConfig.password}
+                      onChange={(e) => handleSipChange("password", e.target.value)}
+                      autoComplete="new-password"
+                      className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
+                    />
+                  </div>
+
+                  {/* Outbound Proxy */}
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Outbound Proxy (Leave empty if none)</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. phone.c-tel.co.nz"
+                      value={sipConfig.outboundProxy}
+                      onChange={(e) => handleSipChange("outboundProxy", e.target.value)}
+                      className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
+                    />
+                  </div>
+
+                  {/* Outbound toggle */}
+                  <div className="flex items-center justify-between border border-zinc-150 p-2 rounded-sm">
+                    <div>
+                      <span className="block text-xs font-semibold text-zinc-900">Use Outbound Proxy</span>
+                      <span className="text-[10px] text-zinc-400 font-medium font-semibold">CITL: Yes</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleSipChange("useOutboundProxy", !sipConfig.useOutboundProxy)}
+                      className="text-zinc-650 focus:outline-none transition-colors"
+                    >
+                      {sipConfig.useOutboundProxy ? (
+                        <ToggleRight className="w-8 h-8 text-zinc-950" />
+                      ) : (
+                        <ToggleLeft className="w-8 h-8 text-zinc-200" />
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Registration Expiry */}
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Register Expires (Seconds)</label>
+                    <input
+                      type="number"
+                      value={sipConfig.registerExpires}
+                      onChange={(e) => handleSipChange("registerExpires", parseInt(e.target.value) || 0)}
+                      className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
+                    />
+                  </div>
+
+                  {/* NAT Keep alive */}
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">NAT Keep-Alive (Seconds)</label>
+                    <input
+                      type="number"
+                      value={sipConfig.natKeepAlive}
+                      onChange={(e) => handleSipChange("natKeepAlive", parseInt(e.target.value) || 0)}
+                      className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
+                    />
+                  </div>
+                </div>
+
+                <hr className="border-zinc-200" />
+
+                {/* Extra Audio/Device Settings */}
+                <div className="space-y-4">
+                  <h4 className="text-xs font-bold text-zinc-900 flex items-center gap-1">
+                    <Settings className="w-3.5 h-3.5 text-zinc-500" />
+                    <span>Media Signals & Codecs</span>
+                  </h4>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {/* DTMF Mode */}
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">DTMF Signaling</label>
+                      <select
+                        value={sipConfig.dtmfMode}
+                        onChange={(e) => handleSipChange("dtmfMode", e.target.value)}
+                        className="w-full bg-zinc-50 border border-zinc-200 rounded-sm p-1.5 text-xs focus:outline-none focus:border-zinc-950"
+                      >
+                        <option value="RFC2833">RFC2833 (AVT Out-of-band)</option>
+                        <option value="inband">Inband (Recommended for Alarm/Fax)</option>
+                      </select>
+                    </div>
+
+                    {/* Preferred Codec */}
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Preferred Codec</label>
+                      <select
+                        value={sipConfig.preferredCodec}
+                        onChange={(e) => handleSipChange("preferredCodec", e.target.value)}
+                        className="w-full bg-zinc-50 border border-zinc-200 rounded-sm p-1.5 text-xs focus:outline-none focus:border-zinc-950 font-medium"
+                      >
+                        <option value="G.711a">G.711a (alaw) - CITL Standard</option>
+                        <option value="G.711u">G.711u (ulaw)</option>
+                        <option value="G.722">G.722 (HD Audio)</option>
+                        <option value="G.729a">G.729a</option>
+                        <option value="GSM">GSM</option>
+                      </select>
+                    </div>
+
+                    {/* Secondary Codec */}
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Secondary Codec</label>
+                      <select
+                        value={sipConfig.secondaryCodec}
+                        onChange={(e) => handleSipChange("secondaryCodec", e.target.value)}
+                        className="w-full bg-zinc-50 border border-zinc-200 rounded-sm p-1.5 text-xs focus:outline-none focus:border-zinc-950"
+                      >
+                        <option value="G.711u">G.711u (ulaw)</option>
+                        <option value="G.711a">G.711a (alaw)</option>
+                        <option value="G.722">G.722 (HD Audio)</option>
+                        <option value="G.729a">G.729a</option>
+                        <option value="GSM">GSM</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Toggles */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
+                    <label className="flex items-center gap-2 p-2.5 border border-zinc-150 bg-zinc-50/50 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={sipConfig.t38Support}
+                        onChange={(e) => handleSipChange("t38Support", e.target.checked)}
+                        className="rounded-sm border-zinc-300 text-zinc-900 focus:ring-zinc-900 w-3.5 h-3.5"
+                      />
+                      <div>
+                        <span className="block text-xs font-semibold text-zinc-800">T.38 Fax Support</span>
+                        <span className="text-[9px] text-zinc-400">Re-route alarm & faxes</span>
+                      </div>
+                    </label>
+
+                    <label className="flex items-center gap-2 p-2.5 border border-zinc-150 bg-zinc-50/50 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={sipConfig.echoCancellation}
+                        onChange={(e) => handleSipChange("echoCancellation", e.target.checked)}
+                        className="rounded-sm border-zinc-300 text-zinc-900 focus:ring-zinc-900 w-3.5 h-3.5"
+                      />
+                      <div>
+                        <span className="block text-xs font-semibold text-zinc-800">Echo Cancellation</span>
+                        <span className="text-[9px] text-zinc-400">Reduce feedback audio</span>
+                      </div>
+                    </label>
+
+                    <label className="flex items-center gap-2 p-2.5 border border-zinc-150 bg-zinc-50/50 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={sipConfig.silenceSuppression}
+                        onChange={(e) => handleSipChange("silenceSuppression", e.target.checked)}
+                        className="rounded-sm border-zinc-300 text-zinc-900 focus:ring-zinc-900 w-3.5 h-3.5"
+                      />
+                      <div>
+                        <span className="block text-xs font-semibold text-zinc-800">Silence Suppression</span>
+                        <span className="text-[9px] text-zinc-400">Disable VAD packets</span>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+              </>
+            )}
 
             {/* Actions Bar */}
             <div className="flex gap-2 justify-end pt-4 border-t border-zinc-200">

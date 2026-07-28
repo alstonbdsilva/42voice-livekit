@@ -56,9 +56,13 @@ class LiveKitSipService:
         try:
             # 1. Create Inbound Trunk
             logger.info(f"Registering Inbound SIP Trunk in LiveKit for number: {number}")
-            auth_username = sip_config.get("authUsername", number)
             auth_password = sip_config.get("password", "")
-            auth_realm = sip_config.get("domain", "")
+            if auth_password:
+                auth_username = sip_config.get("authUsername", number)
+                auth_realm = sip_config.get("domain", "")
+            else:
+                auth_username = ""
+                auth_realm = ""
             
             # Format number to remove spaces/symbols for standard registration
             clean_number = number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
@@ -87,35 +91,48 @@ class LiveKitSipService:
                 auth_realm=auth_realm
             )
             
-            trunk_request = lk_api.CreateSIPInboundTrunkRequest(trunk=trunk_info)
-            trunk_response = await lk.sip.create_inbound_trunk(trunk_request)
-            trunk_id = trunk_response.sip_trunk_id
-            logger.info(f"Successfully created LiveKit SIP Inbound Trunk: {trunk_id}")
-            
-            # 2. Create Dispatch Rule
-            # Routes callers to individual rooms prefixed with "sip-"
-            logger.info(f"Creating SIP Dispatch Rule in LiveKit for trunk: {trunk_id}")
-            
-            # Create a dispatch rule that generates individual rooms
-            dispatch_rule = lk_api.SIPDispatchRule(
-                dispatch_rule_individual=lk_api.SIPDispatchRuleIndividual(
-                    room_prefix="sip-"
+            trunk_id = None
+            trunk_created = False
+            try:
+                trunk_request = lk_api.CreateSIPInboundTrunkRequest(trunk=trunk_info)
+                trunk_response = await lk.sip.create_inbound_trunk(trunk_request)
+                trunk_id = trunk_response.sip_trunk_id
+                trunk_created = True
+                logger.info(f"Successfully created LiveKit SIP Inbound Trunk: {trunk_id}")
+                
+                # 2. Create Dispatch Rule
+                # Routes callers to individual rooms prefixed with "sip-"
+                logger.info(f"Creating SIP Dispatch Rule in LiveKit for trunk: {trunk_id}")
+                
+                # Create a dispatch rule that generates individual rooms
+                dispatch_rule = lk_api.SIPDispatchRule(
+                    dispatch_rule_individual=lk_api.SIPDispatchRuleIndividual(
+                        room_prefix="sip-"
+                    )
                 )
-            )
-            
-            dispatch_request = lk_api.CreateSIPDispatchRuleRequest(
-                name=f"Rule - {name} ({number})",
-                rule=dispatch_rule,
-                trunk_ids=[trunk_id],
-                inbound_numbers=numbers_list
-            )
-            
-            dispatch_response = await lk.sip.create_sip_dispatch_rule(dispatch_request)
-            dispatch_rule_id = dispatch_response.sip_dispatch_rule_id
-            logger.info(f"Successfully created LiveKit SIP Dispatch Rule: {dispatch_rule_id}")
-            
-            await lk.aclose()
-            return trunk_id, dispatch_rule_id, None
+                
+                dispatch_request = lk_api.CreateSIPDispatchRuleRequest(
+                    name=f"Rule - {name} ({number})",
+                    rule=dispatch_rule,
+                    trunk_ids=[trunk_id]
+                )
+                
+                dispatch_response = await lk.sip.create_dispatch_rule(dispatch_request)
+                dispatch_rule_id = dispatch_response.sip_dispatch_rule_id
+                logger.info(f"Successfully created LiveKit SIP Dispatch Rule: {dispatch_rule_id}")
+                
+                await lk.aclose()
+                return trunk_id, dispatch_rule_id, None
+            except Exception as e:
+                if trunk_created and trunk_id:
+                    logger.warning(f"Provisioning failed post-trunk creation. Cleaning up trunk {trunk_id}...")
+                    try:
+                        del_trunk_req = lk_api.DeleteSIPTrunkRequest(sip_trunk_id=trunk_id)
+                        await lk.sip.delete_trunk(del_trunk_req)
+                        logger.info(f"Cleaned up orphaned trunk {trunk_id} successfully")
+                    except Exception as clean_err:
+                        logger.error(f"Failed to clean up trunk {trunk_id}: {clean_err}")
+                raise e
             
         except Exception as e:
             logger.error(f"LiveKit SIP provisioning failed for {number}: {e}", exc_info=True)
@@ -151,18 +168,144 @@ class LiveKitSipService:
             if dispatch_rule_id:
                 logger.info(f"Deleting LiveKit SIP Dispatch Rule: {dispatch_rule_id}")
                 del_rule_req = lk_api.DeleteSIPDispatchRuleRequest(sip_dispatch_rule_id=dispatch_rule_id)
-                await lk.sip.delete_sip_dispatch_rule(del_rule_req)
+                await lk.sip.delete_dispatch_rule(del_rule_req)
                 
             # Delete Trunk
             if trunk_id:
                 logger.info(f"Deleting LiveKit SIP Inbound Trunk: {trunk_id}")
                 del_trunk_req = lk_api.DeleteSIPTrunkRequest(sip_trunk_id=trunk_id)
-                await lk.sip.delete_sip_trunk(del_trunk_req)
+                await lk.sip.delete_trunk(del_trunk_req)
                 
             await lk.aclose()
             return True, None
         except Exception as e:
             logger.error(f"Failed to deprovision LiveKit SIP resources (Trunk={trunk_id}, Rule={dispatch_rule_id}): {e}")
+            try:
+                await lk.aclose()
+            except:
+                pass
+            return False, str(e)
+
+    async def update_inbound_trunk(
+        self,
+        trunk_id: str,
+        number: str,
+        name: str,
+        sip_config: Dict[str, Any]
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Update an existing SIP Inbound Trunk in LiveKit.
+        """
+        if trunk_id.startswith("mock-") or trunk_id.startswith("err-"):
+            logger.info(f"Update bypassed for simulated trunk: {trunk_id}")
+            return True, None
+            
+        lk = self._get_client()
+        if not lk:
+            return True, "LiveKit client not initialized. Simulated update."
+            
+        try:
+            logger.info(f"Updating Inbound SIP Trunk {trunk_id} in LiveKit for number: {number}")
+            auth_password = sip_config.get("password", "")
+            if auth_password:
+                auth_username = sip_config.get("authUsername", number)
+                auth_realm = sip_config.get("domain", "")
+            else:
+                auth_username = ""
+                auth_realm = ""
+            
+            clean_number = number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+            
+            numbers_list = [clean_number]
+            if clean_number.startswith("+"):
+                no_plus = clean_number[1:]
+                if no_plus not in numbers_list:
+                    numbers_list.append(no_plus)
+                if clean_number.startswith("+64") and len(clean_number) > 3:
+                    local_nz = "0" + clean_number[3:]
+                    if local_nz not in numbers_list:
+                        numbers_list.append(local_nz)
+                elif clean_number.startswith("+61") and len(clean_number) > 3:
+                    local_au = "0" + clean_number[3:]
+                    if local_au not in numbers_list:
+                        numbers_list.append(local_au)
+                        
+            trunk_info = lk_api.SIPInboundTrunkInfo(
+                name=f"Trunk - {name} ({number})",
+                numbers=numbers_list,
+                auth_username=auth_username,
+                auth_password=auth_password,
+                auth_realm=auth_realm
+            )
+            
+            await lk.sip.update_inbound_trunk(trunk_id, trunk_info)
+            logger.info(f"Successfully updated LiveKit SIP Inbound Trunk: {trunk_id}")
+            await lk.aclose()
+            return True, None
+        except Exception as e:
+            logger.error(f"LiveKit SIP trunk update failed for {trunk_id}: {e}", exc_info=True)
+            try:
+                await lk.aclose()
+            except:
+                pass
+            return False, str(e)
+
+    async def update_dispatch_rule(
+        self,
+        dispatch_rule_id: str,
+        trunk_id: str,
+        number: str,
+        name: str
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Update an existing SIP Dispatch Rule in LiveKit.
+        """
+        if dispatch_rule_id.startswith("mock-") or dispatch_rule_id.startswith("err-"):
+            logger.info(f"Update bypassed for simulated dispatch rule: {dispatch_rule_id}")
+            return True, None
+            
+        lk = self._get_client()
+        if not lk:
+            return True, "LiveKit client not initialized. Simulated update."
+            
+        try:
+            logger.info(f"Updating SIP Dispatch Rule {dispatch_rule_id} in LiveKit")
+            
+            clean_number = number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+            
+            numbers_list = [clean_number]
+            if clean_number.startswith("+"):
+                no_plus = clean_number[1:]
+                if no_plus not in numbers_list:
+                    numbers_list.append(no_plus)
+                if clean_number.startswith("+64") and len(clean_number) > 3:
+                    local_nz = "0" + clean_number[3:]
+                    if local_nz not in numbers_list:
+                        numbers_list.append(local_nz)
+                elif clean_number.startswith("+61") and len(clean_number) > 3:
+                    local_au = "0" + clean_number[3:]
+                    if local_au not in numbers_list:
+                        numbers_list.append(local_au)
+                        
+            dispatch_rule = lk_api.SIPDispatchRule(
+                dispatch_rule_individual=lk_api.SIPDispatchRuleIndividual(
+                    room_prefix="sip-"
+                )
+            )
+            
+            dispatch_info = lk_api.SIPDispatchRuleInfo(
+                sip_dispatch_rule_id=dispatch_rule_id,
+                name=f"Rule - {name} ({number})",
+                rule=dispatch_rule,
+                trunk_ids=[trunk_id]
+            )
+            
+            await lk.sip.update_dispatch_rule(dispatch_rule_id, dispatch_info)
+            logger.info(f"Successfully updated LiveKit SIP Dispatch Rule: {dispatch_rule_id}")
+            await lk.aclose()
+            return True, None
+        except Exception as e:
+            logger.error(f"LiveKit SIP dispatch rule update failed for {dispatch_rule_id}: {e}", exc_info=True)
             try:
                 await lk.aclose()
             except:

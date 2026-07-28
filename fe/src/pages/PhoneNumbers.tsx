@@ -223,7 +223,12 @@ export default function PhoneNumbers() {
   const publishedNumbers = filteredNumbers.filter(n => n.status === "available" || n.status === "active");
   const draftNumbers = filteredNumbers.filter(n => n.status === "pending_sip" || n.status === "inactive");
   const disconnectedNumbers = filteredNumbers.filter(
-    n => !n.sipConfig || !n.sipConfig.password || !n.sipConfig.domain || n.status === "pending_sip" || n.status === "inactive"
+    n => {
+      if (n.provider === "Twilio") {
+        return n.status === "pending_sip" || n.status === "inactive";
+      }
+      return !n.sipConfig || !n.sipConfig.password || !n.sipConfig.domain || n.status === "pending_sip" || n.status === "inactive";
+    }
   );
   const clientNumbers = filteredNumbers.filter(num => num.ownerId === (user?.clientId || user?.id || "client-123"));
   const availableToRent = filteredNumbers.filter(num => num.status === "available");

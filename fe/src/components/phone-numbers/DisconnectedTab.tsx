@@ -52,7 +52,9 @@ export function DisconnectedTab({ numbers, onEdit, onDelete }: DisconnectedTabPr
                 <div className="flex items-center gap-1.5 text-red-750">
                   <AlertCircle className="w-3.5 h-3.5 text-red-500" />
                   <span>
-                    {!num.sipConfig
+                    {num.provider === "Twilio"
+                      ? "Pending LiveKit registrar binding"
+                      : !num.sipConfig
                       ? "No SIP credentials configured"
                       : !num.sipConfig.password
                       ? "SIP password unconfigured"

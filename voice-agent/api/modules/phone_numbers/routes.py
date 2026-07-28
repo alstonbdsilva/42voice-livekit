@@ -9,6 +9,7 @@ from api import database
 from api.utils.api_response import ApiResponse
 from api.middlewares.auth import get_current_user, require_roles
 from api.modules.phone_numbers.livekit_sip import livekit_sip_service
+from api.modules.phone_numbers.sync_service import phone_sync_service
 
 router = APIRouter()
 logger = logging.getLogger("voice-agent.api.phone_numbers")
@@ -65,7 +66,7 @@ async def get_all_numbers(
     client_id = current_user.get("client_id")
     reseller_id = current_user.get("reseller_id")
     
-    query_str = "SELECT * FROM phone_numbers WHERE 1=1"
+    query_str = "SELECT * FROM phone_numbers WHERE status != 'deleted'"
     params: List[Any] = []
     
     # Apply role scoping
@@ -149,11 +150,22 @@ async def register_number(req_body: RegisterPhoneNumberRequest):
         if not clean_number.startswith("+") and clean_number.isdigit():
             clean_number = "+" + clean_number
     
-    # Check if number already registered
-    exists = await database.query("SELECT id FROM phone_numbers WHERE number = $1", [clean_number])
+    # Check if number already registered (excluding deleted ones to allow re-registering)
+    exists = await database.query("SELECT id FROM phone_numbers WHERE number = $1 AND status != 'deleted'", [clean_number])
     if exists:
         return ApiResponse.error(400, f"Phone number {clean_number} is already registered.", "NUMBER_ALREADY_EXISTS")
         
+    # If the number exists as soft-deleted, hard-delete it first to avoid UNIQUE constraint violation on INSERT
+    deleted_exists = await database.query("SELECT id FROM phone_numbers WHERE number = $1 AND status = 'deleted'", [clean_number])
+    if deleted_exists:
+        logger.info(f"Hard-deleting soft-deleted phone number record {clean_number} (ID: {deleted_exists[0]['id']}) to allow clean re-registration")
+        await database.query("DELETE FROM phone_numbers WHERE id = $1", [deleted_exists[0]["id"]])
+        
+    # Validate provider configuration/credentials if not a draft registration
+    if not req_body.draft:
+        if not phone_sync_service.validate_provider_credentials(req_body.provider, req_body.sipConfig):
+            return ApiResponse.error(400, "Invalid SIP configuration. Missing authentication username, password, or domain.", "INVALID_SIP_CREDENTIALS")
+
     trunk_id = None
     dispatch_rule_id = None
     warning_msg = None
@@ -187,7 +199,7 @@ async def register_number(req_body: RegisterPhoneNumberRequest):
         pass
         
     # capabilities & sip_config serialization
-    capabilities_json = json.dumps(req_body.capabilities.dict())
+    capabilities_json = json.dumps(req_body.capabilities.model_dump())
     sip_config_json = json.dumps(req_body.sipConfig) if req_body.sipConfig else None
     
     try:
@@ -214,6 +226,15 @@ async def register_number(req_body: RegisterPhoneNumberRequest):
         )
         
         row = rows[0]
+        
+        # Synchronize and cache configurations
+        try:
+            synced_row = await phone_sync_service.synchronize_phone_number(str(row["id"]), action="create")
+            row = synced_row
+        except Exception as sync_err:
+            logger.error(f"Post-registration sync failed: {sync_err}")
+            warning_msg = f"LiveKit sync warning: {str(sync_err)}"
+            
         result = {
             "id": str(row["id"]),
             "number": row["number"],
@@ -278,6 +299,9 @@ async def lease_number(id: str, req_body: LeasePhoneNumberRequest, current_user:
         )
         
         row = updated[0]
+        # Invalidate cache and publish lease event
+        phone_sync_service.publish_configuration_changed(row["number"], action="lease")
+        
         return ApiResponse.success(
             message="Phone number leased successfully",
             data={
@@ -304,25 +328,25 @@ async def release_number(id: str, current_user: Dict[str, Any] = Depends(get_cur
     
     number_uuid = uuid.UUID(id)
     
-    rows = await database.query("SELECT * FROM phone_numbers WHERE id = $1", [number_uuid])
+    rows = await database.query("SELECT * FROM phone_numbers WHERE id = $1 AND status != 'deleted'", [number_uuid])
     if not rows:
         return ApiResponse.error(404, "Phone number not found.", "NUMBER_NOT_FOUND")
         
     num_record = rows[0]
     
     if role in ["SUPER_ADMIN", "FINANCE_ADMIN"]:
-        # Superadmin deletes DID completely, freeing it at LiveKit
-        logger.info(f"Superadmin deleting phone number: {num_record['number']}")
-        
-        trunk_id = num_record["lk_sip_trunk_id"]
-        dispatch_rule_id = num_record["lk_sip_dispatch_rule_id"]
+        # Superadmin soft-deletes DID completely, freeing it at LiveKit
+        logger.info(f"Superadmin soft-deleting phone number: {num_record['number']}")
         
         try:
-            await database.query("DELETE FROM phone_numbers WHERE id = $1", [number_uuid])
+            # Mark status as 'deleted' (soft delete)
+            await database.query(
+                "UPDATE phone_numbers SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = $1", 
+                [number_uuid]
+            )
             
-            # Deprovision LiveKit SIP resources
-            if trunk_id:
-                await livekit_sip_service.deprovision_inbound_trunk(trunk_id, dispatch_rule_id)
+            # Deprovision LiveKit SIP resources and invalidate cache
+            await phone_sync_service.synchronize_phone_number(str(number_uuid), action="delete")
                 
             return ApiResponse.success(message=f"Phone number {num_record['number']} deleted and deprovisioned successfully.")
         except Exception as e:
@@ -349,6 +373,8 @@ async def release_number(id: str, current_user: Dict[str, Any] = Depends(get_cur
                    WHERE id = $1""",
                 [number_uuid]
             )
+            # Invalidate cache and publish release event
+            phone_sync_service.publish_configuration_changed(num_record["number"], action="release")
             return ApiResponse.success(message=f"Phone number {num_record['number']} returned to public pool.")
         except Exception as e:
             logger.error(f"Failed to release phone number: {e}")
@@ -369,7 +395,7 @@ async def assign_agent(id: str, req_body: AssignAgentRequest, current_user: Dict
     
     number_uuid = uuid.UUID(id)
     
-    rows = await database.query("SELECT * FROM phone_numbers WHERE id = $1", [number_uuid])
+    rows = await database.query("SELECT * FROM phone_numbers WHERE id = $1 AND status != 'deleted'", [number_uuid])
     if not rows:
         return ApiResponse.error(404, "Phone number not found.", "NUMBER_NOT_FOUND")
         
@@ -404,6 +430,10 @@ async def assign_agent(id: str, req_body: AssignAgentRequest, current_user: Dict
             "UPDATE phone_numbers SET agent_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
             [agent_uuid, number_uuid]
         )
+        
+        # Publish change event on event bus (invalidates cache)
+        phone_sync_service.publish_configuration_changed(num_record["number"], action="assign_agent")
+        
         return ApiResponse.success(message="Phone number routing updated successfully.")
     except Exception as e:
         logger.error(f"Failed to assign agent: {e}")
@@ -422,17 +452,23 @@ async def lookup_number(number: str):
     clean_number = number.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
     logger.info(f"Looking up phone routing for incoming SIP caller number: {clean_number}")
     
-    # Query database matching the number
+    # Try serving from Redis cache first
+    cached_lookup = phone_sync_service.get_cached_lookup(clean_number)
+    if cached_lookup:
+        logger.info(f"Cache HIT: Serving phone routing from Redis cache for: {clean_number}")
+        return cached_lookup
+        
+    # Query database matching the number (exclude soft-deleted ones)
     rows = await database.query(
         """SELECT * FROM phone_numbers 
-           WHERE REPLACE(REPLACE(REPLACE(REPLACE(number, ' ', ''), '-', ''), '(', ''), ')', '') = $1
-              OR number = $2""",
+           WHERE (REPLACE(REPLACE(REPLACE(REPLACE(number, ' ', ''), '-', ''), '(', ''), ')', '') = $1
+              OR number = $2) AND status != 'deleted'""",
         [clean_number, number.strip()]
     )
     
     if not rows:
         logger.warning(f"Inbound routing lookup: phone number {number} not found in database.")
-        return {
+        result: Dict[str, Any] = {
             "exists": False,
             "has_credits": False,
             "client_id": None,
@@ -442,6 +478,9 @@ async def lookup_number(number: str):
             "prompt": "This phone number is not configured in the system.",
             "error": "PHONE_NUMBER_NOT_FOUND"
         }
+        # Cache negative lookup briefly
+        phone_sync_service.set_cached_lookup(clean_number, result, ttl=300)
+        return result
         
     num_record = rows[0]
     client_uuid = num_record["client_id"]
@@ -451,16 +490,18 @@ async def lookup_number(number: str):
     # CRITICAL: Verify agent is assigned. Unassigned phone numbers cannot accept calls.
     if not agent_uuid:
         logger.warning(f"Inbound call rejected: phone number {number} has no assigned agent (Unassigned state).")
-        return {
+        result = {
             "exists": True,
             "has_credits": False,
             "client_id": str(client_uuid) if client_uuid else None,
             "agent_id": None,
             "agent_name": None,
             "agent_type": None,
-            "prompt": "This phone number is not configured yet. Please contact support.",
+            "prompt": "Welcome to 42 voice and we will get back to you.",
             "error": "UNASSIGNED_PHONE_NUMBER"
         }
+        phone_sync_service.set_cached_lookup(clean_number, result)
+        return result
     
     # Check Credits Status
     has_credits = True
@@ -481,7 +522,7 @@ async def lookup_number(number: str):
     agent_rows = await database.query("SELECT * FROM agents WHERE id = $1", [agent_uuid])
     if not agent_rows:
         logger.error(f"Agent {agent_uuid} referenced by phone number {number} not found in database.")
-        return {
+        result = {
             "exists": True,
             "has_credits": False,
             "client_id": str(client_uuid) if client_uuid else None,
@@ -491,13 +532,15 @@ async def lookup_number(number: str):
             "prompt": "The assigned agent is not available.",
             "error": "AGENT_NOT_FOUND"
         }
+        phone_sync_service.set_cached_lookup(clean_number, result)
+        return result
     
     agent_record = agent_rows[0]
     agent_name = agent_record["name"]
     agent_type = agent_record["call_type"] or "general"
     prompt = agent_record["activity_description"] or agent_record["use_case"] or f"You are {agent_name}. Help the caller."
             
-    return {
+    result = {
         "exists": True,
         "has_credits": has_credits,
         "minutes_balance": minutes_balance,
@@ -507,6 +550,10 @@ async def lookup_number(number: str):
         "agent_type": agent_type,
         "prompt": prompt
     }
+    
+    # Cache the successful routing lookup
+    phone_sync_service.set_cached_lookup(clean_number, result)
+    return result
 
 
 @router.get("/livekit-status", dependencies=[Depends(require_roles(["SUPER_ADMIN", "FINANCE_ADMIN"]))])
@@ -526,8 +573,8 @@ async def update_phone_number(id: str, req_body: EditPhoneNumberRequest):
     """
     number_uuid = uuid.UUID(id)
     
-    # Check if number exists
-    rows = await database.query("SELECT * FROM phone_numbers WHERE id = $1", [number_uuid])
+    # Check if number exists and is not soft deleted
+    rows = await database.query("SELECT * FROM phone_numbers WHERE id = $1 AND status != 'deleted'", [number_uuid])
     if not rows:
         return ApiResponse.error(404, "Phone number not found.", "NUMBER_NOT_FOUND")
         
@@ -550,6 +597,9 @@ async def update_phone_number(id: str, req_body: EditPhoneNumberRequest):
         updates.append(f"setup_cost = ${len(params)}")
         
     if req_body.sipConfig is not None:
+        # Validate provider credentials
+        if not phone_sync_service.validate_provider_credentials(num_record["provider"], req_body.sipConfig):
+            return ApiResponse.error(400, "Invalid SIP configuration. Missing authentication username, password, or domain.", "INVALID_SIP_CREDENTIALS")
         params.append(json.dumps(req_body.sipConfig))
         updates.append(f"sip_config = ${len(params)}")
         
@@ -563,6 +613,13 @@ async def update_phone_number(id: str, req_body: EditPhoneNumberRequest):
         updated = await database.query(query_str, params)
         row = updated[0]
         
+        # Sync changes to LiveKit and update cache immediately
+        try:
+            synced_row = await phone_sync_service.synchronize_phone_number(str(number_uuid), action="update")
+            row = synced_row
+        except Exception as sync_err:
+            logger.error(f"LiveKit sync failed during update: {sync_err}")
+            
         return ApiResponse.success(
             message="Phone number details updated successfully.",
             data={

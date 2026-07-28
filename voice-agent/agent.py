@@ -61,7 +61,7 @@ class VoiceAgent(Agent):
         self.call_start = None
         self.egress_id = None
         self.recording_filename = None
-        self._recording_task = None
+        self._recording_task: Optional[asyncio.Task[Any]] = None
         
         logger.info("STT initialized")
         
@@ -116,12 +116,12 @@ class VoiceAgent(Agent):
         if self.unassigned_number:
             try:
                 logger.warning("Rejecting call: phone number is unassigned (no agent configured)")
-                message = "This phone number is not configured yet. Please contact support."
+                message = "Welcome to 42 voice and we will get back to you."
                 self.session.say(message)
                 self._greeting_sent = True
                 
                 async def delayed_disconnect():
-                    await asyncio.sleep(3.0)
+                    await asyncio.sleep(4.0)
                     logger.info("Disconnecting room due to unassigned phone number")
                     if self.ctx and self.ctx.room:
                         await self.ctx.room.disconnect()
