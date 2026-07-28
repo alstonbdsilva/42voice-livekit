@@ -4,10 +4,11 @@ Handles environment variables and application settings.
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, field_validator
 from typing import Optional
 import os
 import sys
+from urllib.parse import urlparse
 
 
 class Settings(BaseSettings):
@@ -22,6 +23,7 @@ class Settings(BaseSettings):
     livekit_url: str = Field(default="wss://ws.42voice.com", validation_alias="LIVEKIT_URL")
     livekit_api_key: str = Field(default="devkey", validation_alias="LIVEKIT_API_KEY")
     livekit_api_secret: str = Field(default="secret", validation_alias="LIVEKIT_API_SECRET")
+    livekit_agent_name: str = Field(default="inbound-agent", validation_alias="LIVEKIT_AGENT_NAME")
     
     # Twilio SIP Configuration
     twilio_sip_username: Optional[str] = Field(default=None, validation_alias="TWILIO_SIP_USERNAME")
@@ -74,7 +76,7 @@ class Settings(BaseSettings):
     enable_recording: bool = Field(default=True, validation_alias="ENABLE_RECORDING")
     
     # Backend Server Configuration
-    backend_url: str = Field(default="http://localhost:5000/api/v1", validation_alias="BACKEND_URL")
+    backend_url: str = Field(default="http://localhost:8000/api/v1", validation_alias="BACKEND_URL")
     
     # Redis Configuration
     redis_url: str = Field(default="redis://localhost:6379", validation_alias="REDIS_URL")
@@ -123,6 +125,17 @@ class Settings(BaseSettings):
     calendly_client_secret: Optional[str] = Field(default=None, validation_alias="CALENDLY_CLIENT_SECRET")
     calendly_redirect_uri: Optional[str] = Field(default=None, validation_alias="CALENDLY_REDIRECT_URI")
     calendly_encryption_key: Optional[str] = Field(default=None, validation_alias="CALENDLY_ENCRYPTION_KEY")
+
+    @field_validator('backend_url', mode='before')
+    @classmethod
+    def validate_backend_url(cls, v):
+        """Fail fast if BACKEND_URL is missing or not a valid HTTP/HTTPS URL."""
+        if not v:
+            raise ValueError('BACKEND_URL must be set')
+        parsed = urlparse(str(v))
+        if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+            raise ValueError(f'BACKEND_URL must be a valid HTTP/HTTPS URL, got: {v}')
+        return v
     
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),

@@ -2,10 +2,11 @@ import uuid
 import logging
 import json
 from typing import Optional, Dict, Any, List
-from fastapi import APIRouter, Request, Depends
+from fastapi import APIRouter, Request, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from api import database
+from api.utils.phone import normalize_phone_number, get_phone_number_variants
 from api.utils.api_response import ApiResponse
 from api.middlewares.auth import get_current_user, require_roles
 from api.modules.phone_numbers.livekit_sip import livekit_sip_service
@@ -133,22 +134,10 @@ async def register_number(req_body: RegisterPhoneNumberRequest):
     Superadmin registers a purchased DID.
     Optionally provisions with LiveKit unless draft is true.
     """
-    import re
-    # Strip spaces, dashes, parens
-    stripped = re.sub(r"[\s\-\(\)]", "", req_body.number.strip())
-    # Handle country code followed by leading zero (e.g. +6409... -> +649...)
-    match = re.match(r"^(\+?\d{1,3})0(\d{7,})$", stripped)
-    if match:
-        prefix = match.group(1)
-        rest = match.group(2)
-        if not prefix.startswith("+"):
-            prefix = "+" + prefix
-        clean_number = f"{prefix}{rest}"
-        logger.info(f"Normalized phone number from {req_body.number} to E.164 format: {clean_number}")
-    else:
-        clean_number = stripped
-        if not clean_number.startswith("+") and clean_number.isdigit():
-            clean_number = "+" + clean_number
+    clean_number = normalize_phone_number(req_body.number)
+    if not clean_number:
+        return ApiResponse.error(400, f"Invalid phone number format: {req_body.number}", "INVALID_PHONE_NUMBER")
+    logger.info(f"Normalized phone number from {req_body.number} to E.164 format: {clean_number}")
     
     # Check if number already registered (excluding deleted ones to allow re-registering)
     exists = await database.query("SELECT id FROM phone_numbers WHERE number = $1 AND status != 'deleted'", [clean_number])
@@ -445,115 +434,128 @@ async def lookup_number(number: str):
     """
     Internal API Endpoint to lookup phone number metadata for incoming LiveKit SIP calls.
     Returns: client_id, agent_id, agent prompt configurations, and credits availability.
-    
+
     IMPORTANT: Phone numbers MUST have an explicitly assigned agent.
     Unassigned phone numbers are not routed and return an error response.
     """
-    clean_number = number.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
-    logger.info(f"Looking up phone routing for incoming SIP caller number: {clean_number}")
-    
-    # Try serving from Redis cache first
-    cached_lookup = phone_sync_service.get_cached_lookup(clean_number)
-    if cached_lookup:
-        logger.info(f"Cache HIT: Serving phone routing from Redis cache for: {clean_number}")
-        return cached_lookup
-        
-    # Query database matching the number (exclude soft-deleted ones)
-    rows = await database.query(
-        """SELECT * FROM phone_numbers 
-           WHERE (REPLACE(REPLACE(REPLACE(REPLACE(number, ' ', ''), '-', ''), '(', ''), ')', '') = $1
-              OR number = $2) AND status != 'deleted'""",
-        [clean_number, number.strip()]
-    )
-    
-    if not rows:
-        logger.warning(f"Inbound routing lookup: phone number {number} not found in database.")
-        result: Dict[str, Any] = {
-            "exists": False,
-            "has_credits": False,
-            "client_id": None,
-            "agent_id": None,
-            "agent_name": None,
-            "agent_type": None,
-            "prompt": "This phone number is not configured in the system.",
-            "error": "PHONE_NUMBER_NOT_FOUND"
-        }
-        # Cache negative lookup briefly
-        phone_sync_service.set_cached_lookup(clean_number, result, ttl=300)
-        return result
-        
-    num_record = rows[0]
-    client_uuid = num_record["client_id"]
-    reseller_uuid = num_record["reseller_id"]
-    agent_uuid = num_record["agent_id"]
-    
-    # CRITICAL: Verify agent is assigned. Unassigned phone numbers cannot accept calls.
-    if not agent_uuid:
-        logger.warning(f"Inbound call rejected: phone number {number} has no assigned agent (Unassigned state).")
+    try:
+        canonical_number = normalize_phone_number(number)
+        if not canonical_number:
+            logger.error(f"Invalid phone number format received: {number}")
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "INVALID_PHONE_NUMBER", "message": f"Invalid phone number: {number}"}
+            )
+
+        number_candidates = get_phone_number_variants(number)
+        logger.info(f"Inbound call lookup for {number} (canonical: {canonical_number}, candidates: {number_candidates})")
+
+        # Try serving from Redis cache first
+        cached_lookup = phone_sync_service.get_cached_lookup(canonical_number)
+        if cached_lookup:
+            logger.info(f"Cache HIT for {canonical_number}")
+            return cached_lookup
+
+        # Query database matching the number (exclude soft-deleted ones)
+        rows = await database.query(
+            """SELECT * FROM phone_numbers
+               WHERE number = ANY($1::text[]) AND status != 'deleted'""",
+            [number_candidates]
+        )
+
+        if not rows:
+            logger.warning(f"PHONE_NUMBER_NOT_FOUND: {number} (canonical: {canonical_number})")
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "PHONE_NUMBER_NOT_FOUND", "message": f"Phone number {number} not found"}
+            )
+
+        num_record = rows[0]
+        client_uuid = num_record["client_id"]
+        reseller_uuid = num_record["reseller_id"]
+        agent_uuid = num_record["agent_id"]
+
+        # CRITICAL: Verify agent is assigned. Unassigned phone numbers cannot accept calls.
+        if not agent_uuid:
+            logger.warning(f"PHONE_NOT_ASSIGNED: {number} has no assigned agent")
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "PHONE_NOT_ASSIGNED",
+                    "message": f"Phone number {number} has no assigned agent",
+                    "prompt": "Welcome to 42 voice and we will get back to you."
+                }
+            )
+
+        # Check Credits Status
+        has_credits = True
+        minutes_balance = 0
+
+        if client_uuid:
+            cl_rows = await database.query("SELECT minutes_balance FROM clients WHERE id = $1", [client_uuid])
+            if cl_rows:
+                minutes_balance = cl_rows[0]["minutes_balance"]
+                has_credits = minutes_balance > 0
+        elif reseller_uuid:
+            res_rows = await database.query("SELECT minutes_balance FROM resellers WHERE id = $1", [reseller_uuid])
+            if res_rows:
+                minutes_balance = res_rows[0]["minutes_balance"]
+                has_credits = minutes_balance > 0
+
+        if not has_credits:
+            logger.warning(f"INSUFFICIENT_CREDITS for phone number {number}. Balance: {minutes_balance}")
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "INSUFFICIENT_CREDITS",
+                    "message": f"Account has insufficient call minutes for {number}",
+                    "prompt": "We are sorry, but this account has run out of call minutes. Please recharge your balance in the dashboard. Goodbye."
+                }
+            )
+
+        # Resolve linked agent details
+        agent_rows = await database.query("SELECT * FROM agents WHERE id = $1", [agent_uuid])
+        if not agent_rows:
+            logger.error(f"INTERNAL_ERROR: Agent {agent_uuid} referenced by phone number {number} not found in database.")
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "INTERNAL_ERROR",
+                    "message": "Assigned agent record is missing",
+                    "prompt": "The assigned agent is not available."
+                }
+            )
+
+        agent_record = agent_rows[0]
+        agent_name = agent_record["name"]
+        agent_status = agent_record["status"]
+        agent_type = agent_record["call_type"] or "general"
+        prompt = agent_record["activity_description"] or agent_record["use_case"] or f"You are {agent_name}. Help the caller."
+
         result = {
             "exists": True,
-            "has_credits": False,
-            "client_id": str(client_uuid) if client_uuid else None,
-            "agent_id": None,
-            "agent_name": None,
-            "agent_type": None,
-            "prompt": "Welcome to 42 voice and we will get back to you.",
-            "error": "UNASSIGNED_PHONE_NUMBER"
-        }
-        phone_sync_service.set_cached_lookup(clean_number, result)
-        return result
-    
-    # Check Credits Status
-    has_credits = True
-    minutes_balance = 0
-    
-    if client_uuid:
-        cl_rows = await database.query("SELECT minutes_balance FROM clients WHERE id = $1", [client_uuid])
-        if cl_rows:
-            minutes_balance = cl_rows[0]["minutes_balance"]
-            has_credits = minutes_balance > 0
-    elif reseller_uuid:
-        res_rows = await database.query("SELECT minutes_balance FROM resellers WHERE id = $1", [reseller_uuid])
-        if res_rows:
-            minutes_balance = res_rows[0]["minutes_balance"]
-            has_credits = minutes_balance > 0
-            
-    # Resolve linked agent details
-    agent_rows = await database.query("SELECT * FROM agents WHERE id = $1", [agent_uuid])
-    if not agent_rows:
-        logger.error(f"Agent {agent_uuid} referenced by phone number {number} not found in database.")
-        result = {
-            "exists": True,
-            "has_credits": False,
+            "has_credits": has_credits,
+            "minutes_balance": minutes_balance,
             "client_id": str(client_uuid) if client_uuid else None,
             "agent_id": str(agent_uuid),
-            "agent_name": None,
-            "agent_type": None,
-            "prompt": "The assigned agent is not available.",
-            "error": "AGENT_NOT_FOUND"
+            "agent_name": agent_name,
+            "agent_status": agent_status,
+            "agent_type": agent_type,
+            "prompt": prompt
         }
-        phone_sync_service.set_cached_lookup(clean_number, result)
+
+        # Cache the successful routing lookup
+        phone_sync_service.set_cached_lookup(canonical_number, result)
         return result
-    
-    agent_record = agent_rows[0]
-    agent_name = agent_record["name"]
-    agent_type = agent_record["call_type"] or "general"
-    prompt = agent_record["activity_description"] or agent_record["use_case"] or f"You are {agent_name}. Help the caller."
-            
-    result = {
-        "exists": True,
-        "has_credits": has_credits,
-        "minutes_balance": minutes_balance,
-        "client_id": str(client_uuid) if client_uuid else None,
-        "agent_id": str(agent_uuid),
-        "agent_name": agent_name,
-        "agent_type": agent_type,
-        "prompt": prompt
-    }
-    
-    # Cache the successful routing lookup
-    phone_sync_service.set_cached_lookup(clean_number, result)
-    return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"INTERNAL_ERROR during phone number lookup for {number}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "INTERNAL_ERROR", "message": f"Lookup failed: {str(e)}"}
+        )
 
 
 @router.get("/livekit-status", dependencies=[Depends(require_roles(["SUPER_ADMIN", "FINANCE_ADMIN"]))])

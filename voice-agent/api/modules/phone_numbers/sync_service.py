@@ -7,6 +7,7 @@ import redis
 from config import get_settings
 from api import database
 from api.modules.phone_numbers.livekit_sip import livekit_sip_service
+from api.utils.phone import normalize_phone_number
 
 logger = logging.getLogger("voice-agent.api.phone_numbers.sync_service")
 
@@ -37,8 +38,8 @@ class PhoneSyncService:
             self.redis_client = None
 
     def _get_clean_number(self, number: str) -> str:
-        """Helper to normalize number to normalized string for key usage."""
-        return re.sub(r"[\s\-\(\)]", "", number.strip())
+        """Helper to normalize number to canonical E.164 cache key."""
+        return normalize_phone_number(number)
 
     # --- Caching Layer (Database -> Redis Cache -> Runtime Resolver) ---
 

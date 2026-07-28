@@ -4,11 +4,16 @@ Listens for SIP room creation and manages the AI audio pipeline.
 """
 import asyncio
 import logging
+import sys
 from typing import Dict, Any, Optional
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 load_dotenv()
 
+import httpx
+import redis
+from api.modules.phone_numbers.livekit_sip import livekit_sip_service
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -488,7 +493,7 @@ async def register_call_with_backend(agent, started_at, ended_at):
             }
         }
         
-        backend_url = getattr(agent.settings, 'backend_url', 'http://localhost:5000/api/v1')
+        backend_url = agent.settings.backend_url
         async with httpx.AsyncClient() as client:
             response = await client.post(f"{backend_url}/conversations/register", json=payload, timeout=30.0)
             if response.status_code == 201:
@@ -537,63 +542,95 @@ async def entrypoint(ctx: JobContext):
     participant = await ctx.wait_for_participant()
     logger.info(f"PARTICIPANT CONNECTED: {participant.identity}")
     
-    # 1. Run dynamic phone number configuration lookup and credit check
-    import httpx
-    backend_url = getattr(settings, 'backend_url', 'http://localhost:5000/api/v1')
+    # 1. Resolve the called phone number from SIP participant attributes
+    backend_url = settings.backend_url
     out_of_credits = False
     custom_prompt = None
     agent_name = None  # Must be explicitly set from phone number lookup
     unassigned_number = False
     
-    # Try to resolve called number from participant attributes
-    called_number = participant.attributes.get("sip.trunkPhoneNumber")
-    logger.info(f"Checking incoming participant attributes: {participant.attributes}")
+    called_number = (
+        participant.attributes.get("sip.trunkPhoneNumber") or
+        participant.attributes.get("sip.toUser") or
+        participant.attributes.get("sip.to") or
+        participant.attributes.get("sip.phoneNumber")
+    )
+    logger.info("[SIP] Participant Connected")
+    logger.info(f"[SIP] Participant identity: {participant.identity}")
+    logger.info(f"[SIP] Participant attributes: {participant.attributes}")
+    logger.info(f"[SIP] Resolved called_number using attribute: {called_number}")
     
     if called_number:
-        logger.info(f"Inbound SIP call detected for number: {called_number}. Performing lookup...")
+        logger.info(f"[Backend] Starting routing lookup for {called_number} at {backend_url}/phone-numbers/lookup")
         try:
             async with httpx.AsyncClient() as http_client:
-                # Call internal lookup endpoint
                 lookup_resp = await http_client.get(
                     f"{backend_url}/phone-numbers/lookup?number={called_number}",
                     timeout=10.0
                 )
+                logger.info(f"[Backend] Lookup response status: {lookup_resp.status_code}")
+                
                 if lookup_resp.status_code == 200:
                     lookup_data = lookup_resp.json()
+                    logger.info(f"[Backend] Lookup success: {lookup_data}")
                     
-                    # Check for unassigned phone number error
-                    if lookup_data.get("error") == "UNASSIGNED_PHONE_NUMBER":
-                        logger.warning(f"Rejecting call: phone number {called_number} is in Unassigned state (no agent configured).")
+                    # Runtime validation before starting the voice agent
+                    if not lookup_data.get("has_credits", True):
+                        logger.warning(f"[Credits] Insufficient credits for {called_number}")
+                        out_of_credits = True
+                    elif lookup_data.get("agent_status") != "active":
+                        logger.warning(f"[Agent] Assigned agent is not active (status={lookup_data.get('agent_status')})")
                         unassigned_number = True
-                        custom_prompt = lookup_data.get("prompt", "This phone number is not configured yet. Please contact support.")
-                    elif lookup_data.get("error") == "PHONE_NUMBER_NOT_FOUND":
-                        logger.warning(f"Rejecting call: phone number {called_number} not found in system.")
+                        custom_prompt = "The assigned agent is currently unavailable. Please try again later."
+                    elif not lookup_data.get("agent_id"):
+                        logger.warning(f"[Agent] No agent_id returned for {called_number}")
                         unassigned_number = True
-                        custom_prompt = lookup_data.get("prompt", "This phone number is not configured in the system.")
-                    elif lookup_data.get("error") == "AGENT_NOT_FOUND":
-                        logger.error(f"Rejecting call: assigned agent not found for phone number {called_number}.")
+                        custom_prompt = "This phone number is not fully configured. Please contact support."
+                    elif not lookup_data.get("prompt"):
+                        logger.warning(f"[Agent] No prompt configured for assigned agent on {called_number}")
                         unassigned_number = True
-                        custom_prompt = lookup_data.get("prompt", "The assigned agent is not available.")
-                    elif lookup_data.get("exists", False):
-                        logger.info(f"Phone number config found: {lookup_data}")
-                        if not lookup_data.get("has_credits", True):
-                            logger.warning(f"Rejecting call: client/reseller has no credits balance. Balance: {lookup_data.get('minutes_balance', 0)}")
-                            out_of_credits = True
+                        custom_prompt = "The assigned agent is not configured. Please contact support."
+                    else:
                         custom_prompt = lookup_data.get("prompt")
                         agent_name = lookup_data.get("agent_name")
-                    else:
-                        logger.warning(f"Phone number {called_number} exists but has no agent assigned.")
-                        unassigned_number = True
-                        custom_prompt = lookup_data.get("prompt", "This phone number is not configured yet.")
+                        logger.info(f"[Agent] Loaded agent '{agent_name}' for {called_number}")
+                elif lookup_resp.status_code == 404:
+                    logger.warning(f"[Backend] PHONE_NUMBER_NOT_FOUND: {called_number}")
+                    unassigned_number = True
+                    try:
+                        detail = lookup_resp.json().get("detail", {})
+                        custom_prompt = detail.get("prompt", "This phone number is not configured in the system.")
+                    except Exception:
+                        custom_prompt = "This phone number is not configured in the system."
+                elif lookup_resp.status_code == 409:
+                    logger.warning(f"[Backend] PHONE_NOT_ASSIGNED: {called_number}")
+                    unassigned_number = True
+                    try:
+                        detail = lookup_resp.json().get("detail", {})
+                        custom_prompt = detail.get("prompt", "Welcome to 42 voice and we will get back to you.")
+                    except Exception:
+                        custom_prompt = "Welcome to 42 voice and we will get back to you."
+                elif lookup_resp.status_code == 403:
+                    logger.warning(f"[Backend] INSUFFICIENT_CREDITS: {called_number}")
+                    out_of_credits = True
+                else:
+                    logger.error(f"[Backend] Lookup failed: status={lookup_resp.status_code}, body={lookup_resp.text}")
+                    unassigned_number = True
+                    custom_prompt = "An error occurred while processing your call. Please try again later."
         except Exception as e:
-            logger.error(f"Error executing phone number lookup on backend: {e}")
+            logger.exception(f"[Backend] Exception during phone number lookup for {called_number}: {e}")
             unassigned_number = True
             custom_prompt = "An error occurred while processing your call. Please try again later."
     else:
-        # Non-SIP call without phone number - reject as unassigned
-        logger.warning("No called number attribute found (non-SIP/Web connection). Rejecting call as unassigned.")
+        logger.warning("[SIP] No called number attribute found. Rejecting as unassigned.")
         unassigned_number = True
         custom_prompt = "This call cannot be routed. Please dial a configured phone number."
+    
+    # Validate required voice service configuration is present
+    if not settings.deepgram_api_key or not settings.openai_api_key:
+        logger.error("[Runtime] Missing required voice API keys (deepgram/openai)")
+        unassigned_number = True
+        custom_prompt = "Voice service configuration is incomplete. Please contact support."
 
     session_manager = SessionManager()
     booking_agent = BookingAgent(session_manager)
@@ -737,9 +774,70 @@ async def cleanup_on_disconnect(session, session_manager):
     logger.info("SESSION CLEANED")
 
 
+async def validate_worker_dependencies():
+    """Validate all external dependencies before accepting LiveKit jobs."""
+    settings = get_settings()
+    logger.info("[Startup] Validating worker dependencies...")
+
+    # 1. Validate BACKEND_URL format
+    backend_url = settings.backend_url
+    parsed = urlparse(backend_url)
+    if not parsed.scheme or not parsed.netloc:
+        logger.error(f"[Startup] Invalid BACKEND_URL: {backend_url}")
+        sys.exit(1)
+
+    # 2. Verify backend is reachable and database is healthy
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{backend_url}/health", timeout=10.0)
+            logger.info(f"[Startup] Backend health response: {resp.status_code}")
+            if resp.status_code != 200:
+                logger.error(f"[Startup] Backend not healthy: {resp.status_code} {resp.text}")
+                sys.exit(1)
+            try:
+                health_data = resp.json()
+                db_status = health_data.get("data", {}).get("services", {}).get("database", {}).get("status")
+                if db_status != "UP":
+                    logger.error(f"[Startup] Backend database not UP: {db_status}")
+                    sys.exit(1)
+                logger.info("[Startup] Backend database is UP")
+            except Exception as e:
+                logger.warning(f"[Startup] Could not parse backend health DB status: {e}")
+    except Exception as e:
+        logger.error(f"[Startup] Backend is not reachable at {backend_url}: {e}")
+        sys.exit(1)
+
+    # 3. Verify LiveKit connection
+    try:
+        sip_status = await livekit_sip_service.get_sip_status()
+        if not sip_status.get("connected"):
+            logger.error(f"[Startup] LiveKit is not connected: {sip_status}")
+            sys.exit(1)
+        logger.info("[Startup] LiveKit is connected")
+    except Exception as e:
+        logger.error(f"[Startup] LiveKit connection check failed: {e}")
+        sys.exit(1)
+
+    # 4. Verify Redis connection (optional; SessionManager falls back to in-memory)
+    try:
+        redis_client = redis.Redis.from_url(
+            settings.redis_url, socket_connect_timeout=3, socket_timeout=3
+        )
+        redis_client.ping()
+        redis_client.close()
+        logger.info("[Startup] Redis is reachable")
+    except Exception as e:
+        logger.warning(f"[Startup] Redis is not reachable at {settings.redis_url}: {e}. Continuing with in-memory fallback.")
+
+    logger.info("[Startup] All worker dependencies validated successfully")
+
+
 if __name__ == "__main__":
+    asyncio.run(validate_worker_dependencies())
+    settings = get_settings()
     cli.run_app(
         WorkerOptions(
+            agent_name=settings.livekit_agent_name,
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
         ),

@@ -2,6 +2,7 @@ import logging
 from typing import Optional, Tuple, Dict, Any
 from livekit import api as lk_api
 from config import get_settings
+from api.utils.phone import normalize_phone_number
 
 logger = logging.getLogger("voice-agent.api.phone_numbers.livekit_sip")
 
@@ -65,7 +66,7 @@ class LiveKitSipService:
                 auth_realm = ""
             
             # Format number to remove spaces/symbols for standard registration
-            clean_number = number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+            clean_number = normalize_phone_number(number)
             
             # Format number variations to ensure it matches incoming carrier headers
             numbers_list = [clean_number]
@@ -114,7 +115,10 @@ class LiveKitSipService:
                 dispatch_request = lk_api.CreateSIPDispatchRuleRequest(
                     name=f"Rule - {name} ({number})",
                     rule=dispatch_rule,
-                    trunk_ids=[trunk_id]
+                    trunk_ids=[trunk_id],
+                    room_config=lk_api.RoomConfiguration(
+                        agents=[lk_api.RoomAgentDispatch(agent_name=self.settings.livekit_agent_name)]
+                    )
                 )
                 
                 dispatch_response = await lk.sip.create_dispatch_rule(dispatch_request)
@@ -214,7 +218,7 @@ class LiveKitSipService:
                 auth_username = ""
                 auth_realm = ""
             
-            clean_number = number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+            clean_number = normalize_phone_number(number)
             
             numbers_list = [clean_number]
             if clean_number.startswith("+"):
@@ -271,7 +275,7 @@ class LiveKitSipService:
         try:
             logger.info(f"Updating SIP Dispatch Rule {dispatch_rule_id} in LiveKit")
             
-            clean_number = number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+            clean_number = normalize_phone_number(number)
             
             numbers_list = [clean_number]
             if clean_number.startswith("+"):
@@ -297,7 +301,10 @@ class LiveKitSipService:
                 sip_dispatch_rule_id=dispatch_rule_id,
                 name=f"Rule - {name} ({number})",
                 rule=dispatch_rule,
-                trunk_ids=[trunk_id]
+                trunk_ids=[trunk_id],
+                room_config=lk_api.RoomConfiguration(
+                    agents=[lk_api.RoomAgentDispatch(agent_name=self.settings.livekit_agent_name)]
+                )
             )
             
             await lk.sip.update_dispatch_rule(dispatch_rule_id, dispatch_info)
