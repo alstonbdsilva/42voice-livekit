@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { 
+import {
   ArrowLeft, Phone, Info, Shield, Check, Server,
   Lock, Settings, HelpCircle, ToggleLeft, ToggleRight, Sparkles,
   Users, Globe, DollarSign, Search, PlusCircle, RefreshCw, AlertCircle
@@ -79,10 +79,10 @@ export default function AddPhoneNumber() {
     // Fetch clients & resellers
     ClientService.getAll()
       .then(setClients)
-      .catch(() => {});
+      .catch(() => { });
     ResellerService.getAll()
       .then(setResellers)
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   // Pre-populate fields based on provider choice according to official guidelines
@@ -210,7 +210,7 @@ export default function AddPhoneNumber() {
 
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 w-full">
-        
+
         {/* Left Column: Number Details */}
         <div className="lg:col-span-1 space-y-6">
           <div className="bg-white border border-zinc-200 p-5 rounded-sm space-y-4 shadow-xs">
@@ -223,11 +223,10 @@ export default function AddPhoneNumber() {
                 <button
                   type="button"
                   onClick={() => setProvider("CITL")}
-                  className={`py-2.5 px-3 text-xs border rounded-sm flex flex-col items-center gap-1 transition-all ${
-                    provider === "CITL"
+                  className={`py-2.5 px-3 text-xs border rounded-sm flex flex-col items-center gap-1 transition-all ${provider === "CITL"
                       ? "bg-zinc-950 border-zinc-950 text-white font-bold"
                       : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
-                  }`}
+                    }`}
                 >
                   <span className="text-xs font-semibold">CITL Carrier</span>
                   <span className={`text-[9px] ${provider === "CITL" ? "text-zinc-300" : "text-zinc-400"}`}>c-tel.co.nz (2talk)</span>
@@ -235,11 +234,10 @@ export default function AddPhoneNumber() {
                 <button
                   type="button"
                   onClick={() => setProvider("Twilio")}
-                  className={`py-2.5 px-3 text-xs border rounded-sm flex flex-col items-center gap-1 transition-all ${
-                    provider === "Twilio"
+                  className={`py-2.5 px-3 text-xs border rounded-sm flex flex-col items-center gap-1 transition-all ${provider === "Twilio"
                       ? "bg-red-600 border-red-700 text-white font-bold"
                       : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
-                  }`}
+                    }`}
                 >
                   <span className="text-xs font-semibold">Twilio Cloud</span>
                   <span className={`text-[9px] ${provider === "Twilio" ? "text-red-200" : "text-zinc-400"}`}>twilio.com SIP</span>
@@ -474,7 +472,7 @@ export default function AddPhoneNumber() {
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Twilio Account SID</label>
                     <input
                       type="text"
-                      placeholder="e.g. Your Twilio Account SID"
+placeholder="e.g. Your Twilio Account SID"
                       value={sipConfig.authUsername}
                       onChange={(e) => handleSipChange("authUsername", e.target.value)}
                       className="w-full bg-zinc-50 border border-zinc-200 rounded-sm px-2.5 py-1.5 text-xs focus:outline-none focus:border-zinc-950 font-mono"
@@ -713,7 +711,7 @@ export default function AddPhoneNumber() {
               >
                 Cancel
               </button>
-              
+
               <button
                 type="button"
                 onClick={() => handleRegister("pending_sip")}
