@@ -224,8 +224,8 @@ export default function AddPhoneNumber() {
                   type="button"
                   onClick={() => setProvider("CITL")}
                   className={`py-2.5 px-3 text-xs border rounded-sm flex flex-col items-center gap-1 transition-all ${provider === "CITL"
-                      ? "bg-zinc-950 border-zinc-950 text-white font-bold"
-                      : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
+                    ? "bg-zinc-950 border-zinc-950 text-white font-bold"
+                    : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
                     }`}
                 >
                   <span className="text-xs font-semibold">CITL Carrier</span>
@@ -235,8 +235,8 @@ export default function AddPhoneNumber() {
                   type="button"
                   onClick={() => setProvider("Twilio")}
                   className={`py-2.5 px-3 text-xs border rounded-sm flex flex-col items-center gap-1 transition-all ${provider === "Twilio"
-                      ? "bg-red-600 border-red-700 text-white font-bold"
-                      : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
+                    ? "bg-red-600 border-red-700 text-white font-bold"
+                    : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
                     }`}
                 >
                   <span className="text-xs font-semibold">Twilio Cloud</span>
