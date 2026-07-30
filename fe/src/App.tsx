@@ -14,6 +14,7 @@ import ClientDetail from "@/pages/ClientDetail";
 import Resellers from "@/pages/Resellers";
 import ResellerDetail from "@/pages/ResellerDetail";
 import Agents from "@/pages/Agents";
+import CreateAgent from "@/pages/CreateAgent";
 import AgentDetail from "@/pages/AgentDetail";
 import Conversations from "@/pages/Conversations";
 import ConversationDetail from "@/pages/ConversationDetail";
@@ -35,6 +36,7 @@ import Plans from "@/pages/Plans";
 import PhoneNumbers from "@/pages/PhoneNumbers";
 import AddPhoneNumber from "@/pages/AddPhoneNumber";
 import Outbound from "@/pages/Outbound";
+import Tools from "@/pages/Tools";
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
@@ -59,6 +61,7 @@ export default function App() {
         <Route path="/resellers" element={<Shell><Resellers /></Shell>} />
         <Route path="/resellers/:id" element={<Shell><ResellerDetail /></Shell>} />
         <Route path="/agents" element={<Shell><Agents /></Shell>} />
+        <Route path="/agents/create" element={<Shell><CreateAgent /></Shell>} />
         <Route path="/agents/:id" element={<Shell><AgentDetail /></Shell>} />
         <Route path="/conversations" element={<Shell><Conversations /></Shell>} />
         <Route path="/conversations/:id" element={<Shell><ConversationDetail /></Shell>} />
@@ -67,6 +70,7 @@ export default function App() {
         <Route path="/phone-numbers" element={<Shell><PhoneNumbers /></Shell>} />
         <Route path="/phone-numbers/add" element={<Shell><AddPhoneNumber /></Shell>} />
         <Route path="/outbound" element={<Shell><Outbound /></Shell>} />
+        <Route path="/tools" element={<Shell><Tools /></Shell>} />
         <Route path="/invoices" element={<Shell><Invoices /></Shell>} />
         <Route path="/invoices/:id" element={<Shell><InvoiceDetail /></Shell>} />
         <Route path="/plans" element={<Shell><Plans /></Shell>} />

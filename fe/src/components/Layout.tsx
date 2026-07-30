@@ -5,7 +5,7 @@ import { LucideIcon } from "lucide-react";
 import {
   LayoutDashboard, Users, Briefcase, Bot, MessageSquare, Mic, FileText,
   Receipt, CreditCard, FileSignature, RefreshCw, Bell, BarChart3, Settings,
-  ChevronDown, Search, LogOut, Wallet, ScrollText, Phone, PhoneCall
+  ChevronDown, Search, LogOut, Wallet, ScrollText, Phone, PhoneCall, Wrench
 } from "lucide-react";
 
 interface NavLinkItem {
@@ -39,6 +39,7 @@ const navItems: NavItem[] = [
   { to: "/messages", label: "Messages", icon: MessageSquare, roles: [] },
   { to: "/phone-numbers", label: "Phone Numbers", icon: Phone, roles: [] },
   { to: "/outbound", label: "Outbound Dialer", icon: PhoneCall, roles: [] },
+  { to: "/tools", label: "Tools", icon: Wrench, roles: [] },
   { section: "FINANCE" },
   { to: "/plans", label: "Plans", icon: ScrollText, roles: [] },
   { to: "/invoices", label: "Invoices", icon: Receipt, roles: [] },

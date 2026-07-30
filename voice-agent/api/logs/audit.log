@@ -46,3 +46,5 @@
 {"timestamp":"2026-07-27T23:46:17","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
 {"timestamp":"2026-07-28T11:24:43","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
 {"timestamp":"2026-07-28T15:09:19","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-28T16:55:58","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-07-29T18:50:02","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 5ccfa372-a2df-4856-9113-a7f15da0f7f2 - IP: 127.0.0.1 - Payload: None"}
