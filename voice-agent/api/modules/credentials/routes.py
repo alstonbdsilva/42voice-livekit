@@ -46,7 +46,7 @@ async def create_credential(
     request: CreateCredentialRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    cred = await service.create_credential(request.dict(), current_user)
+    cred = await service.create_credential(request.model_dump(), current_user)
     return ApiResponse.success(status_code=201, message="Credential created successfully", data=cred)
 
 
@@ -69,7 +69,7 @@ async def update_credential(
     request: UpdateCredentialRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    cred = await service.update_credential(credential_uuid, request.dict(exclude_unset=True), current_user)
+    cred = await service.update_credential(credential_uuid, request.model_dump(exclude_unset=True), current_user)
     return ApiResponse.success(message="Credential updated successfully", data=cred)
 
 

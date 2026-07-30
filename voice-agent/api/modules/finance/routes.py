@@ -241,7 +241,7 @@ async def update_plan(plan_id: str, req_body: UpdatePlanRequest):
     params = [plan_uuid]
     idx = 2
     
-    dto = req_body.dict(exclude_unset=True)
+    dto = req_body.model_dump(exclude_unset=True)
     if not dto:
         raise HTTPException(status_code=400, detail="No fields to update")
         
@@ -539,7 +539,7 @@ async def update_contract(contract_id: str, req_body: UpdateContractRequest):
     params = [contract_uuid]
     idx = 2
     
-    dto = req_body.dict(exclude_unset=True)
+    dto = req_body.model_dump(exclude_unset=True)
     if not dto:
         raise HTTPException(status_code=400, detail="No fields to update")
         
@@ -925,7 +925,7 @@ async def get_dashboard_money():
 
     # Calculate margin
     if totals["grossRevenue"] > 0:
-        totals["grossMargin"] = int(round((totals["netRevenue"] / totals["grossRevenue"]) * 100))
+        totals["grossMargin"] = round((totals["netRevenue"] / totals["grossRevenue"]) * 100)
     else:
         totals["grossMargin"] = 100
 

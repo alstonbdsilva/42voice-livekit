@@ -14,6 +14,7 @@ load_dotenv()
 import httpx
 import redis
 from api.modules.phone_numbers.livekit_sip import livekit_sip_service
+from api import database
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -41,7 +42,7 @@ logger = logging.getLogger("voice-agent")
 class VoiceAgent(Agent):
     """Voice agent with orchestrator tools."""
     
-    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, ctx: JobContext, vad=None, out_of_credits: bool = False, custom_prompt: Optional[str] = None, agent_name: Optional[str] = None, unassigned_number: bool = False):
+    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, ctx: JobContext, vad=None, out_of_credits: bool = False, custom_prompt: Optional[str] = None, agent_name: Optional[str] = None, unassigned_number: bool = False, client_id: Optional[str] = None):
         self.session_manager = session_manager
         self.booking_agent = booking_agent
         self.sales_agent = sales_agent
@@ -49,6 +50,7 @@ class VoiceAgent(Agent):
         self.room_name = room_name
         self.participant_id = participant_id
         self.ctx = ctx
+        self.client_id = client_id
         # agent_name must be explicitly set from phone number lookup; None indicates unassigned
         self.agent_name = agent_name or "unknown"
         self.out_of_credits = out_of_credits
@@ -76,7 +78,7 @@ class VoiceAgent(Agent):
         instructions = (
             "You are a billing notice voice. State that the account is out of credits and goodbye."
             if out_of_credits
-            else (custom_prompt if custom_prompt else "You are the orchestrator agent. Start by asking how you can help the user today. Use your tools to route requests or handle booking, sales, and support.")
+            else (custom_prompt if custom_prompt else "You are the orchestrator agent. Start by asking how you can help the user today. Use your tools to route requests, handle booking, sales, and support, or end the call when the conversation is finished.")
         )
         
         super().__init__(
@@ -121,12 +123,39 @@ class VoiceAgent(Agent):
         if self.unassigned_number:
             try:
                 logger.warning("Rejecting call: phone number is unassigned (no agent configured)")
-                message = "Welcome to 42 voice and we will get back to you."
-                self.session.say(message)
+                # Default message from the lookup instructions (e.g. agent is currently unavailable, config error, etc.)
+                message = self.instructions if self.instructions else "Welcome to 42 voice and we will get back to you."
+                
+                # Fetch end_call tool config from database if available (checking client-specific first, then system-wide/default)
+                try:
+                    if database.pool is None:
+                        await database.init_pool()
+                    rows = []
+                    if self.client_id:
+                        rows = await database.query(
+                            "SELECT definition FROM tools WHERE client_id = $1::uuid AND category = 'end_call' AND status = 'active' LIMIT 1",
+                            [self.client_id]
+                        )
+                    if not rows:
+                        rows = await database.query(
+                            "SELECT definition FROM tools WHERE client_id IS NULL AND category = 'end_call' AND status = 'active' LIMIT 1"
+                        )
+                    if rows:
+                        config = rows[0]["definition"].get("config", {})
+                        message_type = config.get("messageType", "none")
+                        if message_type == "custom":
+                            message = config.get("customMessage", "")
+                        elif message_type == "none":
+                            message = ""
+                except Exception as db_err:
+                    logger.error(f"Error fetching end_call config for unassigned number: {db_err}")
+                
+                if message:
+                    self.session.say(message)
                 self._greeting_sent = True
                 
                 async def delayed_disconnect():
-                    await asyncio.sleep(4.0)
+                    await asyncio.sleep(4.0 if message else 0.5)
                     logger.info("Disconnecting room due to unassigned phone number")
                     if self.ctx and self.ctx.room:
                         await self.ctx.room.disconnect()
@@ -346,6 +375,51 @@ class VoiceAgent(Agent):
         """Confirm that an issue has been successfully resolved."""
         return await self.support_agent.confirm_resolution(session_id, resolution_summary)
 
+    @function_tool()
+    async def end_call(self) -> str:
+        """End the call immediately when the conversation is finished, when the user requests to disconnect, or when you are done helping."""
+        logger.info("end_call tool executed")
+        goodbye_msg = "Thank you for calling. Goodbye."
+        
+        try:
+            if database.pool is None:
+                await database.init_pool()
+            # Query client-specific end_call tool first, and fall back to system-wide default (client_id IS NULL)
+            rows = []
+            if self.client_id:
+                rows = await database.query(
+                    "SELECT definition FROM tools WHERE client_id = $1::uuid AND category = 'end_call' AND status = 'active' LIMIT 1",
+                    [self.client_id]
+                )
+            if not rows:
+                rows = await database.query(
+                    "SELECT definition FROM tools WHERE client_id IS NULL AND category = 'end_call' AND status = 'active' LIMIT 1"
+                )
+            if rows:
+                config = rows[0]["definition"].get("config", {})
+                message_type = config.get("messageType", "none")
+                if message_type == "custom":
+                    goodbye_msg = config.get("customMessage", "")
+                elif message_type == "none":
+                    goodbye_msg = ""
+        except Exception as e:
+            logger.error(f"Error fetching end_call tool config: {e}")
+
+        if goodbye_msg:
+            try:
+                self.session.say(goodbye_msg)
+            except Exception as e:
+                logger.error(f"Error saying goodbye message: {e}")
+                
+        async def delayed_disconnect():
+            await asyncio.sleep(4.0 if goodbye_msg else 0.5)
+            logger.info("Disconnecting room via end_call tool")
+            if self.ctx and self.ctx.room:
+                await self.ctx.room.disconnect()
+                
+        asyncio.create_task(delayed_disconnect())
+        return "Call is ending."
+
 
 async def register_call_with_backend(agent, started_at, ended_at):
     try:
@@ -548,6 +622,7 @@ async def entrypoint(ctx: JobContext):
     custom_prompt = None
     agent_name = None  # Must be explicitly set from phone number lookup
     unassigned_number = False
+    client_id = None
     
     called_number = (
         participant.attributes.get("sip.trunkPhoneNumber") or
@@ -573,6 +648,7 @@ async def entrypoint(ctx: JobContext):
                 if lookup_resp.status_code == 200:
                     lookup_data = lookup_resp.json()
                     logger.info(f"[Backend] Lookup success: {lookup_data}")
+                    client_id = lookup_data.get("client_id")
                     
                     # Runtime validation before starting the voice agent
                     if not lookup_data.get("has_credits", True):
@@ -661,7 +737,8 @@ async def entrypoint(ctx: JobContext):
         out_of_credits=out_of_credits,
         custom_prompt=custom_prompt,
         agent_name=agent_name,
-        unassigned_number=unassigned_number
+        unassigned_number=unassigned_number,
+        client_id=client_id
     )
     
     # Initialize recording state

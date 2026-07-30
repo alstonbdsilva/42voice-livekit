@@ -96,7 +96,7 @@ async def create(req_body: CreateClientRequest, request: Request, current_user: 
                 code="RESELLER_ID_REQUIRED"
             )
             
-    dto = req_body.dict()
+    dto = req_body.model_dump()
     dto["resellerId"] = reseller_id
     
     temp_password = generate_temp_password()
@@ -137,7 +137,7 @@ async def update(client_id: str, req_body: UpdateClientRequest, request: Request
     if current_user["role"] == "RESELLER" and client_rec["resellerId"] != current_user["reseller_id"]:
         raise ForbiddenError("You do not have access to edit this client", "CLIENT_FORBIDDEN")
         
-    dto = req_body.dict(exclude_unset=True)
+    dto = req_body.model_dump(exclude_unset=True)
     # Resellers cannot modify the resellerId relationship
     if current_user["role"] == "RESELLER" and "resellerId" in dto:
         dto.pop("resellerId")

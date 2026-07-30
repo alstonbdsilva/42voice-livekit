@@ -202,7 +202,7 @@ async def update_profile(req_body: UpdateProfileRequest, request: Request, curre
     user_agent = request.headers.get("user-agent", "")
     
     # Filter only provided values (selective profile updates)
-    updates = req_body.dict(exclude_unset=True)
+    updates = req_body.model_dump(exclude_unset=True)
     
     profile = await auth_service.update_profile(current_user["id"], updates, client_ip, user_agent)
     return ApiResponse.success(

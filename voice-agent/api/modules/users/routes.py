@@ -99,7 +99,7 @@ async def create(req_body: CreateUserRequest, request: Request, current_user: Di
     user_agent = request.headers.get("user-agent", "")
     
     temp_password = generate_temp_password()
-    dto = req_body.dict()
+    dto = req_body.model_dump()
     
     created = await users_service.create_user(
         dto, 
@@ -127,7 +127,7 @@ async def update(user_id: str, req_body: UpdateUserRequest, request: Request, cu
     client_ip = request.client.host if request.client else "unknown"
     user_agent = request.headers.get("user-agent", "")
     
-    dto = req_body.dict(exclude_unset=True)
+    dto = req_body.model_dump(exclude_unset=True)
     updated = await users_service.update_user(
         user_id, 
         dto, 

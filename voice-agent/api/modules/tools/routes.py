@@ -73,7 +73,7 @@ async def create_tool(
     request: CreateToolRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    tool = await tool_service.create_tool(request.dict(), current_user)
+    tool = await tool_service.create_tool(request.model_dump(), current_user)
     return ApiResponse.success(status_code=201, message="Tool created successfully", data=tool)
 
 
@@ -93,7 +93,7 @@ async def update_tool(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     tool = await tool_service.update_tool(
-        tool_uuid, request.dict(exclude_unset=True), _filter_context(current_user)
+        tool_uuid, request.model_dump(exclude_unset=True), _filter_context(current_user)
     )
     return ApiResponse.success(message="Tool updated successfully", data=tool)
 

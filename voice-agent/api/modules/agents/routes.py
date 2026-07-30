@@ -46,7 +46,7 @@ async def create(req_body: CreateAgentRequest, current_user: Dict[str, Any] = De
         "client_id": current_user.get("client_id"),
         "reseller_id": current_user.get("reseller_id")
     }
-    agent = await agent_service.create_agent(req_body.dict(), user_context)
+    agent = await agent_service.create_agent(req_body.model_dump(), user_context)
     if not agent:
         return ApiResponse.error(
             status_code=500,
@@ -103,7 +103,7 @@ async def update(agent_id: str, req_body: UpdateAgentRequest, current_user: Dict
         )
 
     if req_body.name is not None or req_body.useCase is not None or req_body.activityDescription is not None or req_body.callType is not None:
-        agent = await agent_service.update_agent_details(agent_id, req_body.dict(exclude_unset=True))
+        agent = await agent_service.update_agent_details(agent_id, req_body.model_dump(exclude_unset=True))
 
     if req_body.status:
         agent = await agent_service.update_agent_status(agent_id, req_body.status)

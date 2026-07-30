@@ -60,7 +60,7 @@ class RegisterCallRequest(BaseModel):
 @router.post("/register")
 async def register(req_body: RegisterCallRequest):
     """Public endpoint called by agent.py to register call details upon disconnection."""
-    dto = req_body.dict()
+    dto = req_body.model_dump()
     conv = await conv_service.register_call(dto)
     return ApiResponse.success(
         status_code=201,

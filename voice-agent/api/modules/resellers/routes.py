@@ -67,7 +67,7 @@ async def create(req_body: CreateResellerRequest, request: Request):
     user_agent = request.headers.get("user-agent", "")
     
     temp_password = generate_temp_password()
-    dto = req_body.dict()
+    dto = req_body.model_dump()
     
     created = await reseller_service.create_reseller(
         dto, 
@@ -94,7 +94,7 @@ async def update(reseller_id: str, req_body: UpdateResellerRequest, request: Req
     client_ip = request.client.host if request.client else "unknown"
     user_agent = request.headers.get("user-agent", "")
     
-    dto = req_body.dict(exclude_unset=True)
+    dto = req_body.model_dump(exclude_unset=True)
     updated = await reseller_service.update_reseller(
         reseller_id, 
         dto, 
