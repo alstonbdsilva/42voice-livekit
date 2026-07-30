@@ -255,6 +255,96 @@ export interface DashboardSummary {
   ageing?: Record<string, number>;
 }
 
+export type ToolCategory = "http_api" | "end_call" | "transfer_call" | "calculator" | "mcp";
+export type ToolStatus = "active" | "draft" | "archived";
+
+export interface ToolParameter {
+  name: string;
+  type: "string" | "number" | "boolean" | "object" | "array";
+  description: string;
+  required: boolean;
+}
+
+export interface ToolPresetParameter extends ToolParameter {
+  value_template: string;
+}
+
+export interface HttpApiToolConfig {
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  url: string;
+  headers?: Record<string, string>;
+  auth_type?: "none" | "api_key" | "bearer";
+  auth_header?: string;
+  auth_value?: string;
+  parameters?: ToolParameter[];
+  preset_parameters?: ToolPresetParameter[];
+  timeout_ms?: number;
+}
+
+export interface EndCallToolConfig {
+  messageType: "none" | "custom" | "audio";
+  customMessage?: string;
+  endCallReason: boolean;
+  endCallReasonDescription?: string;
+}
+
+export interface TransferCallToolConfig {
+  destination: string;
+  messageType: "none" | "custom" | "audio";
+  customMessage?: string;
+  timeout: number;
+  parameters?: ToolParameter[];
+}
+
+export interface McpToolConfig {
+  url: string;
+  auth_type?: "none" | "api_key" | "bearer";
+  auth_header?: string;
+  auth_value?: string;
+  tools_filter?: string[];
+  discovered_tools?: { name: string; description?: string }[];
+}
+
+export interface ToolDefinition {
+  schema_version?: number;
+  type: ToolCategory;
+  config?:
+    | HttpApiToolConfig
+    | EndCallToolConfig
+    | TransferCallToolConfig
+    | McpToolConfig
+    | Record<string, never>;
+}
+
+export interface Tool {
+  id: string;
+  toolUuid: string;
+  name: string;
+  description?: string | null;
+  category: ToolCategory;
+  icon?: string | null;
+  iconColor?: string | null;
+  status: ToolStatus;
+  definition: ToolDefinition;
+  createdAt: string;
+  updatedAt?: string | null;
+  createdByEmail?: string | null;
+}
+
+export interface ToolTestResult {
+  status: "success" | "error";
+  status_code?: number | null;
+  data?: any;
+  error?: string | null;
+  hint?: string | null;
+  request_method: string;
+  request_url: string;
+  request_headers: Record<string, string>;
+  request_body?: Record<string, any> | null;
+  request_params?: Record<string, any> | null;
+  duration_ms: number;
+}
+
 export interface DashboardMoney {
   totals: {
     revenueCollected: number;

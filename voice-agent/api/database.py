@@ -71,6 +71,55 @@ async def init_pool() -> None:
             CREATE INDEX IF NOT EXISTS idx_phone_numbers_agent ON phone_numbers(agent_id);
             """)
         logger.info("Verified phone_numbers table and indexes.")
+
+        # Self-healing migration for tools table
+        logger.info("Verifying tools table exists...")
+        async with pool.acquire() as conn:
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS tools (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                tool_uuid UUID UNIQUE NOT NULL DEFAULT uuid_generate_v4(),
+                name VARCHAR(255) NOT NULL,
+                description TEXT,
+                category VARCHAR(50) NOT NULL DEFAULT 'http_api',
+                icon VARCHAR(50) DEFAULT 'globe',
+                icon_color VARCHAR(7) DEFAULT '#3B82F6',
+                status VARCHAR(50) NOT NULL DEFAULT 'active',
+                definition JSONB NOT NULL DEFAULT '{}'::jsonb,
+                user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+                client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_tools_user ON tools(user_id);
+            CREATE INDEX IF NOT EXISTS idx_tools_client ON tools(client_id);
+            CREATE INDEX IF NOT EXISTS idx_tools_category ON tools(category);
+            CREATE INDEX IF NOT EXISTS idx_tools_status ON tools(status);
+            """)
+        logger.info("Verified tools table and indexes.")
+
+        # Self-healing migration for external_credentials table
+        logger.info("Verifying external_credentials table exists...")
+        async with pool.acquire() as conn:
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS external_credentials (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                credential_uuid UUID UNIQUE NOT NULL DEFAULT uuid_generate_v4(),
+                client_id UUID REFERENCES clients(id) ON DELETE CASCADE,
+                name VARCHAR(255) NOT NULL,
+                description TEXT,
+                credential_type VARCHAR(50) NOT NULL DEFAULT 'none',
+                credential_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+                user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                is_active BOOLEAN NOT NULL DEFAULT true,
+                UNIQUE (client_id, name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_external_credentials_client ON external_credentials(client_id);
+            CREATE INDEX IF NOT EXISTS idx_external_credentials_uuid ON external_credentials(credential_uuid);
+            """)
+        logger.info("Verified external_credentials table and indexes.")
     except Exception as e:
         logger.critical(f"Failed to initialize PostgreSQL pool: {e}")
         raise

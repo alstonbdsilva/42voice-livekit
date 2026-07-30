@@ -37,6 +37,7 @@ import PhoneNumbers from "@/pages/PhoneNumbers";
 import AddPhoneNumber from "@/pages/AddPhoneNumber";
 import Outbound from "@/pages/Outbound";
 import Tools from "@/pages/Tools";
+import ToolDetail from "@/pages/ToolDetail";
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
@@ -71,6 +72,7 @@ export default function App() {
         <Route path="/phone-numbers/add" element={<Shell><AddPhoneNumber /></Shell>} />
         <Route path="/outbound" element={<Shell><Outbound /></Shell>} />
         <Route path="/tools" element={<Shell><Tools /></Shell>} />
+        <Route path="/tools/:toolUuid" element={<Shell><ToolDetail /></Shell>} />
         <Route path="/invoices" element={<Shell><Invoices /></Shell>} />
         <Route path="/invoices/:id" element={<Shell><InvoiceDetail /></Shell>} />
         <Route path="/plans" element={<Shell><Plans /></Shell>} />

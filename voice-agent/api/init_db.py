@@ -367,6 +367,27 @@ CREATE TABLE IF NOT EXISTS phone_numbers (
 CREATE INDEX IF NOT EXISTS idx_phone_numbers_number ON phone_numbers(number);
 CREATE INDEX IF NOT EXISTS idx_phone_numbers_client ON phone_numbers(client_id);
 CREATE INDEX IF NOT EXISTS idx_phone_numbers_agent ON phone_numbers(agent_id);
+
+CREATE TABLE IF NOT EXISTS tools (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tool_uuid UUID UNIQUE NOT NULL DEFAULT uuid_generate_v4(),
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    category VARCHAR(50) NOT NULL DEFAULT 'http_api',
+    icon VARCHAR(50) DEFAULT 'globe',
+    icon_color VARCHAR(7) DEFAULT '#3B82F6',
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    definition JSONB NOT NULL DEFAULT '{}'::jsonb,
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_tools_user ON tools(user_id);
+CREATE INDEX IF NOT EXISTS idx_tools_client ON tools(client_id);
+CREATE INDEX IF NOT EXISTS idx_tools_category ON tools(category);
+CREATE INDEX IF NOT EXISTS idx_tools_status ON tools(status);
 """
 
 seed_roles_sql = """

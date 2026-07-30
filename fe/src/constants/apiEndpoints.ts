@@ -15,6 +15,7 @@ export const API_ENDPOINTS = {
   DASHBOARD_MONEY: "/dashboard/money",
   DASHBOARD_SUMMARY: "/dashboard/summary",
   PHONE_NUMBERS: "/phone-numbers",
+  TOOLS: "/tools",
 } as const;
 
 export type ApiEndpoints = typeof API_ENDPOINTS;
