@@ -132,15 +132,41 @@ export default function CreateAgent() {
     setKnowledgeItems((prev) => prev.filter((k) => k.id !== id));
   };
 
-  const addKnowledgeFiles = (files: FileList | File[]) => {
-    const items: KnowledgeItem[] = Array.from(files).map((f) => ({
-      id: crypto.randomUUID(),
-      type: "file",
-      label: f.name,
-      value: f.name,
-      size: f.size,
-    }));
-    if (items.length) setKnowledgeItems((prev) => [...prev, ...items]);
+  const addKnowledgeFiles = async (files: FileList | File[]) => {
+    for (const file of Array.from(files)) {
+      const fileId = crypto.randomUUID();
+      // Add a placeholder item with type "file"
+      const placeholderItem: KnowledgeItem = {
+        id: fileId,
+        type: "file",
+        label: `${file.name} (Uploading...)`,
+        value: file.name,
+        size: file.size,
+      };
+      
+      setKnowledgeItems((prev) => [...prev, placeholderItem]);
+      
+      try {
+        const response = await AgentService.uploadFile(file);
+        // Update placeholder with returned S3 URL
+        setKnowledgeItems((prev) =>
+          prev.map((item) =>
+            item.id === fileId
+              ? {
+                  ...item,
+                  label: file.name,
+                  value: response.s3Url,
+                }
+              : item
+          )
+        );
+        toast.success(`Uploaded ${file.name} successfully!`);
+      } catch (err: any) {
+        toast.error(`Failed to upload ${file.name}`);
+        // Remove item on failure
+        setKnowledgeItems((prev) => prev.filter((item) => item.id !== fileId));
+      }
+    }
   };
 
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -163,6 +189,11 @@ export default function CreateAgent() {
       return toast.error("Agent name is required.");
     }
 
+    const isUploading = knowledgeItems.some(item => item.label.includes("(Uploading...)"));
+    if (isUploading) {
+      return toast.error("Please wait for all files to finish uploading.");
+    }
+
     setLoading(true);
     try {
       const dto: CreateAgentDto = {
@@ -170,6 +201,17 @@ export default function CreateAgent() {
         callType,
         useCase: useCase.trim(),
         activityDescription: systemPrompt.trim(),
+        voiceName,
+        voiceGender,
+        guardrails,
+        customGuardrails: customGuardrails.trim(),
+        knowledgeItems: knowledgeItems.map((k) => ({
+          id: k.id,
+          type: k.type,
+          label: k.label,
+          value: k.value,
+          size: k.size,
+        })),
       };
 
       await AgentService.create(dto);

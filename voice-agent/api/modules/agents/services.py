@@ -77,7 +77,12 @@ class AgentService:
             "status": "active",
             "userId": user_id,
             "resellerIds": [],
-            "clientIds": []
+            "clientIds": [],
+            "voiceName": payload.get("voiceName", "aria"),
+            "voiceGender": payload.get("voiceGender", "female"),
+            "guardrails": payload.get("guardrails", {}),
+            "customGuardrails": payload.get("customGuardrails", ""),
+            "knowledgeItems": payload.get("knowledgeItems", [])
         }
 
         if role in ["SUPER_ADMIN", "FINANCE_ADMIN"]:
@@ -112,6 +117,14 @@ class AgentService:
         if isinstance(assigned_clients, str):
             assigned_clients = json.loads(assigned_clients)
 
+        guardrails = a.get("guardrails") or {}
+        if isinstance(guardrails, str):
+            guardrails = json.loads(guardrails)
+            
+        knowledge_items = a.get("knowledge_items") or []
+        if isinstance(knowledge_items, str):
+            knowledge_items = json.loads(knowledge_items)
+
         return {
             "id": str(a["id"]),
             "name": a["name"],
@@ -132,5 +145,10 @@ class AgentService:
             "lastActivity": a["last_activity"].isoformat() if hasattr(a["last_activity"], "isoformat") else a["last_activity"],
             "clientId": str(a["client_id"]) if a.get("client_id") else None,
             "assignedResellers": assigned_resellers or [],
-            "assignedClients": assigned_clients or []
+            "assignedClients": assigned_clients or [],
+            "voiceName": a.get("voice_name") or "aria",
+            "voiceGender": a.get("voice_gender") or "female",
+            "guardrails": guardrails,
+            "customGuardrails": a.get("custom_guardrails") or "",
+            "knowledgeItems": knowledge_items
         }

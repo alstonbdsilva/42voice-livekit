@@ -42,6 +42,11 @@ export interface Agent {
   clientId?: string | number;
   assignedResellers?: AgentEntityRef[];
   assignedClients?: AgentEntityRef[];
+  voiceName?: string;
+  voiceGender?: string;
+  guardrails?: any;
+  customGuardrails?: string;
+  knowledgeItems?: any[];
 }
 
 export interface TranscriptLine {

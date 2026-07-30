@@ -1,15 +1,16 @@
-"""
-Agents Routers.
-Defines endpoints for retrieving agent profiles, performance metrics, and updating status fields.
-"""
-
-from fastapi import APIRouter, Depends, Request
+import logging
+import uuid
+import boto3
+from fastapi import APIRouter, Depends, Request, UploadFile, File
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 
+from config import get_settings
 from api.utils.api_response import ApiResponse
 from api.modules.agents.services import AgentService
 from api.middlewares.auth import get_current_user
+
+logger = logging.getLogger("voice-agent.api.agents.routes")
 
 router = APIRouter()
 agent_service = AgentService()
@@ -24,6 +25,11 @@ class UpdateAgentRequest(BaseModel):
     callType: Optional[str] = None
     resellerIds: Optional[List[str]] = None
     clientIds: Optional[List[str]] = None
+    voiceName: Optional[str] = None
+    voiceGender: Optional[str] = None
+    guardrails: Optional[Dict[str, Any]] = None
+    customGuardrails: Optional[str] = None
+    knowledgeItems: Optional[List[Dict[str, Any]]] = None
 
 
 class CreateAgentRequest(BaseModel):
@@ -33,10 +39,68 @@ class CreateAgentRequest(BaseModel):
     activityDescription: Optional[str] = ""
     resellerIds: Optional[List[str]] = []
     clientIds: Optional[List[str]] = []
+    voiceName: Optional[str] = "aria"
+    voiceGender: Optional[str] = "female"
+    guardrails: Optional[Dict[str, Any]] = {}
+    customGuardrails: Optional[str] = ""
+    knowledgeItems: Optional[List[Dict[str, Any]]] = []
 
 
 # --- Route Endpoints ---
 # All agent endpoints require authentication
+
+@router.post("/upload")
+async def upload_agent_file(
+    file: UploadFile = File(...),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Upload a knowledge base file to S3 and return the S3 details.
+    """
+    settings = get_settings()
+    try:
+        # Get S3 client
+        endpoint_url = f"https://s3.{settings.aws_region}.amazonaws.com" if settings.aws_region else None
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=settings.aws_access_key_id,
+            aws_secret_access_key=settings.aws_secret_access_key,
+            region_name=settings.aws_region,
+            endpoint_url=endpoint_url
+        )
+        
+        # Generate unique key in S3
+        unique_id = uuid.uuid4().hex
+        s3_key = f"knowledge_base/{unique_id}_{file.filename}"
+        
+        # Upload
+        s3_client.upload_fileobj(
+            file.file,
+            settings.s3_bucket_name,
+            s3_key,
+            ExtraArgs={"ContentType": file.content_type or "application/octet-stream"}
+        )
+        
+        s3_url = f"https://{settings.s3_bucket_name}.s3.{settings.aws_region}.amazonaws.com/{s3_key}"
+        
+        return ApiResponse.success(
+            status_code=200,
+            message="File uploaded successfully",
+            data={
+                "s3Key": s3_key,
+                "s3Url": s3_url,
+                "filename": file.filename,
+                "contentType": file.content_type
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to upload file to S3: {e}")
+        return ApiResponse.error(
+            status_code=500,
+            message=f"Failed to upload file to S3: {str(e)}",
+            code="S3_UPLOAD_FAILED"
+        )
+
 
 @router.post("")
 async def create(req_body: CreateAgentRequest, current_user: Dict[str, Any] = Depends(get_current_user)):

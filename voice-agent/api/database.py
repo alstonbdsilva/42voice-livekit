@@ -72,6 +72,18 @@ async def init_pool() -> None:
             """)
         logger.info("Verified phone_numbers table and indexes.")
 
+        # Self-healing migration for agents table columns
+        logger.info("Verifying agents table columns exist...")
+        async with pool.acquire() as conn:
+            await conn.execute("""
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS voice_name VARCHAR(50) DEFAULT 'aria';
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS voice_gender VARCHAR(20) DEFAULT 'female';
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS guardrails JSONB DEFAULT '{}'::jsonb;
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS custom_guardrails TEXT;
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS knowledge_items JSONB DEFAULT '[]'::jsonb;
+            """)
+        logger.info("Verified agents table columns.")
+
         # Self-healing migration for tools table
         logger.info("Verifying tools table exists...")
         async with pool.acquire() as conn:

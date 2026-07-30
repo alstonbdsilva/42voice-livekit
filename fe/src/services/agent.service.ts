@@ -9,6 +9,11 @@ export interface CreateAgentDto {
   activityDescription?: string;
   resellerIds?: string[];
   clientIds?: string[];
+  voiceName?: string;
+  voiceGender?: string;
+  guardrails?: any;
+  customGuardrails?: string;
+  knowledgeItems?: any[];
 }
 
 interface ApiSuccessResponse<T> {
@@ -46,6 +51,21 @@ class AgentServiceClass {
 
   async updateDetails(id: string, details: { name?: string; useCase?: string; activityDescription?: string; callType?: string }): Promise<Agent> {
     const res = await api.patch<ApiSuccessResponse<Agent>>(`${API_ENDPOINTS.AGENTS}/${id}`, details);
+    return res?.data ?? (res as any);
+  }
+
+  async uploadFile(file: File): Promise<{ s3Key: string; s3Url: string; filename: string; contentType: string }> {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await api.post<ApiSuccessResponse<{ s3Key: string; s3Url: string; filename: string; contentType: string }>>(
+      `${API_ENDPOINTS.AGENTS}/upload`,
+      formData,
+      {
+        headers: {
+          "Content-Type": "multipart/form-data",
+        },
+      }
+    );
     return res?.data ?? (res as any);
   }
 }

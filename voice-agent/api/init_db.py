@@ -136,6 +136,11 @@ CREATE TABLE IF NOT EXISTS agents (
     last_activity TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     user_id UUID REFERENCES users(id) ON DELETE CASCADE,
     client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
+    voice_name VARCHAR(50) DEFAULT 'aria',
+    voice_gender VARCHAR(20) DEFAULT 'female',
+    guardrails JSONB DEFAULT '{}'::jsonb,
+    custom_guardrails TEXT,
+    knowledge_items JSONB DEFAULT '[]'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -427,6 +432,11 @@ async def init_db() -> None:
                 ALTER TABLE agents ADD COLUMN IF NOT EXISTS call_type VARCHAR(50) NOT NULL DEFAULT 'inbound';
                 ALTER TABLE agents ADD COLUMN IF NOT EXISTS use_case VARCHAR(255);
                 ALTER TABLE agents ADD COLUMN IF NOT EXISTS activity_description TEXT;
+                ALTER TABLE agents ADD COLUMN IF NOT EXISTS voice_name VARCHAR(50) DEFAULT 'aria';
+                ALTER TABLE agents ADD COLUMN IF NOT EXISTS voice_gender VARCHAR(20) DEFAULT 'female';
+                ALTER TABLE agents ADD COLUMN IF NOT EXISTS guardrails JSONB DEFAULT '{}'::jsonb;
+                ALTER TABLE agents ADD COLUMN IF NOT EXISTS custom_guardrails TEXT;
+                ALTER TABLE agents ADD COLUMN IF NOT EXISTS knowledge_items JSONB DEFAULT '[]'::jsonb;
                 
                 ALTER TABLE resellers ADD COLUMN IF NOT EXISTS minutes_balance INTEGER NOT NULL DEFAULT 0;
                 ALTER TABLE resellers ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(255);

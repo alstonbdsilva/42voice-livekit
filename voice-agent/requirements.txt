@@ -21,3 +21,4 @@ stripe
 cryptography
 sqlalchemy
 alembic
+python-multipart

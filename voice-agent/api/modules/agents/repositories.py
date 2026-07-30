@@ -6,6 +6,7 @@ Queries agent configuration details and logs operational statistics.
 import logging
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
+import json
 from api import database
 
 logger = logging.getLogger("voice-agent.api.agents.repositories")
@@ -16,6 +17,7 @@ class AgentRepository:
         SELECT a.id, a.name, a.type, a.call_type, a.use_case, a.activity_description, a.channels, a.status,
                a.total_calls, a.total_messages, a.total_minutes, a.success_rate, a.escalation_rate,
                a.prompt_version, a.kb_version, a.total_cost, a.last_activity, a.user_id, a.client_id, a.created_at, a.updated_at,
+               a.voice_name, a.voice_gender, a.guardrails, a.custom_guardrails, a.knowledge_items,
                COALESCE(
                  (SELECT json_agg(json_build_object('id', r.id, 'name', r.name)) 
                   FROM agent_resellers ar JOIN resellers r ON ar.reseller_id = r.id 
@@ -108,9 +110,16 @@ class AgentRepository:
         reseller_ids = data.get("resellerIds", [])
         client_ids = data.get("clientIds", [])
         
+        voice_name = data.get("voiceName", "aria")
+        voice_gender = data.get("voiceGender", "female")
+        guardrails = data.get("guardrails", {})
+        custom_guardrails = data.get("customGuardrails", "")
+        knowledge_items = data.get("knowledgeItems", [])
+        
         rows = await database.query(
-            """INSERT INTO agents (name, type, call_type, use_case, activity_description, channels, status, user_id, client_id)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            """INSERT INTO agents (name, type, call_type, use_case, activity_description, channels, status, user_id, client_id,
+                                   voice_name, voice_gender, guardrails, custom_guardrails, knowledge_items)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                RETURNING id""",
             [
                 data["name"].strip(),
@@ -121,7 +130,12 @@ class AgentRepository:
                 channels,
                 status,
                 user_id,
-                client_id
+                client_id,
+                voice_name,
+                voice_gender,
+                json.dumps(guardrails),
+                custom_guardrails,
+                json.dumps(knowledge_items)
             ],
             client=client
         )
@@ -165,7 +179,12 @@ class AgentRepository:
                 "user_id": user_id,
                 "client_id": client_id,
                 "assigned_resellers": reseller_ids,
-                "assigned_clients": client_ids
+                "assigned_clients": client_ids,
+                "voice_name": voice_name,
+                "voice_gender": voice_gender,
+                "guardrails": guardrails,
+                "custom_guardrails": custom_guardrails,
+                "knowledge_items": knowledge_items
             }
         return agent
 
@@ -203,7 +222,12 @@ class AgentRepository:
             "status": "active",
             "userId": original.get("user_id"),
             "resellerIds": reseller_ids or [],
-            "clientIds": client_ids or []
+            "clientIds": client_ids or [],
+            "voiceName": original.get("voice_name") or "aria",
+            "voiceGender": original.get("voice_gender") or "female",
+            "guardrails": original.get("guardrails") or {},
+            "customGuardrails": original.get("custom_guardrails") or "",
+            "knowledgeItems": original.get("knowledge_items") or []
         }
         return await self.create(clone_data)
 
@@ -231,6 +255,31 @@ class AgentRepository:
         if "callType" in data and data["callType"] is not None:
             fields.append(f"call_type = ${param_idx}")
             params.append(data["callType"])
+            param_idx += 1
+
+        if "voiceName" in data and data["voiceName"] is not None:
+            fields.append(f"voice_name = ${param_idx}")
+            params.append(data["voiceName"])
+            param_idx += 1
+
+        if "voiceGender" in data and data["voiceGender"] is not None:
+            fields.append(f"voice_gender = ${param_idx}")
+            params.append(data["voiceGender"])
+            param_idx += 1
+
+        if "guardrails" in data and data["guardrails"] is not None:
+            fields.append(f"guardrails = ${param_idx}")
+            params.append(json.dumps(data["guardrails"]))
+            param_idx += 1
+
+        if "customGuardrails" in data and data["customGuardrails"] is not None:
+            fields.append(f"custom_guardrails = ${param_idx}")
+            params.append(data["customGuardrails"])
+            param_idx += 1
+
+        if "knowledgeItems" in data and data["knowledgeItems"] is not None:
+            fields.append(f"knowledge_items = ${param_idx}")
+            params.append(json.dumps(data["knowledgeItems"]))
             param_idx += 1
             
         if not fields:
