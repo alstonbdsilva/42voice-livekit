@@ -513,51 +513,6 @@ async def init_db() -> None:
             
         logger.info("Default users seeded successfully.")
         
-        # 4. Seed default reseller
-        logger.info("Seeding default reseller...")
-        reseller_res = await database.query("SELECT id FROM resellers WHERE contact_email = 'reseller@42voice.com'")
-        if not reseller_res:
-            inserted = await database.query(
-                """INSERT INTO resellers (name, country, commission_pct, contact_email, status)
-                   VALUES ('Acme Reseller', 'Australia', 15.00, 'reseller@42voice.com', 'active')
-                   RETURNING id"""
-            )
-            reseller_id = inserted[0]["id"]
-        else:
-            reseller_id = reseller_res[0]["id"]
-            
-        # 5. Seed default client
-        logger.info("Seeding default client...")
-        client_res = await database.query("SELECT id FROM clients WHERE contact_email = 'client@42voice.com'")
-        if not client_res:
-            inserted = await database.query(
-                """INSERT INTO clients (name, industry, country, monthly_recurring, contact_email, status, reseller_id)
-                   VALUES ('Beta Corp', 'Technology', 'Australia', 2500.00, 'client@42voice.com', 'active', $1)
-                   RETURNING id""",
-                [reseller_id]
-            )
-            client_id = inserted[0]["id"]
-        else:
-            client_id = client_res[0]["id"]
-            
-        # 6. Link users to reseller/client
-        logger.info("Linking users to reseller and client relationships...")
-        await database.query(
-            "UPDATE users SET reseller_id = $1 WHERE email = 'reseller@42voice.com'",
-            [reseller_id]
-        )
-        await database.query(
-            "UPDATE users SET reseller_id = $1, client_id = $2 WHERE email = 'client@42voice.com'",
-            [reseller_id, client_id]
-        )
-        
-        # 7. Clean up existing operational tables
-        logger.info("Cleaning up existing transcripts, recordings, conversations, and agents...")
-        await database.query("DELETE FROM transcripts")
-        await database.query("DELETE FROM recordings")
-        await database.query("DELETE FROM conversations")
-        await database.query("DELETE FROM agents")
-        
         logger.info("Database schema setup and seeding completed successfully!")
         
     except Exception as e:

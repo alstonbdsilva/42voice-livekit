@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
@@ -19,6 +19,7 @@ import {
   File as FileIcon,
 } from "lucide-react";
 import AgentService, { CreateAgentDto } from "@/services/agent.service";
+import PhoneNumberService from "@/services/phone-number.service";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -100,6 +101,22 @@ export default function CreateAgent() {
   // Guardrails
   const [guardrails, setGuardrails] = useState(DEFAULT_GUARDRAILS);
   const [customGuardrails, setCustomGuardrails] = useState("");
+
+  // Phone numbers available
+  const [phoneNumbers, setPhoneNumbers] = useState<any[]>([]);
+  const [selectedPhoneNumberId, setSelectedPhoneNumberId] = useState<string>("none");
+
+  useEffect(() => {
+    const fetchNumbers = async () => {
+      try {
+        const data = await PhoneNumberService.getAll();
+        setPhoneNumbers(data);
+      } catch (err) {
+        console.error("Failed to load phone numbers:", err);
+      }
+    };
+    fetchNumbers();
+  }, []);
 
   const toggleGuardrail = (key: keyof typeof DEFAULT_GUARDRAILS) => {
     setGuardrails((prev) => ({ ...prev, [key]: !prev[key] }));
