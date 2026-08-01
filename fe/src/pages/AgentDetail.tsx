@@ -84,7 +84,8 @@ export default function AgentDetail() {
 
   const isAdmin = user?.role === "super_admin" || user?.role === "finance_admin";
   const isReseller = user?.role === "reseller";
-  const canEdit = isAdmin || isReseller;
+  const isClient = user?.role === "client";
+  const canEdit = isAdmin || isReseller || isClient;
 
   // Assignments edit state
   const [allResellers, setAllResellers] = useState<Reseller[]>([]);
@@ -853,7 +854,7 @@ export default function AgentDetail() {
                     setSelectedClientIds([]);
                   }
                 }}
-                disabled={!canEdit}
+                disabled={!canEdit || isClient}
                 className="flex h-9 w-full rounded-md border border-zinc-200 bg-white px-3 py-1 text-sm shadow-xs focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-zinc-950 animate-none"
               >
                 <option value="none">Unassigned (Admin Pool / Global)</option>
@@ -879,7 +880,7 @@ export default function AgentDetail() {
                     placeholder="Search resellers..."
                     value={resellerSearch}
                     onChange={(e) => setResellerSearch(e.target.value)}
-                    disabled={!canEdit}
+                    disabled={!canEdit || isClient}
                     className="pl-8 h-8 text-xs bg-white"
                   />
                 </div>
@@ -895,13 +896,13 @@ export default function AgentDetail() {
                           key={String(r.id)}
                           className={`flex items-center justify-between text-xs p-1.5 rounded cursor-pointer transition-colors ${
                             isChecked ? "bg-amber-100/60 text-amber-900 font-medium" : "text-zinc-700 hover:bg-zinc-100"
-                          } ${!canEdit ? "pointer-events-none opacity-80" : ""}`}
+                          } ${(!canEdit || isClient) ? "pointer-events-none opacity-80" : ""}`}
                         >
                           <div className="flex items-center gap-2">
                             <input
                               type="checkbox"
                               checked={isChecked}
-                              disabled={!canEdit}
+                              disabled={!canEdit || isClient}
                               onChange={() => handleToggleReseller(String(r.id))}
                               className="rounded border-zinc-300 text-amber-600 focus:ring-0"
                             />
@@ -933,7 +934,7 @@ export default function AgentDetail() {
                     placeholder="Search clients..."
                     value={clientSearch}
                     onChange={(e) => setClientSearch(e.target.value)}
-                    disabled={!canEdit}
+                    disabled={!canEdit || isClient}
                     className="pl-8 h-8 text-xs bg-white"
                   />
                 </div>
@@ -949,13 +950,13 @@ export default function AgentDetail() {
                           key={String(c.id)}
                           className={`flex items-center justify-between text-xs p-1.5 rounded cursor-pointer transition-colors ${
                             isChecked ? "bg-purple-100/60 text-purple-900 font-medium" : "text-zinc-700 hover:bg-zinc-100"
-                          } ${!canEdit ? "pointer-events-none opacity-80" : ""}`}
+                          } ${(!canEdit || isClient) ? "pointer-events-none opacity-80" : ""}`}
                         >
                           <div className="flex items-center gap-2">
                             <input
                               type="checkbox"
                               checked={isChecked}
-                              disabled={!canEdit}
+                              disabled={!canEdit || isClient}
                               onChange={() => handleToggleClient(String(c.id))}
                               className="rounded border-zinc-300 text-purple-600 focus:ring-0"
                             />

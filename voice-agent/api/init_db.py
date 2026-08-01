@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS agents (
     guardrails JSONB DEFAULT '{}'::jsonb,
     custom_guardrails TEXT,
     knowledge_items JSONB DEFAULT '[]'::jsonb,
+    tool_ids JSONB DEFAULT '[]'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

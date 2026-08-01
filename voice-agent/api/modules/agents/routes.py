@@ -169,9 +169,10 @@ async def update(agent_id: str, req_body: UpdateAgentRequest, current_user: Dict
         )
 
     # Filter only configuration detail fields for update_agent_details
-    detail_fields = {"name", "useCase", "activityDescription", "callType", "voiceName", "voiceGender", "guardrails", "customGuardrails", "knowledgeItems"}
+    detail_fields = {"name", "useCase", "activityDescription", "callType", "voiceName", "voiceGender", "guardrails", "customGuardrails", "knowledgeItems", "toolIds"}
     update_data = req_body.model_dump(exclude_unset=True)
     details_to_update = {k: v for k, v in update_data.items() if k in detail_fields}
+    print("DEBUG DETAILS TO UPDATE:", details_to_update)
 
     if details_to_update:
         agent = await agent_service.update_agent_details(agent_id, details_to_update)

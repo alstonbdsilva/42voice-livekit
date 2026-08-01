@@ -71,7 +71,7 @@ class ToolRepository:
             client_id = filter_data.get("clientId")
             if role not in ("SUPER_ADMIN", "FINANCE_ADMIN"):
                 if client_id:
-                    conditions.append(f"(t.user_id = $2 OR t.client_id = $3)")
+                    conditions.append("(t.user_id = $2 OR t.client_id = $3)")
                     params.extend([user_id, client_id])
                 else:
                     conditions.append("t.user_id = $2")
@@ -82,10 +82,10 @@ class ToolRepository:
         return rows[0] if rows else None
 
     async def find_by_uuids(self, tool_uuids: List[str]) -> List[Dict[str, Any]]:
-        """Fetch multiple active tools by their public UUIDs."""
+        """Fetch active tools by their public UUIDs (used by the voice runtime)."""
         if not tool_uuids:
             return []
-        query = f"{self.select_query_base} WHERE t.tool_uuid = ANY($1::uuid[]) AND t.status = 'active'"
+        query = f"{self.select_query_base} WHERE t.tool_uuid = ANY($1) AND t.status = 'active'"
         return await database.query(query, [tool_uuids])
 
     async def create(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
