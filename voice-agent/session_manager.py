@@ -42,7 +42,7 @@ class SessionManager:
             logger.info("Redis connection established")
         except Exception as e:
             _redis_available = False
-            logger.warning(f"Redis unavailable, using in-memory storage: {e}")
+            logger.info(f"Redis unavailable, using in-memory storage fallback.")
             self.redis = None
     
     def create_session(

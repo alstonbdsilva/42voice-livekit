@@ -7,10 +7,23 @@ Transfer Call, Calculator, MCP).
 import json
 import logging
 from typing import Any, Dict, List, Optional
+import uuid
 
 from api import database
 
 logger = logging.getLogger("voice-agent.api.tools.repositories")
+
+
+def _is_valid_uuid(val: Any) -> bool:
+    if isinstance(val, uuid.UUID):
+        return True
+    if not isinstance(val, str):
+        return False
+    try:
+        uuid.UUID(val)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 class ToolRepository:
@@ -62,6 +75,9 @@ class ToolRepository:
         self, tool_uuid: str, filter_data: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
         """Find a single tool by its public UUID, scoped to the requester."""
+        if not _is_valid_uuid(tool_uuid):
+            return None
+
         conditions = ["t.tool_uuid = $1"]
         params: List[Any] = [tool_uuid]
 
@@ -85,8 +101,11 @@ class ToolRepository:
         """Fetch active tools by their public UUIDs (used by the voice runtime)."""
         if not tool_uuids:
             return []
+        valid_uuids = [str(u) for u in tool_uuids if _is_valid_uuid(u)]
+        if not valid_uuids:
+            return []
         query = f"{self.select_query_base} WHERE t.tool_uuid = ANY($1) AND t.status = 'active'"
-        return await database.query(query, [tool_uuids])
+        return await database.query(query, [valid_uuids])
 
     async def create(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Create a new tool record."""

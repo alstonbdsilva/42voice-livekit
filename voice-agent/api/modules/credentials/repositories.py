@@ -12,6 +12,20 @@ from api import database
 logger = logging.getLogger("voice-agent.api.credentials.repositories")
 
 
+import uuid
+
+def _is_valid_uuid(val: Any) -> bool:
+    if isinstance(val, uuid.UUID):
+        return True
+    if not isinstance(val, str):
+        return False
+    try:
+        uuid.UUID(val)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 class CredentialRepository:
     select_query_base = """
         SELECT id, credential_uuid, client_id, name, description,
@@ -32,6 +46,8 @@ class CredentialRepository:
 
     async def find_by_uuid(self, credential_uuid: str, client_id: str) -> Optional[Dict[str, Any]]:
         """Find a credential by public UUID and client_id."""
+        if not _is_valid_uuid(credential_uuid):
+            return None
         query = f"""
             {self.select_query_base}
             WHERE credential_uuid = $1 AND client_id = $2 AND is_active = TRUE

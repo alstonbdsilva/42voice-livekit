@@ -5,9 +5,13 @@ Listens for SIP room creation and manages the AI audio pipeline.
 import asyncio
 import logging
 import sys
+import warnings
 from typing import Dict, Any, Optional
 from urllib.parse import urlparse
 from dotenv import load_dotenv
+
+warnings.filterwarnings("ignore", message=".*HMAC key is.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="jwt")
 
 load_dotenv()
 
@@ -150,7 +154,13 @@ class VoiceAgent(Agent):
                             "SELECT definition FROM tools WHERE client_id IS NULL AND category = 'end_call' AND status = 'active' LIMIT 1"
                         )
                     if rows:
-                        config = rows[0]["definition"].get("config", {})
+                        definition = rows[0]["definition"] or {}
+                        if isinstance(definition, str):
+                            try:
+                                definition = json.loads(definition)
+                            except Exception:
+                                definition = {}
+                        config = definition.get("config", {}) if isinstance(definition, dict) else {}
                         message_type = config.get("messageType", "none")
                         if message_type == "custom":
                             message = config.get("customMessage", "")
@@ -405,7 +415,13 @@ class VoiceAgent(Agent):
                     "SELECT definition FROM tools WHERE client_id IS NULL AND category = 'end_call' AND status = 'active' LIMIT 1"
                 )
             if rows:
-                config = rows[0]["definition"].get("config", {})
+                definition = rows[0]["definition"] or {}
+                if isinstance(definition, str):
+                    try:
+                        definition = json.loads(definition)
+                    except Exception:
+                        definition = {}
+                config = definition.get("config", {}) if isinstance(definition, dict) else {}
                 message_type = config.get("messageType", "none")
                 if message_type == "custom":
                     goodbye_msg = config.get("customMessage", "")
@@ -416,12 +432,14 @@ class VoiceAgent(Agent):
 
         if goodbye_msg:
             try:
+                if hasattr(self.session, "interrupt"):
+                    self.session.interrupt(force=True)
                 self.session.say(goodbye_msg)
             except Exception as e:
                 logger.error(f"Error saying goodbye message: {e}")
                 
         async def delayed_disconnect():
-            await asyncio.sleep(4.0 if goodbye_msg else 0.5)
+            await asyncio.sleep(2.0 if goodbye_msg else 0.5)
             logger.info("Disconnecting room via end_call tool")
             if self.ctx and self.ctx.room:
                 await self.ctx.room.disconnect()
@@ -591,12 +609,6 @@ async def register_call_with_backend(agent, started_at, ended_at):
 def prewarm(proc: JobProcess):
     """Preload VAD model to reduce startup time."""
     proc.userdata["vad"] = silero.VAD.load()
-    try:
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(database.init_pool())
-        loop.close()
-    except Exception as e:
-        logger.warning(f"[Prewarm] DB pool init warning: {e}")
 
 
 async def entrypoint(ctx: JobContext):
@@ -803,10 +815,12 @@ async def entrypoint(ctx: JobContext):
                                         if msg_type == "custom":
                                             goodbye = cfg.get("customMessage", "")
                                         if goodbye:
+                                            if hasattr(agent.session, "interrupt"):
+                                                agent.session.interrupt(force=True)
                                             agent.session.say(goodbye)
                                         
                                         async def delayed_disconnect():
-                                            await asyncio.sleep(4.0 if goodbye else 0.5)
+                                            await asyncio.sleep(2.0 if goodbye else 0.5)
                                             if agent.ctx and agent.ctx.room:
                                                 await agent.ctx.room.disconnect()
                                         asyncio.create_task(delayed_disconnect())
@@ -973,65 +987,76 @@ async def entrypoint(ctx: JobContext):
                     )
     
     logger.info("Starting session")
-    await session.start(room=ctx.room, agent=agent)
-    logger.info("SESSION STARTED")
-    
-    # Wait for the caller (SIP bridge) to subscribe to the agent's track 
-    # BEFORE starting the egress recording. This prevents the egress participant 
-    # from triggering the playout of greeting audio prematurely.
     try:
-        logger.info("Waiting for caller to subscribe to agent track...")
-        subscribed_fut = session.room_io.subscribed_fut
-        if subscribed_fut is not None:
-            await asyncio.wait_for(subscribed_fut, timeout=15.0)
-            logger.info("Caller subscribed to agent track. Initializing recording...")
-        else:
-            logger.warning("session.room_io.subscribed_fut is None, skipping wait")
-    except asyncio.TimeoutError:
-        logger.warning("Timed out waiting for caller to subscribe to agent track")
-    except Exception as e:
-        logger.error(f"Error waiting for track subscription: {e}")
-    
-    # Start recording AFTER session.start() and subscription as a background task
-    if getattr(agent.settings, "enable_recording", True):
-        async def start_recording_task():
-            try:
-                logger.info(f"Starting recording for room: {room_name}, participant: {participant.identity}")
-                egress_id, filename = await recording_service.start_room_recording(room_name)
-                agent.egress_id = egress_id
-                agent.recording_filename = filename
-                if egress_id:
-                    logger.info(f"Recording started: egress_id={egress_id}, filename={filename}, room={room_name}")
-                else:
-                    logger.error(f"Recording failed to start: egress_id is None for room {room_name}")
-            except Exception as e:
-                logger.error(f"Recording startup error for room {room_name}: {e}", exc_info=True)
-        
-        # Run recording start as background task so it continues even if participant disconnects
-        # Track the task so on_exit can wait for it to complete
-        agent._recording_task = asyncio.create_task(start_recording_task())
-    else:
-        logger.info(f"Recording disabled by configuration for room {room_name}")
-    
-    # Handle participant disconnect for proper cleanup (synchronous wrapper)
-    @ctx.room.on("participant_disconnected")
-    def on_participant_disconnected(participant):
-        logger.info(f"PARTICIPANT DISCONNECTED: {participant.identity}")
-        # Create async task for cleanup
-        async def run_cleanup():
-            await cleanup_on_disconnect(session, session_manager)
-            shutdown_event.set()
-        asyncio.create_task(run_cleanup())
+        # Subscribe to speech/message events to build transcripts dynamically
+        @session.on("user_input_transcribed")
+        def on_user_input_transcribed(event):
+            if event.is_final and event.transcript.strip():
+                logger.info(f"User speech transcribed: {event.transcript}")
+                if agent.settings.enable_transcripts and agent.transcript_session_id:
+                    transcript_service.add_transcript_entry(
+                        agent.transcript_session_id,
+                        speaker="customer",
+                        text=event.transcript
+                    )
 
-    # Keep the entrypoint running until participant disconnects, room is disconnected, or job is shutdown
-    await shutdown_event.wait()
-    logger.info("Entrypoint exiting")
+        @session.on("conversation_item_added")
+        def on_conversation_item_added(event):
+            msg = event.item
+            if hasattr(msg, "role") and (msg.role == "assistant" or msg.role == "agent"):
+                content_text = ""
+                if isinstance(msg.content, str):
+                    content_text = msg.content
+                elif hasattr(msg.content, '__iter__'):
+                    parts = []
+                    for part in msg.content:
+                        if isinstance(part, str):
+                            parts.append(part)
+                        elif hasattr(part, 'text') and part.text:
+                            parts.append(part.text)
+                    content_text = " ".join(parts)
+                
+                if content_text.strip():
+                    logger.info(f"Agent speech: {content_text}")
+                    if agent.settings.enable_transcripts and agent.transcript_session_id:
+                        transcript_service.add_transcript_entry(
+                            agent.transcript_session_id,
+                            speaker="agent",
+                            text=content_text
+                        )
+        
+        # Start recording AFTER session setup as a background task
+        if getattr(agent.settings, "enable_recording", True):
+            async def start_recording_task():
+                try:
+                    logger.info(f"Starting recording for room: {room_name}, participant: {participant.identity}")
+                    egress_id, filename = await recording_service.start_room_recording(room_name)
+                    agent.egress_id = egress_id
+                    agent.recording_filename = filename
+                    if egress_id:
+                        logger.info(f"Recording started: egress_id={egress_id}, filename={filename}, room={room_name}")
+                except Exception as e:
+                    logger.error(f"Recording startup error for room {room_name}: {e}", exc_info=True)
+            
+            agent._recording_task = asyncio.create_task(start_recording_task())
+
+        await session.start(room=ctx.room, agent=agent)
+        logger.info("SESSION STARTED")
+        await shutdown_event.wait()
+    finally:
+        shutdown_event.set()
+        await cleanup_on_disconnect(session, session_manager)
+        logger.info("Entrypoint exiting")
 
 
 async def cleanup_on_disconnect(session, session_manager):
     """Async cleanup function called when participant disconnects."""
-    # Session is automatically closed by LiveKit on participant disconnect
-    # Just clear session manager state (safely)
+    try:
+        if session:
+            await session.aclose()
+    except Exception as e:
+        logger.warning(f"Error closing agent session: {e}")
+        
     try:
         session_manager.clear_all_sessions()
     except Exception as e:
