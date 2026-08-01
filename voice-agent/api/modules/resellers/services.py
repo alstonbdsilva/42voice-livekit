@@ -3,6 +3,7 @@ Reseller Service.
 Coordinates partner management and cascading database queries for resellers.
 """
 
+import json
 import bcrypt
 import logging
 from typing import Dict, Any, List, Optional
@@ -79,6 +80,29 @@ class ResellerService:
                 client=conn
             )
             
+            # Create default end_call tool for the new reseller
+            await conn.execute(
+                """
+                INSERT INTO tools (name, description, category, icon, icon_color, status, definition, user_id, client_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                """,
+                "End Call",
+                "Default end call tool for ending conversations.",
+                "end_call",
+                "phone-off",
+                "#EF4444",
+                "active",
+                json.dumps({
+                    "config": {
+                        "messageType": "custom",
+                        "customMessage": "Thank you for calling. Goodbye.",
+                        "endCallReason": False
+                    }
+                }),
+                new_user["id"],
+                None
+            )
+
             # Audit log
             await self.audit_repository.create(
                 user_id=new_user["id"],

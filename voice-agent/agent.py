@@ -11,10 +11,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import json
 import httpx
 import redis
 from api.modules.phone_numbers.livekit_sip import livekit_sip_service
 from api import database
+from custom_tools import (
+    tool_to_function_schema,
+    execute_http_tool,
+    resolve_transfer_config,
+    call_mcp_tool,
+    safe_calculator
+)
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -42,7 +50,7 @@ logger = logging.getLogger("voice-agent")
 class VoiceAgent(Agent):
     """Voice agent with orchestrator tools."""
     
-    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, ctx: JobContext, vad=None, out_of_credits: bool = False, custom_prompt: Optional[str] = None, agent_name: Optional[str] = None, unassigned_number: bool = False, client_id: Optional[str] = None):
+    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, ctx: JobContext, vad=None, out_of_credits: bool = False, custom_prompt: Optional[str] = None, agent_name: Optional[str] = None, unassigned_number: bool = False, client_id: Optional[str] = None, tools: Optional[list] = None):
         self.session_manager = session_manager
         self.booking_agent = booking_agent
         self.sales_agent = sales_agent
@@ -90,7 +98,8 @@ class VoiceAgent(Agent):
             ),
             llm=openai.LLM(model="gpt-4o-mini"),
             tts=deepgram.TTS(),
-            instructions=instructions
+            instructions=instructions,
+            tools=tools
         )
         
         # Track if greeting has been sent to prevent duplicate greetings
@@ -623,6 +632,7 @@ async def entrypoint(ctx: JobContext):
     agent_name = None  # Must be explicitly set from phone number lookup
     unassigned_number = False
     client_id = None
+    agent_id = None
     
     called_number = (
         participant.attributes.get("sip.trunkPhoneNumber") or
@@ -669,7 +679,8 @@ async def entrypoint(ctx: JobContext):
                     else:
                         custom_prompt = lookup_data.get("prompt")
                         agent_name = lookup_data.get("agent_name")
-                        logger.info(f"[Agent] Loaded agent '{agent_name}' for {called_number}")
+                        agent_id = lookup_data.get("agent_id")
+                        logger.info(f"[Agent] Loaded agent '{agent_name}' for {called_number} (ID={agent_id})")
                 elif lookup_resp.status_code == 404:
                     logger.warning(f"[Backend] PHONE_NUMBER_NOT_FOUND: {called_number}")
                     unassigned_number = True
@@ -713,6 +724,177 @@ async def entrypoint(ctx: JobContext):
     sales_agent = SalesAgent(session_manager)
     support_agent = SupportAgent(session_manager)
     
+    # Dynamic tools loading from database
+    dynamic_tools = []
+    if agent_id:
+        try:
+            if database.pool is None:
+                await database.init_pool()
+            
+            # Fetch tool_ids from agents table
+            agent_rows = await database.query("SELECT tool_ids FROM agents WHERE id = $1::uuid", [agent_id])
+            if agent_rows:
+                tool_ids = agent_rows[0].get("tool_ids") or []
+                if isinstance(tool_ids, str):
+                    tool_ids = json.loads(tool_ids)
+                
+                if tool_ids:
+                    from api.modules.tools.repositories import ToolRepository
+                    tool_repo = ToolRepository()
+                    active_tools = await tool_repo.find_by_uuids(tool_ids)
+                    
+                    for tool in active_tools:
+                        try:
+                            # Parse definition config
+                            definition = tool.get("definition") or {}
+                            if isinstance(definition, str):
+                                definition = json.loads(definition)
+                            config = definition.get("config", {})
+                            category = tool.get("category")
+                            
+                            # 1. Convert tool model to function schema
+                            schema = tool_to_function_schema(tool)
+                            func_name = schema["function"]["name"]
+                            
+                            # Define callback closure
+                            def make_callback(t, cfg, cat):
+                                async def tool_callback(**kwargs) -> str:
+                                    logger.info(f"Custom tool callback executed: {t['name']} ({t['tool_uuid']}) with arguments: {kwargs}")
+                                    
+                                    # Handle Category-specific execution
+                                    if cat == "http_api":
+                                        # Play custom message if configured
+                                        custom_message = cfg.get("customMessage", "")
+                                        if custom_message:
+                                            agent.session.say(custom_message)
+                                        
+                                        # Execute HTTP API call
+                                        result = await execute_http_tool(
+                                            tool=t,
+                                            arguments=kwargs,
+                                            call_context_vars={
+                                                "phone_number": called_number,
+                                                "customer_contact": participant.identity,
+                                                "client_id": client_id,
+                                                "room_name": room_name
+                                            },
+                                            gathered_context_vars={},
+                                            client_id=client_id
+                                        )
+                                        return json.dumps(result)
+                                        
+                                    elif cat == "calculator":
+                                        try:
+                                            expr = kwargs.get("expression", "")
+                                            val = safe_calculator(expr)
+                                            return json.dumps({"expression": expr, "result": val})
+                                        except Exception as err:
+                                            return json.dumps({"error": str(err)})
+                                            
+                                    elif cat == "end_call":
+                                        msg_type = cfg.get("messageType", "none")
+                                        goodbye = ""
+                                        if msg_type == "custom":
+                                            goodbye = cfg.get("customMessage", "")
+                                        if goodbye:
+                                            agent.session.say(goodbye)
+                                        
+                                        async def delayed_disconnect():
+                                            await asyncio.sleep(4.0 if goodbye else 0.5)
+                                            if agent.ctx and agent.ctx.room:
+                                                await agent.ctx.room.disconnect()
+                                        asyncio.create_task(delayed_disconnect())
+                                        return "Call is ending."
+                                        
+                                    elif cat == "transfer_call":
+                                        try:
+                                            resolved = await resolve_transfer_config(
+                                                tool=t,
+                                                config=cfg,
+                                                arguments=kwargs,
+                                                call_context_vars={
+                                                    "phone_number": called_number,
+                                                    "customer_contact": participant.identity,
+                                                    "client_id": client_id,
+                                                    "room_name": room_name
+                                                },
+                                                gathered_context_vars={},
+                                                client_id=client_id
+                                            )
+                                            dest = resolved.destination
+                                        except Exception as err:
+                                            return f"Transfer resolution failed: {str(err)}"
+                                        
+                                        # Play message
+                                        if resolved.message:
+                                            agent.session.say(resolved.message)
+                                        else:
+                                            msg_type = cfg.get("messageType", "none")
+                                            if msg_type == "custom":
+                                                custom_msg = cfg.get("customMessage", "")
+                                                if custom_msg:
+                                                    agent.session.say(custom_msg)
+                                        
+                                        # Handoff/transfer call
+                                        try:
+                                            from livekit import api as lk_api
+                                            lk_client = lk_api.LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret)
+                                            transfer_req = lk_api.TransferSIPParticipantRequest(
+                                                participant_identity=participant.identity,
+                                                room_name=room_name,
+                                                transfer_to=dest,
+                                                play_dialtone=True
+                                            )
+                                            await lk_client.sip.transfer_sip_participant(transfer_req)
+                                            await lk_client.aclose()
+                                            
+                                            async def delayed_disconnect():
+                                                await asyncio.sleep(4.0)
+                                                if agent.ctx and agent.ctx.room:
+                                                    await agent.ctx.room.disconnect()
+                                            asyncio.create_task(delayed_disconnect())
+                                            return f"Transferring call to {dest}."
+                                        except Exception as err:
+                                            logger.error(f"SIP transfer failed: {err}")
+                                            return f"Failed to transfer call: {str(err)}"
+                                            
+                                    elif cat == "mcp":
+                                        url = cfg.get("url")
+                                        if not url:
+                                            return json.dumps({"status": "error", "error": "MCP server URL not configured"})
+                                        
+                                        # Resolve credential
+                                        cred = None
+                                        cred_uuid = cfg.get("credential_uuid")
+                                        if cred_uuid and client_id:
+                                            from api.modules.credentials.repositories import CredentialRepository
+                                            cred = await CredentialRepository().find_by_uuid(cred_uuid, client_id)
+                                        
+                                        # Execute MCP call
+                                        res = await call_mcp_tool(
+                                            url=url,
+                                            tool_name=t["name"],
+                                            arguments=kwargs,
+                                            credential=cred,
+                                            config=cfg
+                                        )
+                                        return json.dumps(res)
+                                        
+                                    return "Tool not executed."
+                                return tool_callback
+                            
+                            # Create RawFunctionTool wrapper using livekit function_tool helper
+                            raw_tool = function_tool(
+                                make_callback(tool, config, category),
+                                raw_schema=schema["function"]
+                            )
+                            dynamic_tools.append(raw_tool)
+                            logger.info(f"Dynamically registered custom tool: {func_name}")
+                        except Exception as e:
+                            logger.exception(f"Failed to initialize custom tool {tool.get('name')}: {e}")
+        except Exception as e:
+            logger.exception(f"Error fetching dynamic tools for agent {agent_id}: {e}")
+
     # Create agent session with VAD from prewarm (aggressive low latency settings)
     logger.info("Creating AgentSession")
     session: AgentSession = AgentSession(
@@ -738,7 +920,8 @@ async def entrypoint(ctx: JobContext):
         custom_prompt=custom_prompt,
         agent_name=agent_name,
         unassigned_number=unassigned_number,
-        client_id=client_id
+        client_id=client_id,
+        tools=dynamic_tools
     )
     
     # Initialize recording state

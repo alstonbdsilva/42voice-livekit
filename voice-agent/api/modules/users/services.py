@@ -3,6 +3,7 @@ Users service.
 Manages platform users under SUPER_ADMIN policies.
 """
 
+import json
 import bcrypt
 import logging
 from typing import Dict, Any, List, Optional
@@ -63,6 +64,63 @@ class UsersService:
                 client=conn
             )
             
+            # If the user is client-associated, check if their client has an active end_call tool, else create it
+            if dto["roleName"] == "CLIENT" and dto.get("clientId"):
+                client_id = dto["clientId"]
+                existing_tool = await conn.fetchval(
+                    "SELECT 1 FROM tools WHERE client_id = $1::uuid AND category = 'end_call' AND status = 'active' LIMIT 1",
+                    client_id
+                )
+                if not existing_tool:
+                    await conn.execute(
+                        """
+                        INSERT INTO tools (name, description, category, icon, icon_color, status, definition, user_id, client_id)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        """,
+                        "End Call",
+                        "Default end call tool for ending conversations.",
+                        "end_call",
+                        "phone-off",
+                        "#EF4444",
+                        "active",
+                        json.dumps({
+                            "config": {
+                                "messageType": "custom",
+                                "customMessage": "Thank you for calling. Goodbye.",
+                                "endCallReason": False
+                            }
+                        }),
+                        new_user["id"],
+                        client_id
+                    )
+            elif dto["roleName"] == "RESELLER":
+                existing_tool = await conn.fetchval(
+                    "SELECT 1 FROM tools WHERE user_id = $1::uuid AND category = 'end_call' AND status = 'active' LIMIT 1",
+                    new_user["id"]
+                )
+                if not existing_tool:
+                    await conn.execute(
+                        """
+                        INSERT INTO tools (name, description, category, icon, icon_color, status, definition, user_id, client_id)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        """,
+                        "End Call",
+                        "Default end call tool for ending conversations.",
+                        "end_call",
+                        "phone-off",
+                        "#EF4444",
+                        "active",
+                        json.dumps({
+                            "config": {
+                                "messageType": "custom",
+                                "customMessage": "Thank you for calling. Goodbye.",
+                                "endCallReason": False
+                            }
+                        }),
+                        new_user["id"],
+                        None
+                    )
+
             await self.audit_repository.create(
                 user_id=actor_id,
                 action="USER_CREATE",

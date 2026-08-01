@@ -81,6 +81,13 @@ class ToolRepository:
         rows = await database.query(query, params)
         return rows[0] if rows else None
 
+    async def find_by_uuids(self, tool_uuids: List[str]) -> List[Dict[str, Any]]:
+        """Fetch multiple active tools by their public UUIDs."""
+        if not tool_uuids:
+            return []
+        query = f"{self.select_query_base} WHERE t.tool_uuid = ANY($1::uuid[]) AND t.status = 'active'"
+        return await database.query(query, [tool_uuids])
+
     async def create(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Create a new tool record."""
         rows = await database.query(
