@@ -109,11 +109,13 @@ class TranscriptService:
             "full_text": full_text
         }
         
-        # Clean up session in-memory state
+        # Retain session in-memory state for multiple consumers (on_exit and register_call_with_backend)
+        return transcript_data
+    
+    def clear_session(self, session_id: str) -> None:
+        """Explicitly clear transcript session from in-memory state."""
         if session_id in self.sessions:
             del self.sessions[session_id]
-            
-        return transcript_data
     
     async def save_transcript_to_s3(self, session_id: str, transcript_data: Dict) -> bool:
         """

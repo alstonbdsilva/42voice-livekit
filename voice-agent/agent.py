@@ -443,9 +443,114 @@ class VoiceAgent(Agent):
             logger.info("Disconnecting room via end_call tool")
             if self.ctx and self.ctx.room:
                 await self.ctx.room.disconnect()
-                
         asyncio.create_task(delayed_disconnect())
         return "Call is ending."
+
+
+async def analyze_transcript_with_llm(full_text: str, settings) -> dict:
+    """Analyze conversation transcript using OpenAI to extract summary, sentiment, lead score, intent, and action items."""
+    if not full_text or len(full_text.strip()) < 10:
+        return {
+            "summary": "Short call with minimal conversation.",
+            "sentiment": "neutral",
+            "sentimentScore": 0.0,
+            "intent": "general",
+            "leadScore": 50,
+            "actionItems": ["Follow up with customer inquiry"]
+        }
+    
+    try:
+        api_key = getattr(settings, "openai_api_key", None)
+        if api_key:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                prompt = (
+                    "Analyze the following call transcript between a Customer and an AI Voice Agent. "
+                    "Return ONLY a JSON object with these exact keys:\n"
+                    "- \"summary\": A concise 1-2 sentence summary of the discussion.\n"
+                    "- \"sentiment\": \"positive\", \"neutral\", or \"negative\".\n"
+                    "- \"sentimentScore\": Float between -1.0 and 1.0.\n"
+                    "- \"intent\": Short intent tag (e.g. \"inquiry\", \"booking\", \"support\", \"billing\", \"general\").\n"
+                    "- \"leadScore\": Integer from 0 to 100 representing customer interest/lead quality.\n"
+                    "- \"actionItems\": Array of 1 to 3 specific follow-up action items.\n\n"
+                    f"Transcript:\n{full_text}"
+                )
+                res = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": "gpt-4o-mini",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.2,
+                        "response_format": {"type": "json_object"}
+                    }
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    content = data["choices"][0]["message"]["content"]
+                    parsed = json.loads(content)
+                    return {
+                        "summary": str(parsed.get("summary", "Voice agent conversation completed")),
+                        "sentiment": str(parsed.get("sentiment", "neutral")).lower(),
+                        "sentimentScore": float(parsed.get("sentimentScore", 0.0)),
+                        "intent": str(parsed.get("intent", "general")).lower().replace(" ", "_"),
+                        "leadScore": int(parsed.get("leadScore", 50)),
+                        "actionItems": [str(x) for x in parsed.get("actionItems", [])] or ["Follow up with customer inquiry"]
+                    }
+    except Exception as e:
+        logger.warning(f"AI transcript analysis via OpenAI failed: {e}")
+        
+    # Smart Fallback rules if LLM is unreachable
+    lines_count = len(full_text.splitlines())
+    text_lower = full_text.lower()
+    
+    intent = "general"
+    summary_parts = []
+    action_items = []
+    sentiment = "neutral"
+    sentiment_score = 0.00
+    lead_score = 50
+
+    if "book" in text_lower or "appointment" in text_lower or "schedule" in text_lower:
+        intent = "booking"
+        summary_parts.append("Customer called regarding booking an appointment or reservation.")
+        action_items.append("Confirm appointment details and update calendar")
+        lead_score += 30
+        sentiment_score += 0.40
+        sentiment = "positive"
+    if "price" in text_lower or "cost" in text_lower or "rate" in text_lower or "package" in text_lower:
+        intent = "inquiry"
+        summary_parts.append("Customer requested information on pricing, rates, and available packages.")
+        action_items.append("Send detailed pricing guide and quote to customer")
+        lead_score += 25
+    if "help" in text_lower or "issue" in text_lower or "problem" in text_lower or "support" in text_lower:
+        intent = "support"
+        summary_parts.append("Customer reached out for technical support and troubleshooting assistance.")
+        action_items.append("Review support ticket details and follow up with customer")
+    if "thank" in text_lower or "great" in text_lower or "awesome" in text_lower or "helpful" in text_lower:
+        sentiment = "positive"
+        sentiment_score = max(0.65, sentiment_score)
+        lead_score += 15
+    if "angry" in text_lower or "cancel" in text_lower or "bad" in text_lower or "terrible" in text_lower:
+        sentiment = "negative"
+        sentiment_score = -0.65
+        lead_score = max(10, lead_score - 30)
+
+    if not action_items:
+        action_items = ["Follow up with customer inquiry"]
+    if not summary_parts:
+        summary_parts.append(f"Voice conversation completed with {lines_count} spoken exchanges.")
+
+    return {
+        "summary": " ".join(summary_parts),
+        "sentiment": sentiment,
+        "sentimentScore": round(sentiment_score, 2),
+        "intent": intent,
+        "leadScore": min(100, max(0, lead_score)),
+        "actionItems": action_items
+    }
 
 
 async def register_call_with_backend(agent, started_at, ended_at):
@@ -456,61 +561,31 @@ async def register_call_with_backend(agent, started_at, ended_at):
         duration = int((ended_at - started_at).total_seconds())
         room_name = getattr(agent, 'room_name', 'unknown')
         
-        # Use the actual agent_name from the VoiceAgent instance (set from phone number lookup)
-        # This ensures we register the call against the correct agent that handled it
         agent_name = getattr(agent, 'agent_name', 'Voice Agent')
         
         lines = []
         full_text = ""
-        action_items = []
         
         if agent.settings.enable_transcripts and agent.transcript_session_id:
             transcript_data = transcript_service.finalize_transcript(
                 agent.transcript_session_id,
                 summary="Voice agent conversation completed"
             )
-            transcript_data.update({
-                "room_name": room_name,
-                "participant_id": getattr(agent, 'participant_id', 'unknown'),
-                "agent_type": agent.agent_name
-            })
-            
-            await transcript_service.save_transcript_to_s3(
-                agent.transcript_session_id,
-                transcript_data
-            )
             
             raw_lines = transcript_data.get("lines", [])
             lines = [{"speaker": l["speaker"], "text": l["text"]} for l in raw_lines]
             full_text = transcript_data.get("full_text", "")
             
-            for l in lines:
-                text = l["text"].lower()
-                if "book" in text or "schedule" in text or "appointment" in text:
-                    action_items.append("Follow up on booking/appointment request")
-                elif "price" in text or "cost" in text or "quote" in text:
-                    action_items.append("Send pricing packages and details")
-            
-            action_items = list(set(action_items))
-            if not action_items:
-                action_items = ["Follow up with customer inquiry"]
+        ai_metrics = await analyze_transcript_with_llm(full_text, agent.settings)
 
         recording_enabled = getattr(agent.settings, "enable_recording", True)
         filename = getattr(agent, 'recording_filename', None)
         egress_id = getattr(agent, 'egress_id', None)
         s3_key = None
         size = 0
-        recording_status = "success" if filename and egress_id else "failed"
-        failure_reason = None
         
         if recording_enabled:
-            if not filename:
-                failure_reason = "Recording filename not set (recording might have failed to start or connection timed out)"
-                logger.warning(f"Recording failed: {failure_reason}")
-            elif not egress_id:
-                failure_reason = "Egress ID not set"
-                logger.warning(f"Recording failed: {failure_reason}")
-            else:
+            if filename and egress_id:
                 s3_key = f"recordings/{filename}"
                 try:
                     import boto3
@@ -522,7 +597,6 @@ async def register_call_with_backend(agent, started_at, ended_at):
                         region_name=agent.settings.aws_region
                     )
                     
-                    # For self-hosted egress, verify upload completion with retries
                     upload_verified = await recording_service.verify_s3_upload(s3_key)
                     
                     if upload_verified:
@@ -547,8 +621,6 @@ async def register_call_with_backend(agent, started_at, ended_at):
                     size = duration * 16000
             
         outcome = "resolved"
-        sentiment = "neutral"
-        sentiment_score = 0.00
         human_handoff = False
         escalation_reason = None
         
@@ -559,8 +631,6 @@ async def register_call_with_backend(agent, started_at, ended_at):
             escalation_reason = "Customer requested human agent assistance"
         elif "book" in full_text_lower or "appointment" in full_text_lower:
             outcome = "booked_appointment"
-            sentiment = "positive"
-            sentiment_score = 0.80
             
         recording_payload = None
         if filename and egress_id and s3_key:
@@ -578,19 +648,19 @@ async def register_call_with_backend(agent, started_at, ended_at):
             "channel": "voice",
             "duration": duration,
             "cost": round(duration * 0.0015, 2),
-            "sentiment": sentiment,
+            "sentiment": ai_metrics["sentiment"],
             "outcome": outcome,
-            "summary": "Voice agent conversation completed",
-            "intent": "general",
-            "leadScore": 75 if outcome == "booked_appointment" else 50,
-            "sentimentScore": sentiment_score,
+            "summary": ai_metrics["summary"],
+            "intent": ai_metrics["intent"],
+            "leadScore": ai_metrics["leadScore"],
+            "sentimentScore": ai_metrics["sentimentScore"],
             "humanHandoff": human_handoff,
             "escalationReason": escalation_reason,
             "recording": recording_payload,
             "transcript": {
                 "fullText": full_text if full_text else "No transcript lines",
                 "lines": lines if lines else [{"speaker": "agent", "text": "Call started"}],
-                "actionItems": action_items
+                "actionItems": ai_metrics["actionItems"]
             }
         }
         
@@ -598,9 +668,12 @@ async def register_call_with_backend(agent, started_at, ended_at):
         async with httpx.AsyncClient() as client:
             response = await client.post(f"{backend_url}/conversations/register", json=payload, timeout=30.0)
             if response.status_code == 201:
-                logger.info("Call successfully registered in backend database.")
+                logger.info(f"Registered call details for room {room_name} with agent {agent_name}")
             else:
-                logger.error(f"Failed to register call in backend. Status: {response.status_code}")
+                logger.error(f"Failed to register call details for room {room_name}: {response.status_code} {response.text}")
+        
+        if agent.transcript_session_id:
+            transcript_service.clear_session(agent.transcript_session_id)
                 
     except Exception as e:
         logger.error(f"Error registering call with backend: {e}", exc_info=True)
