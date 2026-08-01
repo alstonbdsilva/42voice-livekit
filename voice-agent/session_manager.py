@@ -14,10 +14,14 @@ from config import get_settings
 logger = logging.getLogger(__name__)
 
 
+_redis_available: Optional[bool] = None
+
+
 class SessionManager:
     """Manages session state and conversation history using Redis with in-memory fallback."""
     
     def __init__(self):
+        global _redis_available
         self.settings = get_settings()
         self.session_timeout = self.settings.session_timeout
         self.max_history = self.settings.max_conversation_history
@@ -26,12 +30,18 @@ class SessionManager:
         self.redis = None
         self.in_memory_storage = {}  # Fallback in-memory storage
         
+        if _redis_available is False:
+            # Skip slow connection attempt if Redis was already determined to be unavailable
+            return
+            
         try:
-            self.redis = redis.Redis.from_url(self.settings.redis_url, decode_responses=True, socket_connect_timeout=2)
+            self.redis = redis.Redis.from_url(self.settings.redis_url, decode_responses=True, socket_connect_timeout=1)
             # Test connection
             self.redis.ping()
+            _redis_available = True
             logger.info("Redis connection established")
         except Exception as e:
+            _redis_available = False
             logger.warning(f"Redis unavailable, using in-memory storage: {e}")
             self.redis = None
     

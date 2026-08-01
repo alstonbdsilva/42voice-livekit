@@ -54,6 +54,16 @@ class PhoneNumberServiceClass {
     return res?.data ?? res;
   }
 
+  async deleteLiveKitTrunk(trunkId: string): Promise<any> {
+    const res = await api.delete<any>(`${API_ENDPOINTS.PHONE_NUMBERS}/livekit/trunk/${trunkId}`);
+    return res?.data ?? res;
+  }
+
+  async deleteLiveKitDispatchRule(ruleId: string): Promise<any> {
+    const res = await api.delete<any>(`${API_ENDPOINTS.PHONE_NUMBERS}/livekit/dispatch-rule/${ruleId}`);
+    return res?.data ?? res;
+  }
+
   async update(id: string, dto: any): Promise<any> {
     const res = await api.put<any>(`${API_ENDPOINTS.PHONE_NUMBERS}/${id}`, dto);
     return res?.data ?? res;

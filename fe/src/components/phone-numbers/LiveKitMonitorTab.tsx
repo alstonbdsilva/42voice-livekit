@@ -1,5 +1,7 @@
 import React from "react";
-import { Server, RefreshCw, AlertCircle, Phone, Shield } from "lucide-react";
+import { Server, RefreshCw, AlertCircle, Phone, Shield, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import PhoneNumberService from "@/services/phone-number.service";
 
 interface LiveKitMonitorTabProps {
   livekitStatus: any;
@@ -8,6 +10,32 @@ interface LiveKitMonitorTabProps {
 }
 
 export function LiveKitMonitorTab({ livekitStatus, isLivekitLoading, fetchLivekitStatus }: LiveKitMonitorTabProps) {
+  const handleDeleteTrunk = async (trunkId: string, name: string) => {
+    if (!window.confirm(`Are you sure you want to delete LiveKit SIP Trunk "${name}" (${trunkId}) from the LiveKit server?`)) {
+      return;
+    }
+    try {
+      await PhoneNumberService.deleteLiveKitTrunk(trunkId);
+      toast.success(`SIP Trunk ${name} deleted successfully from LiveKit.`);
+      fetchLivekitStatus();
+    } catch (err: any) {
+      toast.error(`Failed to delete trunk: ${err?.response?.data?.message || err?.message}`);
+    }
+  };
+
+  const handleDeleteRule = async (ruleId: string, name: string) => {
+    if (!window.confirm(`Are you sure you want to delete LiveKit Dispatch Rule "${name}" (${ruleId}) from the LiveKit server?`)) {
+      return;
+    }
+    try {
+      await PhoneNumberService.deleteLiveKitDispatchRule(ruleId);
+      toast.success(`Dispatch Rule ${name} deleted successfully from LiveKit.`);
+      fetchLivekitStatus();
+    } catch (err: any) {
+      toast.error(`Failed to delete dispatch rule: ${err?.response?.data?.message || err?.message}`);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* LiveKit Connection Summary */}
@@ -89,9 +117,18 @@ export function LiveKitMonitorTab({ livekitStatus, isLivekitLoading, fetchLiveki
                         <h4 className="font-bold text-xs text-zinc-900 leading-tight">{trunk.name}</h4>
                         <span className="font-mono text-[9px] text-zinc-400 select-all">{trunk.id}</span>
                       </div>
-                      <span className="inline-block px-1.5 py-0.5 bg-zinc-100 text-zinc-650 border border-zinc-200 rounded-sm text-[8px] font-bold uppercase tracking-wider">
-                        Trunk info
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="inline-block px-1.5 py-0.5 bg-zinc-100 text-zinc-650 border border-zinc-200 rounded-sm text-[8px] font-bold uppercase tracking-wider">
+                          Trunk info
+                        </span>
+                        <button
+                          onClick={() => handleDeleteTrunk(trunk.id, trunk.name)}
+                          className="p-1 text-zinc-400 hover:text-red-600 transition-colors"
+                          title="Delete Trunk from LiveKit"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
                     <div className="flex flex-wrap gap-1.5 items-center">
                       <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-400">DID Numbers:</span>
@@ -140,9 +177,18 @@ export function LiveKitMonitorTab({ livekitStatus, isLivekitLoading, fetchLiveki
                       <h4 className="font-bold text-xs text-zinc-900 leading-tight">{rule.name}</h4>
                       <span className="font-mono text-[9px] text-zinc-400 select-all">{rule.id}</span>
                     </div>
-                    <span className="inline-block px-1.5 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-250 rounded-sm text-[8px] font-bold uppercase tracking-wider">
-                      Dispatch rule
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block px-1.5 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-250 rounded-sm text-[8px] font-bold uppercase tracking-wider">
+                        Dispatch rule
+                      </span>
+                      <button
+                        onClick={() => handleDeleteRule(rule.id, rule.name)}
+                        className="p-1 text-zinc-400 hover:text-red-600 transition-colors"
+                        title="Delete Dispatch Rule from LiveKit"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
                   <div className="space-y-1 text-[10px] text-zinc-650">
                     <div>

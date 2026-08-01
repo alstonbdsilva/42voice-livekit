@@ -10,11 +10,12 @@ from config import get_settings
 logger = logging.getLogger("voice-agent.api.database")
 
 pool: Optional[asyncpg.Pool] = None
+_tables_verified: bool = False
 
 
 async def init_pool() -> None:
     """Initialize the PostgreSQL connection pool."""
-    global pool
+    global pool, _tables_verified
     if pool is not None:
         return
         
@@ -44,7 +45,9 @@ async def init_pool() -> None:
         )
         logger.info("PostgreSQL connection pool initialized successfully")
         
-        # Self-healing migration for phone_numbers table
+        if not _tables_verified:
+            _tables_verified = True
+            # Self-healing migration for phone_numbers table
         try:
             logger.info("Verifying phone_numbers table exists...")
             async with pool.acquire() as conn:

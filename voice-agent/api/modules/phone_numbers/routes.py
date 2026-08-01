@@ -568,6 +568,43 @@ async def get_livekit_status():
     return ApiResponse.success(data=status_data)
 
 
+@router.delete("/livekit/trunk/{trunk_id}", dependencies=[Depends(require_roles(["SUPER_ADMIN"]))])
+async def delete_livekit_trunk(trunk_id: str):
+    """
+    Delete a LiveKit SIP Trunk directly from LiveKit server.
+    Also disassociates it from any DB phone number.
+    """
+    success, err = await livekit_sip_service.delete_trunk(trunk_id)
+    if not success:
+        return ApiResponse.error(500, f"Failed to delete LiveKit trunk: {err}", "DELETE_TRUNK_FAILED")
+        
+    try:
+        await database.query("UPDATE phone_numbers SET lk_sip_trunk_id = NULL WHERE lk_sip_trunk_id = $1", [trunk_id])
+    except Exception as e:
+        logger.warning(f"Failed to clear db lk_sip_trunk_id reference: {e}")
+        
+    return ApiResponse.success(message=f"LiveKit SIP Trunk {trunk_id} deleted successfully.")
+
+
+@router.delete("/livekit/dispatch-rule/{rule_id}", dependencies=[Depends(require_roles(["SUPER_ADMIN"]))])
+async def delete_livekit_dispatch_rule(rule_id: str):
+    """
+    Delete a LiveKit SIP Dispatch Rule directly from LiveKit server.
+    Also disassociates it from any DB phone number.
+    """
+    success, err = await livekit_sip_service.delete_dispatch_rule(rule_id)
+    if not success:
+        return ApiResponse.error(500, f"Failed to delete LiveKit dispatch rule: {err}", "DELETE_RULE_FAILED")
+        
+    try:
+        await database.query("UPDATE phone_numbers SET lk_sip_dispatch_rule_id = NULL WHERE lk_sip_dispatch_rule_id = $1", [rule_id])
+    except Exception as e:
+        logger.warning(f"Failed to clear db lk_sip_dispatch_rule_id reference: {e}")
+        
+    return ApiResponse.success(message=f"LiveKit SIP Dispatch Rule {rule_id} deleted successfully.")
+
+
+
 @router.put("/{id}", dependencies=[Depends(require_roles(["SUPER_ADMIN"]))])
 async def update_phone_number(id: str, req_body: EditPhoneNumberRequest):
     """

@@ -591,6 +591,12 @@ async def register_call_with_backend(agent, started_at, ended_at):
 def prewarm(proc: JobProcess):
     """Preload VAD model to reduce startup time."""
     proc.userdata["vad"] = silero.VAD.load()
+    try:
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(database.init_pool())
+        loop.close()
+    except Exception as e:
+        logger.warning(f"[Prewarm] DB pool init warning: {e}")
 
 
 async def entrypoint(ctx: JobContext):

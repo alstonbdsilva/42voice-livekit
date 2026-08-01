@@ -58,11 +58,12 @@ class LiveKitSipService:
             # 1. Create Inbound Trunk
             logger.info(f"Registering Inbound SIP Trunk in LiveKit for number: {number}")
             auth_password = sip_config.get("password", "")
-            if auth_password:
+            auth_realm = sip_config.get("domain", "")
+            if auth_password and auth_realm:
                 auth_username = sip_config.get("authUsername", number)
-                auth_realm = sip_config.get("domain", "")
             else:
                 auth_username = ""
+                auth_password = ""
                 auth_realm = ""
             
             # Format number to remove spaces/symbols for standard registration
@@ -156,39 +157,61 @@ class LiveKitSipService:
         trunk_id: str, 
         dispatch_rule_id: Optional[str] = None
     ) -> Tuple[bool, Optional[str]]:
-        """
-        Delete a SIP Trunk and Dispatch Rule from LiveKit.
-        """
+        """Delete a SIP Trunk and Dispatch Rule from LiveKit."""
+        if dispatch_rule_id:
+            await self.delete_dispatch_rule(dispatch_rule_id)
+        if trunk_id:
+            return await self.delete_trunk(trunk_id)
+        return True, None
+
+    async def delete_trunk(self, trunk_id: str) -> Tuple[bool, Optional[str]]:
+        """Delete a SIP Trunk directly from LiveKit."""
         if trunk_id.startswith("mock-") or trunk_id.startswith("err-"):
-            logger.info(f"Deprovision bypassed for simulated trunk: {trunk_id}")
+            logger.info(f"Delete bypassed for simulated trunk: {trunk_id}")
             return True, None
             
         lk = self._get_client()
         if not lk:
-            return True, "LiveKit client not initialized. Simulated deletion."
+            return True, "LiveKit client not initialized."
             
         try:
-            # Delete Dispatch Rule
-            if dispatch_rule_id:
-                logger.info(f"Deleting LiveKit SIP Dispatch Rule: {dispatch_rule_id}")
-                del_rule_req = lk_api.DeleteSIPDispatchRuleRequest(sip_dispatch_rule_id=dispatch_rule_id)
-                await lk.sip.delete_dispatch_rule(del_rule_req)
-                
-            # Delete Trunk
-            if trunk_id:
-                logger.info(f"Deleting LiveKit SIP Inbound Trunk: {trunk_id}")
-                del_trunk_req = lk_api.DeleteSIPTrunkRequest(sip_trunk_id=trunk_id)
-                await lk.sip.delete_trunk(del_trunk_req)
-                
+            logger.info(f"Deleting LiveKit SIP Inbound Trunk: {trunk_id}")
+            del_trunk_req = lk_api.DeleteSIPTrunkRequest(sip_trunk_id=trunk_id)
+            await lk.sip.delete_trunk(del_trunk_req)
             await lk.aclose()
             return True, None
         except Exception as e:
-            logger.error(f"Failed to deprovision LiveKit SIP resources (Trunk={trunk_id}, Rule={dispatch_rule_id}): {e}")
+            logger.error(f"Failed to delete LiveKit SIP Trunk {trunk_id}: {e}")
             try:
                 await lk.aclose()
             except:
                 pass
             return False, str(e)
+
+    async def delete_dispatch_rule(self, dispatch_rule_id: str) -> Tuple[bool, Optional[str]]:
+        """Delete a SIP Dispatch Rule directly from LiveKit."""
+        if dispatch_rule_id.startswith("mock-") or dispatch_rule_id.startswith("err-"):
+            logger.info(f"Delete bypassed for simulated dispatch rule: {dispatch_rule_id}")
+            return True, None
+            
+        lk = self._get_client()
+        if not lk:
+            return True, "LiveKit client not initialized."
+            
+        try:
+            logger.info(f"Deleting LiveKit SIP Dispatch Rule: {dispatch_rule_id}")
+            del_rule_req = lk_api.DeleteSIPDispatchRuleRequest(sip_dispatch_rule_id=dispatch_rule_id)
+            await lk.sip.delete_dispatch_rule(del_rule_req)
+            await lk.aclose()
+            return True, None
+        except Exception as e:
+            logger.error(f"Failed to delete LiveKit SIP Dispatch Rule {dispatch_rule_id}: {e}")
+            try:
+                await lk.aclose()
+            except:
+                pass
+            return False, str(e)
+
 
     async def update_inbound_trunk(
         self,
@@ -211,11 +234,12 @@ class LiveKitSipService:
         try:
             logger.info(f"Updating Inbound SIP Trunk {trunk_id} in LiveKit for number: {number}")
             auth_password = sip_config.get("password", "")
-            if auth_password:
+            auth_realm = sip_config.get("domain", "")
+            if auth_password and auth_realm:
                 auth_username = sip_config.get("authUsername", number)
-                auth_realm = sip_config.get("domain", "")
             else:
                 auth_username = ""
+                auth_password = ""
                 auth_realm = ""
             
             clean_number = normalize_phone_number(number)
