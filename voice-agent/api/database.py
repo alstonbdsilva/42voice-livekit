@@ -85,6 +85,7 @@ async def init_pool() -> None:
                 ALTER TABLE agents ADD COLUMN IF NOT EXISTS guardrails JSONB DEFAULT '{}'::jsonb;
                 ALTER TABLE agents ADD COLUMN IF NOT EXISTS custom_guardrails TEXT;
                 ALTER TABLE agents ADD COLUMN IF NOT EXISTS knowledge_items JSONB DEFAULT '[]'::jsonb;
+                ALTER TABLE agents ADD COLUMN IF NOT EXISTS tool_ids JSONB DEFAULT '[]'::jsonb;
                 """)
             logger.info("Verified agents table columns.")
         except Exception as e:

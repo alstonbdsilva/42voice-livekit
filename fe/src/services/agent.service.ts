@@ -14,6 +14,7 @@ export interface CreateAgentDto {
   guardrails?: any;
   customGuardrails?: string;
   knowledgeItems?: any[];
+  toolIds?: string[];
 }
 
 interface ApiSuccessResponse<T> {
@@ -49,7 +50,18 @@ class AgentServiceClass {
     return res?.data ?? (res as any);
   }
 
-  async updateDetails(id: string, details: { name?: string; useCase?: string; activityDescription?: string; callType?: string }): Promise<Agent> {
+  async updateDetails(id: string, details: {
+    name?: string;
+    useCase?: string;
+    activityDescription?: string;
+    callType?: string;
+    voiceName?: string;
+    voiceGender?: string;
+    guardrails?: any;
+    customGuardrails?: string;
+    knowledgeItems?: any[];
+    toolIds?: string[];
+  }): Promise<Agent> {
     const res = await api.patch<ApiSuccessResponse<Agent>>(`${API_ENDPOINTS.AGENTS}/${id}`, details);
     return res?.data ?? (res as any);
   }

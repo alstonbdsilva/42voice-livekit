@@ -17,7 +17,7 @@ class AgentRepository:
         SELECT a.id, a.name, a.type, a.call_type, a.use_case, a.activity_description, a.channels, a.status,
                a.total_calls, a.total_messages, a.total_minutes, a.success_rate, a.escalation_rate,
                a.prompt_version, a.kb_version, a.total_cost, a.last_activity, a.user_id, a.client_id, a.created_at, a.updated_at,
-               a.voice_name, a.voice_gender, a.guardrails, a.custom_guardrails, a.knowledge_items,
+               a.voice_name, a.voice_gender, a.guardrails, a.custom_guardrails, a.knowledge_items, a.tool_ids,
                COALESCE(
                  (SELECT json_agg(json_build_object('id', r.id, 'name', r.name)) 
                   FROM agent_resellers ar JOIN resellers r ON ar.reseller_id = r.id 
@@ -115,11 +115,12 @@ class AgentRepository:
         guardrails = data.get("guardrails", {})
         custom_guardrails = data.get("customGuardrails", "")
         knowledge_items = data.get("knowledgeItems", [])
+        tool_ids = data.get("toolIds", [])
         
         rows = await database.query(
             """INSERT INTO agents (name, type, call_type, use_case, activity_description, channels, status, user_id, client_id,
-                                   voice_name, voice_gender, guardrails, custom_guardrails, knowledge_items)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                                   voice_name, voice_gender, guardrails, custom_guardrails, knowledge_items, tool_ids)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                RETURNING id""",
             [
                 data["name"].strip(),
@@ -135,7 +136,8 @@ class AgentRepository:
                 voice_gender,
                 json.dumps(guardrails),
                 custom_guardrails,
-                json.dumps(knowledge_items)
+                json.dumps(knowledge_items),
+                json.dumps(tool_ids)
             ],
             client=client
         )
@@ -227,7 +229,8 @@ class AgentRepository:
             "voiceGender": original.get("voice_gender") or "female",
             "guardrails": original.get("guardrails") or {},
             "customGuardrails": original.get("custom_guardrails") or "",
-            "knowledgeItems": original.get("knowledge_items") or []
+            "knowledgeItems": original.get("knowledge_items") or [],
+            "toolIds": original.get("tool_ids") or []
         }
         return await self.create(clone_data)
 
@@ -280,6 +283,11 @@ class AgentRepository:
         if "knowledgeItems" in data and data["knowledgeItems"] is not None:
             fields.append(f"knowledge_items = ${param_idx}")
             params.append(json.dumps(data["knowledgeItems"]))
+            param_idx += 1
+
+        if "toolIds" in data and data["toolIds"] is not None:
+            fields.append(f"tool_ids = ${param_idx}")
+            params.append(json.dumps(data["toolIds"]))
             param_idx += 1
             
         if not fields:

@@ -30,6 +30,7 @@ class UpdateAgentRequest(BaseModel):
     guardrails: Optional[Dict[str, Any]] = None
     customGuardrails: Optional[str] = None
     knowledgeItems: Optional[List[Dict[str, Any]]] = None
+    toolIds: Optional[List[str]] = None
 
 
 class CreateAgentRequest(BaseModel):
@@ -44,6 +45,7 @@ class CreateAgentRequest(BaseModel):
     guardrails: Optional[Dict[str, Any]] = {}
     customGuardrails: Optional[str] = ""
     knowledgeItems: Optional[List[Dict[str, Any]]] = []
+    toolIds: Optional[List[str]] = []
 
 
 # --- Route Endpoints ---
@@ -166,8 +168,13 @@ async def update(agent_id: str, req_body: UpdateAgentRequest, current_user: Dict
             code="AGENT_NOT_FOUND"
         )
 
-    if req_body.name is not None or req_body.useCase is not None or req_body.activityDescription is not None or req_body.callType is not None:
-        agent = await agent_service.update_agent_details(agent_id, req_body.model_dump(exclude_unset=True))
+    # Filter only configuration detail fields for update_agent_details
+    detail_fields = {"name", "useCase", "activityDescription", "callType", "voiceName", "voiceGender", "guardrails", "customGuardrails", "knowledgeItems"}
+    update_data = req_body.model_dump(exclude_unset=True)
+    details_to_update = {k: v for k, v in update_data.items() if k in detail_fields}
+
+    if details_to_update:
+        agent = await agent_service.update_agent_details(agent_id, details_to_update)
 
     if req_body.status:
         agent = await agent_service.update_agent_status(agent_id, req_body.status)

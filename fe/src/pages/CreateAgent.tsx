@@ -17,9 +17,13 @@ import {
   Play,
   Upload,
   File as FileIcon,
+  Sliders,
 } from "lucide-react";
 import AgentService, { CreateAgentDto } from "@/services/agent.service";
 import PhoneNumberService from "@/services/phone-number.service";
+import ToolsService from "@/services/tools.service";
+import { Tool } from "@/types";
+import { useAuth } from "@/store/authStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -75,6 +79,7 @@ const DEFAULT_GUARDRAILS = {
 
 export default function CreateAgent() {
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState("basic");
@@ -106,6 +111,10 @@ export default function CreateAgent() {
   const [phoneNumbers, setPhoneNumbers] = useState<any[]>([]);
   const [selectedPhoneNumberId, setSelectedPhoneNumberId] = useState<string>("none");
 
+  // Tools available
+  const [tools, setTools] = useState<Tool[]>([]);
+  const [selectedToolIds, setSelectedToolIds] = useState<string[]>([]);
+
   useEffect(() => {
     const fetchNumbers = async () => {
       try {
@@ -115,8 +124,26 @@ export default function CreateAgent() {
         console.error("Failed to load phone numbers:", err);
       }
     };
+    const fetchTools = async () => {
+      try {
+        const data = await ToolsService.getAll({ status: "active" });
+        setTools(data);
+      } catch (err) {
+        console.error("Failed to load tools:", err);
+      }
+    };
     fetchNumbers();
+    fetchTools();
   }, []);
+
+  const isSuperAdmin = user?.role === "super_admin" || user?.role === "finance_admin";
+  const userOwnerId = user?.clientId || user?.resellerId || user?.id;
+
+  const filteredNumbersForDropdown = phoneNumbers.filter((num) => {
+    if (isSuperAdmin) return true;
+    const numOwnerId = num.clientId || num.resellerId;
+    return numOwnerId && String(numOwnerId) === String(userOwnerId);
+  });
 
   const toggleGuardrail = (key: keyof typeof DEFAULT_GUARDRAILS) => {
     setGuardrails((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -229,10 +256,22 @@ export default function CreateAgent() {
           value: k.value,
           size: k.size,
         })),
+        toolIds: selectedToolIds,
       };
 
-      await AgentService.create(dto);
+      const newAgent = await AgentService.create(dto);
       toast.success("Voice Agent created successfully!");
+
+      if (selectedPhoneNumberId && selectedPhoneNumberId !== "none" && selectedPhoneNumberId !== "") {
+        try {
+          await PhoneNumberService.assignAgent(selectedPhoneNumberId, String(newAgent.id));
+          toast.success("Phone number linked to agent successfully!");
+        } catch (err: any) {
+          toast.error("Agent created, but failed to link the phone number.");
+          console.error("Failed to link phone number:", err);
+        }
+      }
+
       navigate("/agents");
     } catch (err: any) {
       toast.error(err?.response?.data?.message ?? "Failed to create voice agent.");
@@ -271,7 +310,7 @@ export default function CreateAgent() {
 
       <form onSubmit={handleSubmit}>
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <TabsList className="grid w-full grid-cols-4 mb-6">
+          <TabsList className="grid w-full grid-cols-5 mb-6">
             <TabsTrigger
               value="basic"
               className="flex items-center justify-center gap-2 border border-transparent data-[state=active]:border-zinc-200 shadow-none data-[state=active]:shadow-none"
@@ -299,6 +338,13 @@ export default function CreateAgent() {
             >
               <Mic2 className="w-4 h-4" />
               Voice
+            </TabsTrigger>
+            <TabsTrigger
+              value="tools"
+              className="flex items-center justify-center gap-2 border border-transparent data-[state=active]:border-zinc-200 shadow-none data-[state=active]:shadow-none"
+            >
+              <Sliders className="w-4 h-4" />
+              Tools
             </TabsTrigger>
           </TabsList>
 
@@ -358,6 +404,26 @@ export default function CreateAgent() {
                   onChange={(e) => setUseCase(e.target.value)}
                 />
                 <p className="text-[11px] text-zinc-500">Describe the primary purpose of your voice agent</p>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium">Phone Number Attachment (Optional)</Label>
+                <Select value={selectedPhoneNumberId} onValueChange={setSelectedPhoneNumberId}>
+                  <SelectTrigger className="text-xs h-9">
+                    <SelectValue placeholder="Select a phone number" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none" className="text-xs">
+                      -- None (Do not attach a number) --
+                    </SelectItem>
+                    {filteredNumbersForDropdown.map((num) => (
+                      <SelectItem key={num.id} value={num.id} className="text-xs">
+                        {num.number} {num.name ? `(${num.name})` : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-[11px] text-zinc-500">Attach an available phone number to this agent</p>
               </div>
             </div>
           </TabsContent>
@@ -624,6 +690,69 @@ export default function CreateAgent() {
                   </div>
                 </div>
               </div>
+            </div>
+          </TabsContent>
+
+          {/* ── Tools ───────────────────────────────────────────────────── */}
+          <TabsContent value="tools" className="outline-none">
+            <div className="bg-white border border-zinc-200 p-6 rounded-sm shadow-xs space-y-4 w-full">
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-900 flex items-center gap-2">
+                  <Sliders className="w-4 h-4 text-zinc-700" /> Enable Agent Tools
+                </h3>
+                <p className="text-xs text-zinc-500 mt-0.5">Select the tools this agent is allowed to execute during conversations.</p>
+              </div>
+
+              {tools.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center text-zinc-400 border border-dashed border-zinc-200 rounded-sm bg-zinc-50/50">
+                  <Sliders className="w-8 h-8 mb-2 opacity-50" />
+                  <p className="text-xs font-semibold">No active tools found</p>
+                  <p className="text-[11px] text-zinc-500 mt-1">Create tools first under the "Tools" navigation menu.</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {tools.map((tool) => {
+                    const isChecked = selectedToolIds.includes(tool.toolUuid);
+                    return (
+                      <div
+                        key={tool.toolUuid}
+                        onClick={() => {
+                          setSelectedToolIds((prev) =>
+                            prev.includes(tool.toolUuid)
+                              ? prev.filter((id) => id !== tool.toolUuid)
+                              : [...prev, tool.toolUuid]
+                          );
+                        }}
+                        className={`flex items-start gap-3 p-4 border rounded-sm cursor-pointer transition-all ${
+                          isChecked
+                            ? "border-zinc-950 bg-zinc-50/80 shadow-xs"
+                            : "border-zinc-200 hover:border-zinc-300 bg-white"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          readOnly
+                          className="mt-1 rounded border-zinc-300 text-zinc-950 focus:ring-zinc-950"
+                        />
+                        <div className="space-y-1">
+                          <div className="text-xs font-semibold text-zinc-900 flex items-center gap-1.5">
+                            <span className="capitalize px-1.5 py-0.5 rounded-sm bg-zinc-100 text-zinc-700 text-[10px]">
+                              {tool.category.replace("_", " ")}
+                            </span>
+                            <span>{tool.name}</span>
+                          </div>
+                          {tool.description && (
+                            <p className="text-[11px] text-zinc-500 leading-normal line-clamp-2">
+                              {tool.description}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </TabsContent>
         </Tabs>

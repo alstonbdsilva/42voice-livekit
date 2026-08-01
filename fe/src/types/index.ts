@@ -47,6 +47,7 @@ export interface Agent {
   guardrails?: any;
   customGuardrails?: string;
   knowledgeItems?: any[];
+  toolIds?: string[];
 }
 
 export interface TranscriptLine {

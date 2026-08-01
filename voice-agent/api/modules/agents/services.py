@@ -82,7 +82,8 @@ class AgentService:
             "voiceGender": payload.get("voiceGender", "female"),
             "guardrails": payload.get("guardrails", {}),
             "customGuardrails": payload.get("customGuardrails", ""),
-            "knowledgeItems": payload.get("knowledgeItems", [])
+            "knowledgeItems": payload.get("knowledgeItems", []),
+            "toolIds": payload.get("toolIds", [])
         }
 
         if role in ["SUPER_ADMIN", "FINANCE_ADMIN"]:
@@ -124,6 +125,10 @@ class AgentService:
         knowledge_items = a.get("knowledge_items") or []
         if isinstance(knowledge_items, str):
             knowledge_items = json.loads(knowledge_items)
+            
+        tool_ids = a.get("tool_ids") or []
+        if isinstance(tool_ids, str):
+            tool_ids = json.loads(tool_ids)
 
         return {
             "id": str(a["id"]),
@@ -150,5 +155,6 @@ class AgentService:
             "voiceGender": a.get("voice_gender") or "female",
             "guardrails": guardrails,
             "customGuardrails": a.get("custom_guardrails") or "",
-            "knowledgeItems": knowledge_items
+            "knowledgeItems": knowledge_items,
+            "toolIds": tool_ids
         }
