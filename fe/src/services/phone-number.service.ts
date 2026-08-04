@@ -29,6 +29,18 @@ class PhoneNumberServiceClass {
     return Array.isArray(data) ? data : (data?.data ?? []);
   }
 
+  async getAvailable(country = "US", type = "Local", areaCode?: string): Promise<any[]> {
+    try {
+      const params = new URLSearchParams({ country, type });
+      if (areaCode) params.append("areaCode", areaCode);
+      const res = await api.get<any>(`${API_ENDPOINTS.PHONE_NUMBERS}/available?${params.toString()}`);
+      const data = res?.data ?? res;
+      return Array.isArray(data) ? data : (data?.data ?? []);
+    } catch (err) {
+      return [];
+    }
+  }
+
   async register(dto: RegisterPhoneNumberDto): Promise<any> {
     const res = await api.post<any>(`${API_ENDPOINTS.PHONE_NUMBERS}/register`, dto);
     return res?.data ?? res;

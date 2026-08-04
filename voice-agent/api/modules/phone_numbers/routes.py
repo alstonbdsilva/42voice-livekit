@@ -1,6 +1,9 @@
+import os
 import uuid
 import logging
 import json
+import asyncio
+import httpx
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Request, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -8,6 +11,7 @@ from pydantic import BaseModel, Field
 from api import database
 from api.utils.phone import normalize_phone_number, get_phone_number_variants
 from api.utils.api_response import ApiResponse
+from config import get_settings
 from api.middlewares.auth import get_current_user, require_roles
 from api.modules.phone_numbers.livekit_sip import livekit_sip_service
 from api.modules.phone_numbers.sync_service import phone_sync_service
@@ -126,6 +130,113 @@ async def get_all_numbers(
     except Exception as e:
         logger.error(f"Failed to fetch phone numbers: {e}")
         return ApiResponse.error(500, f"Failed to retrieve phone numbers: {e}", "FETCH_NUMBERS_FAILED")
+
+
+@router.get("/available")
+async def get_available_twilio_numbers(
+    country: str = "US",
+    type: str = "Local",
+    areaCode: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Query available Twilio phone numbers dynamically using backend Twilio credentials.
+    Fetches real-time pricing dynamically from Twilio Pricing API.
+    """
+    settings = get_settings()
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID") or settings.twilio_account_sid
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN") or settings.twilio_auth_token
+
+    country_code = country.upper()
+    type_clean = type.lower()
+    if type_clean in ["tollfree", "toll_free", "toll-free"]:
+        number_type = "TollFree"
+    elif type_clean == "mobile":
+        number_type = "Mobile"
+    else:
+        number_type = "Local"
+
+    if account_sid and auth_token:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                params = {"PageSize": 30, "VoiceEnabled": "true", "SmsEnabled": "true"}
+                if areaCode and areaCode.strip():
+                    params["AreaCode"] = areaCode.strip()
+
+                url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/AvailablePhoneNumbers/{country_code}/{number_type}.json"
+                pricing_url = f"https://pricing.twilio.com/v1/PhoneNumbers/Countries/{country_code}"
+
+                resp, pricing_resp = await asyncio.gather(
+                    client.get(url, auth=(account_sid, auth_token), params=params),
+                    client.get(pricing_url, auth=(account_sid, auth_token)),
+                    return_exceptions=True
+                )
+
+                dynamic_cost_str = None
+                price_unit = None
+                currency_symbol = ""
+                
+                if isinstance(pricing_resp, httpx.Response) and pricing_resp.status_code == 200:
+                    p_data = pricing_resp.json()
+                    price_unit = p_data.get("price_unit")
+                    if price_unit:
+                        p_unit_upper = price_unit.upper()
+                        currency_symbol = "£" if p_unit_upper == "GBP" else ("€" if p_unit_upper == "EUR" else "$" if p_unit_upper == "USD" else f"{price_unit} ")
+                    
+                    target_type_str = "toll free" if number_type == "TollFree" else number_type.lower()
+                    pn_prices = p_data.get("phone_number_prices", [])
+                    for p in pn_prices:
+                        if p.get("number_type", "").lower() == target_type_str:
+                            raw_price = p.get("current_price") or p.get("base_price")
+                            if raw_price is not None:
+                                cost_val = float(raw_price)
+                                dynamic_cost_str = f"{currency_symbol}{cost_val:.2f}"
+                            break
+
+                setup_cost_str = f"{currency_symbol}0.00" if currency_symbol else "$0.00"
+
+                if isinstance(resp, httpx.Response) and resp.status_code == 200:
+                    twilio_data = resp.json()
+                    numbers_list = twilio_data.get("available_phone_numbers", [])
+                    formatted = []
+                    for n in numbers_list:
+                        locality = n.get("locality") or ""
+                        region = n.get("region") or ""
+                        rate_center = n.get("rate_center") or ""
+                        
+                        location_parts = [p for p in [locality, region] if p]
+                        location_str = ", ".join(location_parts) if location_parts else (rate_center or country_code)
+
+                        formatted.append({
+                            "id": n.get("phone_number"),
+                            "number": n.get("friendly_name") or n.get("phone_number"),
+                            "rawNumber": n.get("phone_number"),
+                            "country": country_code,
+                            "location": location_str,
+                            "locality": locality,
+                            "region": region,
+                            "postalCode": n.get("postal_code", ""),
+                            "rateCenter": rate_center,
+                            "type": number_type,
+                            "provider": "Twilio",
+                            "monthlyCost": dynamic_cost_str if dynamic_cost_str is not None else "N/A",
+                            "priceUnit": price_unit or "",
+                            "setupCost": setup_cost_str,
+                            "capabilities": {
+                                "voice": n.get("capabilities", {}).get("voice", True),
+                                "sms": n.get("capabilities", {}).get("SMS", True),
+                                "mms": n.get("capabilities", {}).get("MMS", False)
+                            }
+                        })
+                    return ApiResponse.success(data=formatted)
+                else:
+                    status_code = resp.status_code if isinstance(resp, httpx.Response) else "Error"
+                    resp_text = resp.text if isinstance(resp, httpx.Response) else str(resp)
+                    logger.warning(f"Twilio API returned status {status_code}: {resp_text}")
+        except Exception as e:
+            logger.error(f"Failed to fetch available numbers from Twilio API: {e}")
+
+    return ApiResponse.success(data=[])
 
 
 @router.post("/register", dependencies=[Depends(require_roles(["SUPER_ADMIN"]))])
