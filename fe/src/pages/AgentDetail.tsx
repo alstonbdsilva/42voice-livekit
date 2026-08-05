@@ -17,6 +17,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { useAuth } from "@/store/authStore";
 import { toast } from "sonner";
+import ElevenLabsVoiceSelector from "@/components/voice/ElevenLabsVoiceSelector";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   ArrowLeft,
@@ -715,126 +716,56 @@ export default function AgentDetail() {
         </TabsContent>
 
         {/* ── Voice & Safety Tab ─────────────────────────────────────── */}
-        <TabsContent value="voice" className="outline-none">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 w-full">
-            <div className="bg-white border border-zinc-200 p-5 rounded-sm shadow-xs space-y-4">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-900">Voice Selection</h3>
+        <TabsContent value="voice" className="outline-none space-y-6">
+          <ElevenLabsVoiceSelector
+            selectedVoiceName={editVoiceName}
+            selectedVoiceGender={editVoiceGender as "female" | "male"}
+            onSelectVoice={(vName, g) => {
+              setEditVoiceName(vName);
+              setEditVoiceGender(g);
+            }}
+            disabled={!canEdit}
+          />
 
-              <div className="space-y-1.5">
-                <Label className="text-xs font-medium">Voice Gender</Label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    disabled={!canEdit}
-                    onClick={() => {
-                      setEditVoiceGender("female");
-                      const matched = VOICE_OPTIONS.find((v) => v.gender === "female");
-                      if (matched) setEditVoiceName(matched.value);
-                    }}
-                    className={`py-2 px-3 text-xs border rounded-sm transition-all font-medium ${
-                      editVoiceGender === "female"
-                        ? "bg-zinc-950 border-zinc-950 text-white font-semibold"
-                        : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
-                    }`}
-                  >
-                    Female
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!canEdit}
-                    onClick={() => {
-                      setEditVoiceGender("male");
-                      const matched = VOICE_OPTIONS.find((v) => v.gender === "male");
-                      if (matched) setEditVoiceName(matched.value);
-                    }}
-                    className={`py-2 px-3 text-xs border rounded-sm transition-all font-medium ${
-                      editVoiceGender === "male"
-                        ? "bg-zinc-950 border-zinc-950 text-white font-semibold"
-                        : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
-                    }`}
-                  >
-                    Male
-                  </button>
-                </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label className="text-xs font-medium">Voice Name</Label>
-                <select
-                  value={editVoiceName}
-                  onChange={(e) => setEditVoiceName(e.target.value)}
-                  disabled={!canEdit}
-                  className="flex h-9 w-full rounded-md border border-zinc-200 bg-white px-3 py-1 text-sm shadow-xs focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-zinc-950"
-                >
-                  {VOICE_OPTIONS.filter((v) => v.gender === editVoiceGender).map((v) => (
-                    <option key={v.value} value={v.value}>
-                      {v.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <Button type="button" variant="outline" className="w-full">
-                <Play className="w-3.5 h-3.5 mr-1.5" /> Preview Voice Sample
-              </Button>
+          <div className="bg-white border border-zinc-200 p-5 rounded-sm shadow-xs space-y-4">
+            <div className="flex items-center gap-2 text-zinc-900 font-bold text-xs uppercase tracking-wider">
+              <ShieldCheck className="w-4 h-4 text-emerald-600" />
+              <span>Safety Guardrails & Compliance</span>
             </div>
 
-            <div className="bg-zinc-50 border border-zinc-200 p-5 rounded-sm space-y-3 shadow-xs">
-              <div className="flex items-center gap-2 text-zinc-700 font-semibold text-xs">
-                <Mic2 className="w-4 h-4 text-zinc-500" />
-                <span>Selected Voice</span>
-              </div>
-              <div className="flex items-center gap-3 p-3 bg-white border border-zinc-200 rounded-sm">
-                <div className="w-10 h-10 rounded-full bg-zinc-900 text-white flex items-center justify-center font-bold text-sm">
-                  {editVoiceName.charAt(0).toUpperCase()}
-                </div>
-                <div>
-                  <div className="text-sm font-semibold text-zinc-900 capitalize">
-                    {editVoiceName}
-                  </div>
-                  <div className="text-[11px] text-zinc-500 capitalize">{editVoiceGender} voice</div>
-                </div>
-              </div>
-
-              <div className="pt-3 border-t border-zinc-200 space-y-3">
-                <div className="flex items-center gap-2 text-zinc-700 font-semibold text-xs">
-                  <ShieldCheck className="w-4 h-4 text-zinc-500" />
-                  <span>Guardrails</span>
-                </div>
-
-                {[
-                  { key: "blockProfanity" as const, label: "Block profanity & abusive language" },
-                  { key: "piiRedaction" as const, label: "Redact PII in transcripts" },
-                  { key: "restrictOffTopic" as const, label: "Restrict off-topic conversations" },
-                  { key: "requireDisclaimer" as const, label: "Require AI disclaimer at call start" },
-                  { key: "escalateOnFrustration" as const, label: "Escalate to human on frustration" },
-                ].map((g) => (
-                  <div key={g.key} className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] text-zinc-700">{g.label}</span>
-                    <Switch
-                      checked={!!editGuardrails?.[g.key]}
-                      disabled={!canEdit}
-                      onCheckedChange={(checked) =>
-                        setEditGuardrails((prev: any) => ({ ...prev, [g.key]: checked }))
-                      }
-                    />
-                  </div>
-                ))}
-
-                <div className="space-y-1.5 pt-1">
-                  <Label className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
-                    Custom Guardrail Rules
-                  </Label>
-                  <Textarea
-                    rows={3}
-                    placeholder="e.g., Never discuss pricing..."
-                    value={editCustomGuardrails}
-                    onChange={(e) => setEditCustomGuardrails(e.target.value)}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {[
+                { key: "blockProfanity" as const, label: "Block profanity & abusive language" },
+                { key: "piiRedaction" as const, label: "Redact PII in transcripts" },
+                { key: "restrictOffTopic" as const, label: "Restrict off-topic conversations" },
+                { key: "requireDisclaimer" as const, label: "Require AI disclaimer at call start" },
+                { key: "escalateOnFrustration" as const, label: "Escalate to human on frustration" },
+              ].map((g) => (
+                <div key={g.key} className="flex items-center justify-between gap-3 p-3 bg-zinc-50 border border-zinc-150 rounded-sm">
+                  <span className="text-xs text-zinc-700 font-medium">{g.label}</span>
+                  <Switch
+                    checked={!!editGuardrails?.[g.key]}
                     disabled={!canEdit}
-                    className="text-xs bg-white"
+                    onCheckedChange={(checked) =>
+                      setEditGuardrails((prev: any) => ({ ...prev, [g.key]: checked }))
+                    }
                   />
                 </div>
-              </div>
+              ))}
+            </div>
+
+            <div className="space-y-1.5 pt-2 border-t border-zinc-100">
+              <Label className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                Custom Guardrail Rules
+              </Label>
+              <Textarea
+                rows={3}
+                placeholder="e.g., Never discuss pricing..."
+                value={editCustomGuardrails}
+                onChange={(e) => setEditCustomGuardrails(e.target.value)}
+                disabled={!canEdit}
+                className="text-xs bg-white"
+              />
             </div>
           </div>
         </TabsContent>

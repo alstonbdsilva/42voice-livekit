@@ -1,7 +1,9 @@
 import logging
 import uuid
 import boto3
+import httpx
 from fastapi import APIRouter, Depends, Request, UploadFile, File
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 
@@ -14,6 +16,14 @@ logger = logging.getLogger("voice-agent.api.agents.routes")
 
 router = APIRouter()
 agent_service = AgentService()
+
+class PreviewVoiceRequest(BaseModel):
+    voiceId: str
+    text: Optional[str] = "Hello! I am your AI voice assistant. How can I help you today?"
+    modelId: Optional[str] = "eleven_multilingual_v2"
+    stability: Optional[float] = 0.5
+    similarityBoost: Optional[float] = 0.75
+
 
 # --- Request Models ---
 
@@ -188,3 +198,102 @@ async def update(agent_id: str, req_body: UpdateAgentRequest, current_user: Dict
         message="Agent updated successfully",
         data=agent
     )
+
+
+@router.get("/elevenlabs/voices")
+async def get_elevenlabs_voices(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Fetch ElevenLabs voices dynamically if API key configured, combined with standard voices.
+    """
+    settings = get_settings()
+    api_key = getattr(settings, "elevenlabs_api_key", None)
+    
+    voices_list = []
+    has_api_key = bool(api_key and api_key != "YOUR_ELEVENLABS_API_KEY")
+    if has_api_key:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                headers: dict[str, str] = {"xi-api-key": str(api_key)}
+                res = await client.get(
+                    "https://api.elevenlabs.io/v1/voices",
+                    headers=headers
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    for v in data.get("voices", []):
+                        labels = v.get("labels", {})
+                        voices_list.append({
+                            "voice_id": v.get("voice_id"),
+                            "name": v.get("name"),
+                            "gender": labels.get("gender", "female" if "female" in v.get("name", "").lower() else "male"),
+                            "category": v.get("category", "premade"),
+                            "accent": labels.get("accent", "american"),
+                            "description": labels.get("description") or labels.get("use_case") or f"{labels.get('accent', 'American')} {labels.get('gender', 'voice')}",
+                            "preview_url": v.get("preview_url"),
+                            "is_custom": v.get("category") not in ["premade", "high_quality"]
+                        })
+                else:
+                    logger.warning(f"ElevenLabs API return non-200 status {res.status_code}: {res.text}")
+                    has_api_key = False
+        except Exception as e:
+            logger.warning(f"Could not fetch dynamic ElevenLabs voices: {e}")
+
+    return ApiResponse.success(
+        status_code=200,
+        message="ElevenLabs voices retrieved successfully",
+        data={"voices": voices_list, "hasApiKey": has_api_key}
+    )
+
+
+@router.post("/elevenlabs/preview")
+async def preview_elevenlabs_voice(
+    req: PreviewVoiceRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Generate live audio TTS preview using ElevenLabs API.
+    """
+    settings = get_settings()
+    api_key = getattr(settings, "elevenlabs_api_key", None)
+    
+    if not api_key or api_key == "YOUR_ELEVENLABS_API_KEY":
+        return ApiResponse.error(
+            status_code=400,
+            message="ELEVENLABS_API_KEY is not configured on the backend server.",
+            code="ELEVENLABS_KEY_MISSING"
+        )
+    
+    try:
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{req.voiceId}"
+        headers: dict[str, str] = {
+            "xi-api-key": str(api_key),
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "text": req.text or "Hello! I am your AI voice assistant. How can I help you today?",
+            "model_id": req.modelId or "eleven_multilingual_v2",
+            "voice_settings": {
+                "stability": req.stability if req.stability is not None else 0.5,
+                "similarity_boost": req.similarityBoost if req.similarityBoost is not None else 0.75
+            }
+        }
+        
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code != 200:
+                logger.error(f"ElevenLabs TTS preview error {resp.status_code}: {resp.text}")
+                return ApiResponse.error(
+                    status_code=resp.status_code,
+                    message=f"ElevenLabs API error: {resp.text}",
+                    code="ELEVENLABS_API_ERROR"
+                )
+            
+            return Response(content=resp.content, media_type="audio/mpeg")
+    except Exception as e:
+        logger.error(f"Failed to generate ElevenLabs voice preview: {e}")
+        return ApiResponse.error(
+            status_code=500,
+            message=f"Failed to generate voice preview: {str(e)}",
+            code="PREVIEW_GENERATION_FAILED"
+        )
+

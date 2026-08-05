@@ -30,6 +30,10 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import ElevenLabsVoiceSelector, {
+  ElevenLabsVoiceSettings,
+  DEFAULT_ELEVENLABS_SETTINGS,
+} from "@/components/voice/ElevenLabsVoiceSelector";
 import {
   Select,
   SelectContent,
@@ -101,7 +105,9 @@ export default function CreateAgent() {
 
   // Voice
   const [voiceGender, setVoiceGender] = useState<"female" | "male">("female");
-  const [voiceName, setVoiceName] = useState("aria");
+  const [voiceName, setVoiceName] = useState("Kira");
+  const [elevenLabsSettings, setElevenLabsSettings] =
+    useState<ElevenLabsVoiceSettings>(DEFAULT_ELEVENLABS_SETTINGS);
 
   // Guardrails
   const [guardrails, setGuardrails] = useState(DEFAULT_GUARDRAILS);
@@ -579,116 +585,50 @@ export default function CreateAgent() {
           </TabsContent>
 
           {/* ── Voice ───────────────────────────────────────────────────── */}
-          <TabsContent value="voice" className="outline-none">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 w-full">
-              <div className="bg-white border border-zinc-200 p-5 rounded-sm shadow-xs space-y-4">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-900">Voice Selection</h3>
+          <TabsContent value="voice" className="outline-none space-y-6">
+            <ElevenLabsVoiceSelector
+              selectedVoiceName={voiceName}
+              selectedVoiceGender={voiceGender}
+              onSelectVoice={(vName, g) => {
+                setVoiceName(vName);
+                setVoiceGender(g);
+              }}
+              voiceSettings={elevenLabsSettings}
+              onUpdateSettings={setElevenLabsSettings}
+            />
 
-                <div className="space-y-1.5">
-                  <Label className="text-xs font-medium">Voice Gender</Label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setVoiceGender("female");
-                        setVoiceName(VOICE_OPTIONS.find((v) => v.gender === "female")!.value);
-                      }}
-                      className={`py-2 px-3 text-xs border rounded-sm transition-all font-medium ${
-                        voiceGender === "female"
-                          ? "bg-zinc-950 border-zinc-950 text-white font-semibold"
-                          : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
-                      }`}
-                    >
-                      Female
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setVoiceGender("male");
-                        setVoiceName(VOICE_OPTIONS.find((v) => v.gender === "male")!.value);
-                      }}
-                      className={`py-2 px-3 text-xs border rounded-sm transition-all font-medium ${
-                        voiceGender === "male"
-                          ? "bg-zinc-950 border-zinc-950 text-white font-semibold"
-                          : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
-                      }`}
-                    >
-                      Male
-                    </button>
-                  </div>
-                </div>
-
-                <div className="space-y-1.5">
-                  <Label className="text-xs font-medium">Voice Name</Label>
-                  <Select value={voiceName} onValueChange={setVoiceName}>
-                    <SelectTrigger className="text-xs h-9">
-                      <SelectValue placeholder="Select a voice" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {filteredVoices.map((v) => (
-                        <SelectItem key={v.value} value={v.value} className="text-xs">
-                          {v.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <Button type="button" variant="outline" className="w-full">
-                  <Play className="w-3.5 h-3.5 mr-1.5" /> Preview Voice Sample
-                </Button>
-                <p className="text-[11px] text-zinc-500">Voice preview playback will be available once connected to the voice engine.</p>
+            <div className="bg-white border border-zinc-200 p-5 rounded-sm shadow-xs space-y-4">
+              <div className="flex items-center gap-2 text-zinc-900 font-bold text-xs uppercase tracking-wider">
+                <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                <span>Safety Guardrails & Compliance</span>
               </div>
 
-              <div className="bg-zinc-50 border border-zinc-200 p-5 rounded-sm space-y-3 shadow-xs">
-                <div className="flex items-center gap-2 text-zinc-700 font-semibold text-xs">
-                  <Mic2 className="w-4 h-4 text-zinc-500" />
-                  <span>Selected Voice</span>
-                </div>
-                <div className="flex items-center gap-3 p-3 bg-white border border-zinc-200 rounded-sm">
-                  <div className="w-10 h-10 rounded-full bg-zinc-900 text-white flex items-center justify-center font-bold text-sm">
-                    {VOICE_OPTIONS.find((v) => v.value === voiceName)?.label.charAt(0)}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {[
+                  { key: "blockProfanity" as const, label: "Block profanity & abusive language" },
+                  { key: "piiRedaction" as const, label: "Redact PII in transcripts" },
+                  { key: "restrictOffTopic" as const, label: "Restrict off-topic conversations" },
+                  { key: "requireDisclaimer" as const, label: "Require AI disclaimer at call start" },
+                  { key: "escalateOnFrustration" as const, label: "Escalate to human on frustration" },
+                ].map((g) => (
+                  <div key={g.key} className="flex items-center justify-between gap-3 p-3 bg-zinc-50 border border-zinc-150 rounded-sm">
+                    <span className="text-xs text-zinc-700 font-medium">{g.label}</span>
+                    <Switch checked={guardrails[g.key]} onCheckedChange={() => toggleGuardrail(g.key)} />
                   </div>
-                  <div>
-                    <div className="text-sm font-semibold text-zinc-900">
-                      {VOICE_OPTIONS.find((v) => v.value === voiceName)?.label}
-                    </div>
-                    <div className="text-[11px] text-zinc-500 capitalize">{voiceGender} voice</div>
-                  </div>
-                </div>
+                ))}
+              </div>
 
-                <div className="pt-3 border-t border-zinc-200 space-y-3">
-                  <div className="flex items-center gap-2 text-zinc-700 font-semibold text-xs">
-                    <ShieldCheck className="w-4 h-4 text-zinc-500" />
-                    <span>Guardrails</span>
-                  </div>
-
-                  {[
-                    { key: "blockProfanity" as const, label: "Block profanity & abusive language" },
-                    { key: "piiRedaction" as const, label: "Redact PII in transcripts" },
-                    { key: "restrictOffTopic" as const, label: "Restrict off-topic conversations" },
-                    { key: "requireDisclaimer" as const, label: "Require AI disclaimer at call start" },
-                    { key: "escalateOnFrustration" as const, label: "Escalate to human on frustration" },
-                  ].map((g) => (
-                    <div key={g.key} className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] text-zinc-700">{g.label}</span>
-                      <Switch checked={guardrails[g.key]} onCheckedChange={() => toggleGuardrail(g.key)} />
-                    </div>
-                  ))}
-
-                  <div className="space-y-1.5 pt-1">
-                    <Label className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
-                      Custom Guardrail Rules
-                    </Label>
-                    <Textarea
-                      rows={3}
-                      placeholder="e.g., Never discuss pricing for competitor products. Always confirm identity before sharing account details."
-                      value={customGuardrails}
-                      onChange={(e) => setCustomGuardrails(e.target.value)}
-                      className="text-xs bg-white"
-                    />
-                  </div>
-                </div>
+              <div className="space-y-1.5 pt-2 border-t border-zinc-100">
+                <Label className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                  Custom Guardrail Rules
+                </Label>
+                <Textarea
+                  rows={3}
+                  placeholder="e.g., Never discuss pricing for competitor products. Always confirm identity before sharing account details."
+                  value={customGuardrails}
+                  onChange={(e) => setCustomGuardrails(e.target.value)}
+                  className="text-xs bg-white"
+                />
               </div>
             </div>
           </TabsContent>
