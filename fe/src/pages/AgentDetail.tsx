@@ -38,8 +38,31 @@ import {
   Plus,
   File as FileIcon,
   Trash2,
-  ShieldCheck
+  ShieldCheck,
+  Phone,
+  PhoneCall,
+  PhoneOff,
+  Mic,
+  MicOff,
+  Volume2,
+  VolumeX,
+  RefreshCw,
+  Download,
+  Loader2,
+  Bot,
+  Send,
+  Radio
 } from "lucide-react";
+
+import {
+  Room,
+  RoomEvent,
+  Track,
+  LocalAudioTrack,
+  RemoteParticipant,
+  createLocalAudioTrack
+} from "livekit-client";
+
 
 const VOICE_OPTIONS = [
   { value: "aria", label: "Aria", gender: "female" },
@@ -114,6 +137,284 @@ export default function AgentDetail() {
   // Tools edit state
   const [allTools, setAllTools] = useState<Tool[]>([]);
   const [editToolIds, setEditToolIds] = useState<string[]>([]);
+
+  // Dograh-Style Tester State
+  const [testerMode, setTesterMode] = useState<"audio" | "text">("audio");
+  
+  // Real LiveKit WebRTC Audio State (Dograh EmbeddedVoiceTester style)
+  const [lkRoom, setLkRoom] = useState<Room | null>(null);
+  const [isCallActive, setIsCallActive] = useState(false);
+  const [isConnectingCall, setIsConnectingCall] = useState(false);
+  const [isMicMuted, setIsMicMuted] = useState(false);
+  const [livekitStatus, setLivekitStatus] = useState<"idle" | "connecting" | "active" | "failed" | "ended">("idle");
+  const [livekitStatusText, setLivekitStatusText] = useState<string>("Disconnected");
+  const audioContainerRef = React.useRef<HTMLDivElement>(null);
+  const localTrackRef = React.useRef<LocalAudioTrack | null>(null);
+
+  // Text Mode Chat State (Dograh ManualTextChatPanel style)
+  const [testSessionId, setTestSessionId] = useState<string>(`test-${Date.now()}`);
+  const [testInput, setTestInput] = useState("");
+  const [isThinking, setIsThinking] = useState(false);
+  const [testMessages, setTestMessages] = useState<Array<{ id: string; speaker: "user" | "agent"; text: string; timestamp: string }>>([]);
+  const chatBottomRef = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (activeTab === "test") {
+      chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [testMessages, isThinking, activeTab]);
+
+
+  const addOrUpdateTranscriptMessage = (speaker: "user" | "agent", text: string) => {
+    const cleanText = text.trim();
+    if (!cleanText) return;
+
+    const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+    setTestMessages((prev) => {
+      if (prev.length === 0) {
+        return [
+          {
+            id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            speaker,
+            text: cleanText,
+            timestamp: timeStr,
+          },
+        ];
+      }
+
+      const lastMsg = prev[prev.length - 1];
+
+      // If the last message is from the SAME speaker, update it in-place!
+      if (lastMsg.speaker === speaker) {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          ...lastMsg,
+          text: cleanText,
+          timestamp: timeStr,
+        };
+        return updated;
+      }
+
+      // Otherwise, it's a new speaker turn -> append
+      return [
+        ...prev,
+        {
+          id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          speaker,
+          text: cleanText,
+          timestamp: timeStr,
+        },
+      ];
+    });
+  };
+
+  const startLivekitVoiceCall = async () => {
+    if (!id || !a) return;
+    setTestMessages([]);
+
+    setIsConnectingCall(true);
+    setLivekitStatus("connecting");
+    setLivekitStatusText("Requesting connection token...");
+
+    try {
+      const roomName = `test-room-${id.substring(0, 8)}`;
+      const tokenRes = await api.post("/livekit/token", {
+        roomName,
+        agentId: id,
+        agentName: a.name,
+        identity: `web-user-${Date.now().toString(36)}`,
+        name: "Web Tester",
+      });
+
+      const token = tokenRes?.token || tokenRes?.data?.token;
+      const url = tokenRes?.url || tokenRes?.data?.url || "ws://localhost:7880";
+
+      if (!token) throw new Error("Failed to receive token from backend");
+
+      setLivekitStatusText("Connecting to WebRTC server...");
+
+      const room = new Room({
+        adaptiveStream: true,
+        dynacast: true,
+        audioCaptureDefaults: {
+          autoGainControl: true,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      });
+
+      room.on(RoomEvent.Connected, () => {
+        setLivekitStatus("active");
+        setLivekitStatusText("Call Active 🟢");
+        setIsCallActive(true);
+        setIsConnectingCall(false);
+        toast.success("LiveKit WebRTC Call Connected!");
+      });
+
+      room.on(RoomEvent.Disconnected, (reason) => {
+        setLivekitStatus("ended");
+        setLivekitStatusText(`Call Ended (${reason || "User hung up"})`);
+        setIsCallActive(false);
+        setIsConnectingCall(false);
+        setLkRoom(null);
+        toast.info("Call disconnected");
+      });
+
+      room.on(RoomEvent.TrackSubscribed, (track: Track, publication, participant: RemoteParticipant) => {
+        if (track.kind === Track.Kind.Audio) {
+          setLivekitStatusText(`Agent Speaking (${participant.name || participant.identity || a.name})`);
+          const audioElement = track.attach();
+          audioElement.id = `lk-audio-${participant.sid}`;
+          if (audioContainerRef.current) {
+            audioContainerRef.current.appendChild(audioElement);
+          }
+        }
+      });
+
+      room.on(RoomEvent.TrackUnsubscribed, (track: Track) => {
+        track.detach().forEach((el) => el.remove());
+      });
+
+      room.on(RoomEvent.DataReceived, (payload: Uint8Array, participant, _kind, topic) => {
+        try {
+          const str = new TextDecoder().decode(payload);
+          const data = JSON.parse(str);
+          if ((data.type === "transcription" || data.text) && data.text?.trim()) {
+            const speaker = data.speaker === "user" || data.speaker === "customer" ? "user" as const : "agent" as const;
+            addOrUpdateTranscriptMessage(speaker, data.text);
+          }
+        } catch (err) {
+          // ignore non-json data
+        }
+      });
+
+      room.on(RoomEvent.TranscriptionReceived, (segments, participant) => {
+        segments.forEach((seg) => {
+          if (seg.text && seg.text.trim()) {
+            const isUser = participant ? participant.identity === room.localParticipant.identity : false;
+            const speaker = isUser ? "user" as const : "agent" as const;
+            addOrUpdateTranscriptMessage(speaker, seg.text);
+          }
+        });
+      });
+
+
+
+      await room.connect(url, token);
+
+      try {
+        const localAudioTrack = await createLocalAudioTrack();
+        await room.localParticipant.publishTrack(localAudioTrack);
+        localTrackRef.current = localAudioTrack;
+      } catch (micErr) {
+        console.warn("Microphone capture issue:", micErr);
+        toast.warning("Call connected, but microphone access was denied.");
+      }
+
+      setLkRoom(room);
+    } catch (err: any) {
+      console.error("LiveKit Call Failed:", err);
+      setLivekitStatus("failed");
+      setLivekitStatusText("Connection Failed");
+      setIsConnectingCall(false);
+      setIsCallActive(false);
+      toast.error("LiveKit connection error: " + (err?.message || "Check LiveKit server"));
+    }
+  };
+
+  const endLivekitVoiceCall = async () => {
+    if (localTrackRef.current) {
+      localTrackRef.current.stop();
+      localTrackRef.current = null;
+    }
+    if (lkRoom) {
+      await lkRoom.disconnect();
+      setLkRoom(null);
+    }
+    setIsCallActive(false);
+    setIsConnectingCall(false);
+    setLivekitStatus("ended");
+    setLivekitStatusText("Disconnected");
+  };
+
+  const toggleMuteMic = () => {
+    if (localTrackRef.current) {
+      if (isMicMuted) {
+        localTrackRef.current.unmute();
+        setIsMicMuted(false);
+        toast.info("Microphone unmuted");
+      } else {
+        localTrackRef.current.mute();
+        setIsMicMuted(true);
+        toast.info("Microphone muted");
+      }
+    }
+  };
+
+  const handleSendTestMessage = async (msgOverride?: string) => {
+    const msgToSend = (msgOverride || testInput).trim();
+    if (!msgToSend || !id) return;
+
+    const userMsgObj = {
+      id: `msg-${Date.now()}-user`,
+      speaker: "user" as const,
+      text: msgToSend,
+      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    };
+
+    setTestMessages((prev) => [...prev, userMsgObj]);
+    setTestInput("");
+    setIsThinking(true);
+
+    try {
+      const historyForApi = testMessages.map((m) => ({ speaker: m.speaker, text: m.text }));
+      const result = await AgentService.testChat(id, msgToSend, testSessionId, historyForApi);
+
+      if (result.sessionId) setTestSessionId(result.sessionId);
+
+      const agentMsgObj = {
+        id: `msg-${Date.now()}-agent`,
+        speaker: "agent" as const,
+        text: result.response || "No response received.",
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      };
+
+      setTestMessages((prev) => [...prev, agentMsgObj]);
+    } catch (err: any) {
+      toast.error("Error communicating with agent: " + (err?.message || "Unknown error"));
+    } finally {
+      setIsThinking(false);
+    }
+  };
+
+  const handleClearTestChat = () => {
+    const newSessionId = `test-${Date.now()}`;
+    setTestSessionId(newSessionId);
+    setTestMessages([
+      {
+        id: `init-${Date.now()}`,
+        speaker: "agent",
+        text: `Hello! Chat reset. How can I assist you today?`,
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      },
+    ]);
+    toast.info("Test chat session reset");
+  };
+
+  const handleDownloadTranscript = () => {
+    const fullText = testMessages
+      .map((m) => `[${m.timestamp}] ${m.speaker.toUpperCase()}: ${m.text}`)
+      .join("\n");
+    const blob = new Blob([fullText], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const linkAnchor = document.createElement("a");
+    linkAnchor.href = url;
+    linkAnchor.download = `transcript-${a?.name || "agent"}-${testSessionId}.txt`;
+    linkAnchor.click();
+    URL.revokeObjectURL(url);
+  };
+
 
   const isSuperAdmin = user?.role === "super_admin" || user?.role === "finance_admin";
   const userOwnerId = user?.clientId || user?.resellerId || user?.id;
@@ -245,8 +546,8 @@ export default function AgentDetail() {
     if (!id) return;
     AgentService.getById(id).then((data) => {
       setA(data);
-    }).catch(() => {});
-    api.get(`/conversations?agentId=${id}&limit=20`).then((r) => setConvs(r.data)).catch(() => {});
+    }).catch(() => { });
+    api.get(`/conversations?agentId=${id}&limit=20`).then((r) => setConvs(r.data)).catch(() => { });
   };
 
   useEffect(() => {
@@ -254,12 +555,12 @@ export default function AgentDetail() {
     fetchNumbers();
     fetchTools();
     if (isAdmin) {
-      ResellerService.getAll().then(setAllResellers).catch(() => {});
-      ClientService.getAll().then(setAllClients).catch(() => {});
+      ResellerService.getAll().then(setAllResellers).catch(() => { });
+      ClientService.getAll().then(setAllClients).catch(() => { });
     } else if (isReseller) {
-      ClientService.getAll().then(setAllClients).catch(() => {});
+      ClientService.getAll().then(setAllClients).catch(() => { });
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, isAdmin, isReseller]);
 
   useEffect(() => {
@@ -402,9 +703,17 @@ export default function AgentDetail() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            className="bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs shadow-xs flex items-center gap-1.5 cursor-pointer"
+            onClick={() => setActiveTab("test")}
+          >
+            <Phone className="w-3.5 h-3.5" />
+            Test Agent
+          </Button>
           {canEdit && (
             <Button type="button" variant="outline" onClick={toggleStatus}>
-              {a.status === "active" ? <><Pause className="w-3.5 h-3.5 mr-1.5"/> Pause</> : <><Play className="w-3.5 h-3.5 mr-1.5"/> Resume</>}
+              {a.status === "active" ? <><Pause className="w-3.5 h-3.5 mr-1.5" /> Pause</> : <><Play className="w-3.5 h-3.5 mr-1.5" /> Resume</>}
             </Button>
           )}
           {canEdit && (
@@ -416,7 +725,7 @@ export default function AgentDetail() {
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-7 mb-6 bg-zinc-100 p-0.5 rounded-sm">
+        <TabsList className="grid w-full grid-cols-8 mb-6 bg-zinc-100 p-0.5 rounded-sm">
           <TabsTrigger
             value="basic"
             className="flex items-center justify-center gap-1.5 py-1.5 text-xs border border-transparent data-[state=active]:bg-white data-[state=active]:border-zinc-200 shadow-none"
@@ -466,7 +775,15 @@ export default function AgentDetail() {
             <MessageSquareText className="w-3.5 h-3.5" />
             Conversations
           </TabsTrigger>
+          <TabsTrigger
+            value="test"
+            className="flex items-center justify-center gap-1.5 py-1.5 text-xs font-semibold border border-transparent data-[state=active]:bg-purple-600 data-[state=active]:text-white shadow-none text-purple-700"
+          >
+            <Phone className="w-3.5 h-3.5" />
+            Test Agent
+          </TabsTrigger>
         </TabsList>
+
 
         {/* ── Basic Info Tab ────────────────────────────────────────── */}
         <TabsContent value="basic" className="outline-none space-y-6">
@@ -503,11 +820,10 @@ export default function AgentDetail() {
                   type="button"
                   disabled={!canEdit}
                   onClick={() => setEditCallType("inbound")}
-                  className={`flex items-center justify-center gap-1.5 py-2 px-3 text-xs border rounded-sm transition-all ${
-                    editCallType === "inbound"
+                  className={`flex items-center justify-center gap-1.5 py-2 px-3 text-xs border rounded-sm transition-all ${editCallType === "inbound"
                       ? "bg-zinc-950 border-zinc-950 text-white font-semibold"
                       : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
-                  }`}
+                    }`}
                 >
                   Inbound
                 </button>
@@ -515,11 +831,10 @@ export default function AgentDetail() {
                   type="button"
                   disabled={!canEdit}
                   onClick={() => setEditCallType("outbound")}
-                  className={`flex items-center justify-center gap-1.5 py-2 px-3 text-xs border rounded-sm transition-all ${
-                    editCallType === "outbound"
+                  className={`flex items-center justify-center gap-1.5 py-2 px-3 text-xs border rounded-sm transition-all ${editCallType === "outbound"
                       ? "bg-zinc-950 border-zinc-950 text-white font-semibold"
                       : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
-                  }`}
+                    }`}
                 >
                   Outbound
                 </button>
@@ -615,11 +930,10 @@ export default function AgentDetail() {
                 }}
                 onDragLeave={() => setIsDraggingFile(false)}
                 onDrop={handleFileDrop}
-                className={`flex flex-col items-center justify-center gap-1.5 py-6 px-4 border-2 border-dashed rounded-sm cursor-pointer transition-colors text-center ${
-                  isDraggingFile
+                className={`flex flex-col items-center justify-center gap-1.5 py-6 px-4 border-2 border-dashed rounded-sm cursor-pointer transition-colors text-center ${isDraggingFile
                     ? "border-zinc-950 bg-zinc-50"
                     : "border-zinc-200 bg-zinc-50/50 hover:bg-zinc-50 hover:border-zinc-300"
-                } ${!canEdit ? "opacity-50 cursor-not-allowed" : ""}`}
+                  } ${!canEdit ? "opacity-50 cursor-not-allowed" : ""}`}
               >
                 <Upload className="w-5 h-5 text-zinc-400" />
                 <p className="text-xs font-medium text-zinc-700">
@@ -825,9 +1139,8 @@ export default function AgentDetail() {
                       return (
                         <label
                           key={String(r.id)}
-                          className={`flex items-center justify-between text-xs p-1.5 rounded cursor-pointer transition-colors ${
-                            isChecked ? "bg-amber-100/60 text-amber-900 font-medium" : "text-zinc-700 hover:bg-zinc-100"
-                          } ${(!canEdit || isClient) ? "pointer-events-none opacity-80" : ""}`}
+                          className={`flex items-center justify-between text-xs p-1.5 rounded cursor-pointer transition-colors ${isChecked ? "bg-amber-100/60 text-amber-900 font-medium" : "text-zinc-700 hover:bg-zinc-100"
+                            } ${(!canEdit || isClient) ? "pointer-events-none opacity-80" : ""}`}
                         >
                           <div className="flex items-center gap-2">
                             <input
@@ -879,9 +1192,8 @@ export default function AgentDetail() {
                       return (
                         <label
                           key={String(c.id)}
-                          className={`flex items-center justify-between text-xs p-1.5 rounded cursor-pointer transition-colors ${
-                            isChecked ? "bg-purple-100/60 text-purple-900 font-medium" : "text-zinc-700 hover:bg-zinc-100"
-                          } ${(!canEdit || isClient) ? "pointer-events-none opacity-80" : ""}`}
+                          className={`flex items-center justify-between text-xs p-1.5 rounded cursor-pointer transition-colors ${isChecked ? "bg-purple-100/60 text-purple-900 font-medium" : "text-zinc-700 hover:bg-zinc-100"
+                            } ${(!canEdit || isClient) ? "pointer-events-none opacity-80" : ""}`}
                         >
                           <div className="flex items-center gap-2">
                             <input
@@ -934,11 +1246,10 @@ export default function AgentDetail() {
                             : [...prev, tool.toolUuid]
                         );
                       }}
-                      className={`flex items-start gap-3 p-4 border rounded-sm transition-all ${
-                        isChecked
+                      className={`flex items-start gap-3 p-4 border rounded-sm transition-all ${isChecked
                           ? "border-zinc-950 bg-zinc-50/80 shadow-xs"
                           : "border-zinc-200 hover:border-zinc-300 bg-white"
-                      } ${!canEdit ? "pointer-events-none opacity-80" : "cursor-pointer"}`}
+                        } ${!canEdit ? "pointer-events-none opacity-80" : "cursor-pointer"}`}
                     >
                       <input
                         type="checkbox"
@@ -998,7 +1309,306 @@ export default function AgentDetail() {
             )}
           </div>
         </TabsContent>
+
+        {/* ── Dograh-Inspired Agent Tester Tab ──────────────────────── */}
+        <TabsContent value="test" className="outline-none space-y-4">
+          <div className="bg-white border border-zinc-200 rounded-sm shadow-xs overflow-hidden">
+            {/* Header with Mode Switcher (Dograh style: Audio Mode vs Text Mode) */}
+            <div className="px-5 py-3.5 border-b border-zinc-200 bg-zinc-50/70 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-zinc-900 flex items-center gap-1.5">
+                  <Bot className="w-4 h-4 text-purple-600" />
+                  Agent Tester Workspace
+                </span>
+                <span className="text-[10px] font-mono bg-zinc-200 px-2 py-0.5 rounded text-zinc-700">
+                  ID: {a.id}
+                </span>
+              </div>
+
+              {/* Mode Toggle Switcher */}
+              <div className="flex items-center bg-zinc-200/80 p-0.5 rounded-md text-xs font-medium">
+                <button
+                  type="button"
+                  onClick={() => setTesterMode("audio")}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded-sm transition-all cursor-pointer ${
+                    testerMode === "audio"
+                      ? "bg-white text-zinc-900 shadow-2xs font-semibold"
+                      : "text-zinc-600 hover:text-zinc-900"
+                  }`}
+                >
+                  <Phone className="w-3.5 h-3.5 text-purple-600" />
+                  Audio Call Mode
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTesterMode("text")}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded-sm transition-all cursor-pointer ${
+                    testerMode === "text"
+                      ? "bg-white text-zinc-900 shadow-2xs font-semibold"
+                      : "text-zinc-600 hover:text-zinc-900"
+                  }`}
+                >
+                  <MessageSquareText className="w-3.5 h-3.5 text-purple-600" />
+                  Text Chat Mode
+                </button>
+              </div>
+            </div>
+
+            {/* MODE 1: Audio Call Mode (Dograh EmbeddedVoiceTester style) */}
+            {testerMode === "audio" && (
+              <div className="p-6 space-y-5 bg-slate-50/60 border-t border-zinc-200 min-h-[480px] flex flex-col justify-between">
+                <div className="space-y-4">
+                  {/* Status Banner Card */}
+                  <div className="flex items-center justify-between p-4 rounded-lg bg-white border border-zinc-200 shadow-2xs">
+                    <div className="flex items-center gap-3.5">
+                      <div className={`p-3 rounded-full transition-all ${isCallActive ? "bg-emerald-50 text-emerald-600 border border-emerald-200 animate-pulse shadow-xs" : "bg-purple-50 text-purple-600 border border-purple-100"}`}>
+                        <Radio className={`w-6 h-6 ${isCallActive ? "animate-pulse" : ""}`} />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="text-sm font-bold text-zinc-900 tracking-wide">Live WebRTC Voice Call</h3>
+                          <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full ${isCallActive ? "bg-emerald-100 text-emerald-800 border border-emerald-300 animate-pulse" : "bg-zinc-100 text-zinc-600 border border-zinc-200"}`}>
+                            {livekitStatusText}
+                          </span>
+                        </div>
+                        <p className="text-xs text-zinc-500 mt-0.5">
+                          Stream live audio directly to <span className="font-semibold text-zinc-800">{a.name}</span> using local WebRTC worker
+                        </p>
+                      </div>
+                    </div>
+
+                    {isCallActive && (
+                      <div className="hidden sm:flex items-center gap-1.5 bg-emerald-50 px-3 py-1.5 rounded-full border border-emerald-200">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
+                        <span className="text-[11px] font-mono font-semibold text-emerald-700">LIVE AUDIO STREAM</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Realtime Feedback Speech Timeline Container */}
+                  <div className="bg-white border border-zinc-200 rounded-lg p-4 h-[300px] overflow-y-auto space-y-3 shadow-inner">
+                    <div className="flex items-center justify-between border-b border-zinc-150 pb-2">
+                      <span className="text-[10px] font-bold font-mono text-zinc-500 uppercase tracking-widest flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+                        Realtime Speech Timeline
+                      </span>
+                      {testMessages.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setTestMessages([])}
+                          className="text-[10px] font-medium text-zinc-400 hover:text-zinc-700 transition-colors"
+                        >
+                          Clear Timeline
+                        </button>
+                      )}
+                    </div>
+
+                    {testMessages.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center h-48 text-center space-y-2">
+                        <div className="w-12 h-12 rounded-full bg-purple-50 border border-purple-100 flex items-center justify-center text-purple-600 shadow-2xs">
+                          <Mic className="w-6 h-6" />
+                        </div>
+                        <p className="text-xs font-semibold text-zinc-800">No audio exchanges recorded yet</p>
+                        <p className="text-[11px] text-zinc-500 max-w-sm">
+                          Click <span className="font-semibold text-purple-700">"Start Voice Test Call"</span> below to connect your microphone and speak directly with <span className="font-semibold">{a.name}</span>.
+                        </p>
+                      </div>
+                    ) : (
+                      testMessages.map((m) => (
+                        <div key={m.id} className="flex items-start gap-3 text-xs animate-in fade-in slide-in-from-bottom-1 duration-200">
+                          <span className={`text-[10px] font-bold font-mono px-2 py-0.5 rounded-md shrink-0 shadow-2xs ${
+                            m.speaker === "user" 
+                              ? "bg-purple-100 text-purple-800 border border-purple-200" 
+                              : "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                          }`}>
+                            {m.speaker === "user" ? "YOU" : "AGENT"}
+                          </span>
+                          <div className={`flex-1 p-2.5 rounded-lg border text-zinc-800 font-medium leading-relaxed ${
+                            m.speaker === "user"
+                              ? "bg-purple-50/50 border-purple-100/80"
+                              : "bg-emerald-50/50 border-emerald-100/80"
+                          }`}>
+                            {m.text}
+                          </div>
+                          <span className="text-[10px] text-zinc-400 font-mono self-center shrink-0">{m.timestamp}</span>
+                        </div>
+                      ))
+                    )}
+                    <div ref={chatBottomRef} />
+                  </div>
+                </div>
+
+                {/* Call Controller Footer */}
+                <div className="pt-3 border-t border-zinc-200 flex items-center gap-3">
+                  {!isCallActive ? (
+                    <Button
+                      type="button"
+                      onClick={startLivekitVoiceCall}
+                      disabled={isConnectingCall}
+                      className="w-full bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-700 hover:to-indigo-800 text-white font-bold h-12 text-sm shadow-md cursor-pointer transition-all"
+                    >
+                      {isConnectingCall ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                          Establishing WebRTC Connection...
+                        </>
+                      ) : (
+                        <>
+                          <Phone className="w-4 h-4 mr-2" />
+                          Start Voice Test Call
+                        </>
+                      )}
+                    </Button>
+                  ) : (
+                    <div className="flex items-center gap-3 w-full">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={toggleMuteMic}
+                        className={`h-12 px-5 text-xs font-semibold rounded-md transition-all ${
+                          isMicMuted 
+                            ? "bg-rose-50 border-rose-300 text-rose-700 hover:bg-rose-100" 
+                            : "bg-white border-zinc-300 text-zinc-800 hover:bg-zinc-50"
+                        }`}
+                      >
+                        {isMicMuted ? <><MicOff className="w-4 h-4 mr-2 text-rose-600" /> Unmute Mic</> : <><Mic className="w-4 h-4 mr-2 text-emerald-600" /> Mute Mic</>}
+                      </Button>
+                      <Button
+                        type="button"
+                        onClick={endLivekitVoiceCall}
+                        className="flex-1 bg-rose-600 hover:bg-rose-700 text-white font-bold h-12 text-sm shadow-md cursor-pointer rounded-md transition-all"
+                      >
+                        <PhoneOff className="w-4 h-4 mr-2" />
+                        End Voice Call
+                      </Button>
+                    </div>
+                  )}
+                </div>
+                <div ref={audioContainerRef} className="hidden" />
+              </div>
+            )}
+
+            {/* MODE 2: Text Chat Mode (Dograh ManualTextChatPanel style) */}
+            {testerMode === "text" && (
+              <div className="flex flex-col h-[520px] bg-white">
+                {/* Transcript Action Header */}
+                <div className="px-4 py-2 border-b border-zinc-100 bg-zinc-50 flex items-center justify-between">
+                  <span className="text-[11px] text-zinc-500 font-mono">Session ID: {testSessionId}</span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleClearTestChat}
+                      className="h-7 text-xs text-zinc-600"
+                    >
+                      <RefreshCw className="w-3 h-3 mr-1" /> Reset
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleDownloadTranscript}
+                      className="h-7 text-xs text-zinc-600"
+                    >
+                      <Download className="w-3 h-3 mr-1" /> Export Transcript
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Message Log */}
+                <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-zinc-50/40">
+                  {testMessages.map((m) => (
+                    <div
+                      key={m.id}
+                      className={`flex flex-col ${m.speaker === "user" ? "items-end" : "items-start"}`}
+                    >
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <span className="text-[10px] font-bold uppercase text-zinc-400 font-mono">
+                          {m.speaker === "user" ? "YOU" : a.name.toUpperCase()}
+                        </span>
+                        <span className="text-[10px] text-zinc-400 font-mono">{m.timestamp}</span>
+                      </div>
+                      <div
+                        className={`max-w-[80%] rounded-lg px-4 py-2.5 text-xs leading-relaxed shadow-2xs ${
+                          m.speaker === "user"
+                            ? "bg-purple-600 text-white rounded-br-none"
+                            : "bg-white border border-zinc-200 text-zinc-800 rounded-bl-none font-medium"
+                        }`}
+                      >
+                        {m.text}
+                      </div>
+                    </div>
+                  ))}
+
+                  {isThinking && (
+                    <div className="flex flex-col items-start">
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <span className="text-[10px] font-bold uppercase text-purple-600 font-mono">{a.name.toUpperCase()}</span>
+                        <span className="text-[10px] text-zinc-400 font-mono">Thinking...</span>
+                      </div>
+                      <div className="bg-white border border-zinc-200 rounded-lg px-4 py-3 text-xs text-zinc-500 flex items-center gap-2 shadow-2xs">
+                        <div className="w-2 h-2 rounded-full bg-purple-600 animate-bounce" />
+                        <div className="w-2 h-2 rounded-full bg-purple-600 animate-bounce [animation-delay:0.2s]" />
+                        <div className="w-2 h-2 rounded-full bg-purple-600 animate-bounce [animation-delay:0.4s]" />
+                        <span className="ml-1 text-[11px] font-medium text-zinc-400">Generating response...</span>
+                      </div>
+                    </div>
+                  )}
+                  <div ref={chatBottomRef} />
+                </div>
+
+                {/* Sample Prompts */}
+                <div className="px-4 py-2 bg-white border-t border-zinc-100 flex items-center gap-2 overflow-x-auto">
+                  <span className="text-[10px] font-bold uppercase text-zinc-400 shrink-0">Sample prompts:</span>
+                  {[
+                    "Hello, introduce yourself!",
+                    "What services can you help me with?",
+                    "Can you guide me on booking an appointment?",
+                    "Tell me about your features."
+                  ].map((sample, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => handleSendTestMessage(sample)}
+                      disabled={isThinking}
+                      className="text-[11px] bg-zinc-100 hover:bg-zinc-200 text-zinc-700 px-2.5 py-1 rounded border border-zinc-200 shrink-0 transition-colors cursor-pointer"
+                    >
+                      {sample}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Chat Composer */}
+                <div className="p-3 border-t border-zinc-200 bg-white flex items-center gap-2">
+                  <Input
+                    value={testInput}
+                    onChange={(e) => setTestInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendTestMessage();
+                      }
+                    }}
+                    disabled={isThinking}
+                    placeholder={`Type a message to test ${a.name}... (Press Enter)`}
+                    className="text-xs h-10 bg-white"
+                  />
+                  <Button
+                    type="button"
+                    onClick={() => handleSendTestMessage()}
+                    disabled={isThinking || !testInput.trim()}
+                    className="bg-purple-600 hover:bg-purple-700 text-white h-10 px-4 shrink-0 cursor-pointer"
+                  >
+                    <Send className="w-4 h-4" />
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        </TabsContent>
       </Tabs>
+
     </div>
   );
 }

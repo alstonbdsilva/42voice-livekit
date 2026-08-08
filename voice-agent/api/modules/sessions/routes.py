@@ -167,3 +167,74 @@ async def return_to_orchestrator(session_id: str, req: Request):
     except Exception as e:
         logger.error(f"Error returning session {session_id} to orchestrator: {e}")
         raise AppError(f"Error returning to orchestrator: {e}", 500, "RETURN_ORCHESTRATOR_FAILED")
+
+
+import json
+from livekit import api as lk_api
+from config import get_settings
+
+class LiveKitTokenRequest(BaseModel):
+    roomName: Optional[str] = None
+    identity: Optional[str] = None
+    name: Optional[str] = None
+    agentId: Optional[str] = None
+    agentName: Optional[str] = None
+
+@router.post("/livekit/token")
+async def generate_livekit_token(req_body: LiveKitTokenRequest):
+    """
+    Generate a LiveKit JWT AccessToken for web browser WebRTC voice calls.
+    """
+    try:
+        settings = get_settings()
+        room_name = req_body.roomName or f"room-{uuid.uuid4().hex[:8]}"
+        participant_identity = req_body.identity or f"user-{uuid.uuid4().hex[:6]}"
+        participant_name = req_body.name or "Web Caller"
+        
+        token = lk_api.AccessToken(settings.livekit_api_key, settings.livekit_api_secret) \
+            .with_identity(participant_identity) \
+            .with_name(participant_name) \
+            .with_grants(lk_api.VideoGrants(
+                room_join=True,
+                room=room_name,
+                can_publish=True,
+                can_subscribe=True,
+                can_publish_data=True
+            ))
+
+        if req_body.agentId or req_body.agentName:
+            token.with_metadata(json.dumps({
+                "agent_id": req_body.agentId or "",
+                "agent_name": req_body.agentName or "Voice Agent"
+            }))
+
+        jwt_token = token.to_jwt()
+
+        # Create Agent Dispatch so the registered LiveKit worker (inbound-agent) joins the room
+        try:
+            async with lk_api.LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret) as lk:
+                dispatch_metadata = json.dumps({
+                    "agent_id": req_body.agentId or "",
+                    "agent_name": req_body.agentName or "Voice Agent"
+                })
+                dispatch_req = lk_api.CreateAgentDispatchRequest(
+                    agent_name=settings.livekit_agent_name,
+                    room=room_name,
+                    metadata=dispatch_metadata
+                )
+                await lk.agent_dispatch.create_dispatch(dispatch_req)
+                logger.info(f"[LiveKit Token] Dispatched agent '{settings.livekit_agent_name}' to room '{room_name}'")
+        except Exception as dispatch_err:
+            logger.warning(f"[LiveKit Token] Could not create agent dispatch for room '{room_name}': {dispatch_err}")
+
+        return {
+            "token": jwt_token,
+            "url": settings.livekit_url,
+            "roomName": room_name,
+            "identity": participant_identity
+        }
+    except Exception as e:
+        logger.error(f"Failed to generate LiveKit token: {e}")
+        raise AppError(f"Failed to generate LiveKit token: {e}", 500, "LIVEKIT_TOKEN_FAILED")
+
+

@@ -80,6 +80,19 @@ class AgentServiceClass {
     );
     return res?.data ?? (res as any);
   }
+
+  async testChat(
+    id: string,
+    message: string,
+    sessionId?: string,
+    history?: Array<{ speaker: string; text: string }>
+  ): Promise<{ sessionId: string; response: string; agentId?: string; agentName?: string }> {
+    const res = await api.post<ApiSuccessResponse<{ sessionId: string; response: string; agentId?: string; agentName?: string }>>(
+      `${API_ENDPOINTS.AGENTS}/${id}/test-chat`,
+      { message, sessionId, history }
+    );
+    return res?.data ?? (res as any);
+  }
 }
 
 export const AgentService = new AgentServiceClass();

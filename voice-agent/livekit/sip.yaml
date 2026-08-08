@@ -1,0 +1,15 @@
+api_key: myapikey
+api_secret: mysupersecret
+
+# ws_url: ws://127.0.0.1:7880 # EC2 host network mode
+ws_url: ws://livekit:7880
+
+redis:
+  # address: localhost:6379 # EC2 host network mode
+  address: redis:6379
+
+sip_port: 5060
+
+use_external_ip: false
+
+

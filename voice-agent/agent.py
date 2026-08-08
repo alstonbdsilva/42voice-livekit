@@ -93,6 +93,40 @@ class VoiceAgent(Agent):
             else (custom_prompt if custom_prompt else "You are the orchestrator agent. Start by asking how you can help the user today. Use your tools to route requests, handle booking, sales, and support, or end the call when the conversation is finished.")
         )
         
+        # Append strict instructions for automatic call disconnection upon completion
+        if not out_of_credits:
+            instructions += (
+                "\n\nCRITICAL CONVERSATION TERMINATION RULE:\n"
+                "When the user indicates that the conversation is finished (e.g. saying 'thank you', 'goodbye', 'that's all', 'thanks a lot'), "
+                "or immediately after you confirm/recap all details requested by the user, "
+                "you MUST invoke the end_call tool to disconnect the call. Do NOT linger or ask repetitive questions once the user's request is resolved."
+            )
+
+        # Filter dynamic tools to avoid duplicate function names with built-in @function_tool methods
+        builtin_tool_names = {
+            "end_call", "route_request", "handle_booking_request", "handle_sales_inquiry",
+            "handle_support_request", "return_to_orchestrator", "handle_booking_confirmation",
+            "handle_booking_cancellation", "provide_product_recommendation", "handle_pricing_inquiry",
+            "escalate_to_human", "troubleshoot_issue", "handle_billing_inquiry", "escalate_issue",
+            "confirm_resolution"
+        }
+        
+        seen_names = set(builtin_tool_names)
+        filtered_tools = []
+        if tools:
+            for t in tools:
+                t_name = ""
+                if hasattr(t, "info") and hasattr(t.info, "name"):
+                    t_name = t.info.name
+                elif hasattr(t, "name"):
+                    t_name = t.name
+                elif hasattr(t, "__name__"):
+                    t_name = t.__name__
+                
+                if t_name and t_name not in seen_names:
+                    seen_names.add(t_name)
+                    filtered_tools.append(t)
+
         super().__init__(
             vad=vad_instance,
             stt=deepgram.STT(
@@ -103,8 +137,10 @@ class VoiceAgent(Agent):
             llm=openai.LLM(model="gpt-4o-mini"),
             tts=deepgram.TTS(),
             instructions=instructions,
-            tools=tools
+            tools=filtered_tools
         )
+
+
         
         # Track if greeting has been sent to prevent duplicate greetings
         self._greeting_sent = False
@@ -203,7 +239,7 @@ class VoiceAgent(Agent):
         if not self._greeting_sent:
             try:
                 logger.info("Sending greeting")
-                greeting = "Hello, how can I help you today?"
+                greeting = f"Hello! I am {self.agent_name}. How can I assist you today?" if self.agent_name and self.agent_name != "unknown" else "Hello, how can I help you today?"
                 self.session.say(greeting)
                 
                 # Add greeting to transcript
@@ -214,10 +250,21 @@ class VoiceAgent(Agent):
                         text=greeting
                     )
                 
+                # Broadcast greeting to live web client
+                try:
+                    if self.ctx.room and self.ctx.room.local_participant:
+                        asyncio.create_task(self.ctx.room.local_participant.publish_data(
+                            json.dumps({"type": "transcription", "speaker": "agent", "text": greeting}).encode("utf-8"),
+                            topic="transcription"
+                        ))
+                except Exception as pub_err:
+                    logger.warning(f"Could not publish greeting transcript packet: {pub_err}")
+
                 self._greeting_sent = True
-                logger.info("Greeting sent")
+                logger.info(f"Greeting sent: {greeting}")
             except Exception as e:
                 logger.error(f"Error in on_enter: {e}")
+
         else:
             logger.info("Greeting already sent, skipping")
     
@@ -610,8 +657,8 @@ async def register_call_with_backend(agent, started_at, ended_at):
                                 timeout=5.0
                             )
                             size = response.get('ContentLength', 0)
-                        except asyncio.TimeoutError:
-                            logger.warning(f"S3 head_object timeout for {s3_key}")
+                        except (asyncio.TimeoutError, RuntimeError, Exception) as s3_err:
+                            logger.warning(f"S3 head_object fallback for {s3_key}: {s3_err}")
                             size = duration * 16000
                     else:
                         logger.warning(f"S3 upload verification failed for {s3_key}")
@@ -665,18 +712,38 @@ async def register_call_with_backend(agent, started_at, ended_at):
         }
         
         backend_url = agent.settings.backend_url
-        async with httpx.AsyncClient() as client:
-            response = await client.post(f"{backend_url}/conversations/register", json=payload, timeout=30.0)
-            if response.status_code == 201:
-                logger.info(f"Registered call details for room {room_name} with agent {agent_name}")
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{backend_url}/conversations/register", json=payload, timeout=10.0)
+                if response.status_code == 201:
+                    logger.info(f"Registered call details for room {room_name} with agent {agent_name}")
+                else:
+                    logger.error(f"Failed to register call details for room {room_name}: {response.status_code} {response.text}")
+        except RuntimeError as exec_err:
+            if "Executor shutdown" in str(exec_err):
+                logger.warning(f"Executor shut down during call registration; sending via fallback HTTP request...")
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(
+                        f"{backend_url}/conversations/register",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req, timeout=10.0) as resp:
+                        if resp.status in [200, 201]:
+                            logger.info(f"Registered call details via fallback for room {room_name}")
+                except Exception as fb_err:
+                    logger.error(f"Fallback call registration failed: {fb_err}")
             else:
-                logger.error(f"Failed to register call details for room {room_name}: {response.status_code} {response.text}")
+                logger.error(f"Error registering call with backend: {exec_err}")
         
         if agent.transcript_session_id:
             transcript_service.clear_session(agent.transcript_session_id)
                 
     except Exception as e:
         logger.error(f"Error registering call with backend: {e}", exc_info=True)
+
 
 
 def prewarm(proc: JobProcess):
@@ -800,9 +867,66 @@ async def entrypoint(ctx: JobContext):
             unassigned_number = True
             custom_prompt = "An error occurred while processing your call. Please try again later."
     else:
-        logger.warning("[SIP] No called number attribute found. Rejecting as unassigned.")
-        unassigned_number = True
-        custom_prompt = "This call cannot be routed. Please dial a configured phone number."
+        logger.info("[Web/Non-SIP] No called_number attribute found. Checking participant/job metadata for Web Call routing...")
+        web_metadata = {}
+        try:
+            if participant.metadata:
+                web_metadata = json.loads(participant.metadata)
+            elif hasattr(ctx, 'job') and getattr(ctx.job, 'metadata', None):
+                web_metadata = json.loads(ctx.job.metadata)
+        except Exception as meta_err:
+            logger.warning(f"[Web] Failed to parse metadata: {meta_err}")
+
+        target_agent_id = web_metadata.get("agent_id")
+        if target_agent_id:
+            logger.info(f"[Web] Found agent_id '{target_agent_id}' in metadata. Loading agent configuration...")
+            try:
+                if database.pool is None:
+                    await database.init_pool()
+                agent_rows = await database.query("SELECT * FROM agents WHERE id = $1::uuid", [target_agent_id])
+                if agent_rows:
+                    ag_data = agent_rows[0]
+                    agent_id = str(ag_data.get("id"))
+                    agent_name = ag_data.get("name", "Voice Agent")
+                    use_case = ag_data.get("use_case", "")
+                    activity_desc = ag_data.get("activity_description", "")
+                    custom_guardrails = ag_data.get("custom_guardrails", "")
+                    knowledge_items = ag_data.get("knowledge_items", [])
+                    if isinstance(knowledge_items, str):
+                        try:
+                            knowledge_items = json.loads(knowledge_items)
+                        except Exception:
+                            knowledge_items = []
+                    client_id = str(ag_data.get("client_id")) if ag_data.get("client_id") else None
+
+                    prompt_parts = [f"You are {agent_name}, an AI voice assistant."]
+                    if use_case:
+                        prompt_parts.append(f"Use Case: {use_case}")
+                    if activity_desc:
+                        prompt_parts.append(f"System Instructions:\n{activity_desc}")
+                    if custom_guardrails:
+                        prompt_parts.append(f"Guardrails:\n{custom_guardrails}")
+                    if knowledge_items and isinstance(knowledge_items, list):
+                        kb_lines = [f"- {k.get('label', '')}: {k.get('value', '')}" for k in knowledge_items if isinstance(k, dict)]
+                        if kb_lines:
+                            prompt_parts.append("Knowledge Base:\n" + "\n".join(kb_lines))
+
+                    custom_prompt = "\n\n".join(prompt_parts)
+                    unassigned_number = False
+                    logger.info(f"[Web] Successfully loaded configuration for agent '{agent_name}' ({agent_id})")
+                else:
+                    logger.warning(f"[Web] Agent ID '{target_agent_id}' not found in database.")
+                    unassigned_number = True
+                    custom_prompt = "The requested agent could not be found. Please contact support."
+            except Exception as db_err:
+                logger.error(f"[Web] Database error fetching agent '{target_agent_id}': {db_err}")
+                unassigned_number = True
+                custom_prompt = "An error occurred while loading agent settings."
+        else:
+            logger.warning("[Web] No agent_id found in participant or job metadata.")
+            unassigned_number = True
+            custom_prompt = "This call cannot be routed. Please dial a configured phone number or select an agent."
+
     
     # Validate required voice service configuration is present
     if not settings.deepgram_api_key or not settings.openai_api_key:
@@ -1022,7 +1146,7 @@ async def entrypoint(ctx: JobContext):
     agent.recording_filename = None
     agent._recording_task = None  # Track recording startup task for synchronization
 
-    # Subscribe to speech/message events to build transcripts dynamically
+    # Subscribe to speech/message events to build transcripts and publish live UI updates
     @session.on("user_input_transcribed")
     def on_user_input_transcribed(event):
         if event.is_final and event.transcript.strip():
@@ -1033,6 +1157,14 @@ async def entrypoint(ctx: JobContext):
                     speaker="customer",
                     text=event.transcript
                 )
+            try:
+                if ctx.room and ctx.room.local_participant:
+                    asyncio.create_task(ctx.room.local_participant.publish_data(
+                        json.dumps({"type": "transcription", "speaker": "user", "text": event.transcript.strip()}).encode("utf-8"),
+                        topic="transcription"
+                    ))
+            except Exception as pub_err:
+                logger.warning(f"Failed to publish user transcript data packet: {pub_err}")
 
     @session.on("conversation_item_added")
     def on_conversation_item_added(event):
@@ -1058,45 +1190,18 @@ async def entrypoint(ctx: JobContext):
                         speaker="agent",
                         text=content_text
                     )
-    
+                try:
+                    if ctx.room and ctx.room.local_participant:
+                        asyncio.create_task(ctx.room.local_participant.publish_data(
+                            json.dumps({"type": "transcription", "speaker": "agent", "text": content_text.strip()}).encode("utf-8"),
+                            topic="transcription"
+                        ))
+                except Exception as pub_err:
+                    logger.warning(f"Failed to publish agent transcript data packet: {pub_err}")
+
     logger.info("Starting session")
     try:
-        # Subscribe to speech/message events to build transcripts dynamically
-        @session.on("user_input_transcribed")
-        def on_user_input_transcribed(event):
-            if event.is_final and event.transcript.strip():
-                logger.info(f"User speech transcribed: {event.transcript}")
-                if agent.settings.enable_transcripts and agent.transcript_session_id:
-                    transcript_service.add_transcript_entry(
-                        agent.transcript_session_id,
-                        speaker="customer",
-                        text=event.transcript
-                    )
 
-        @session.on("conversation_item_added")
-        def on_conversation_item_added(event):
-            msg = event.item
-            if hasattr(msg, "role") and (msg.role == "assistant" or msg.role == "agent"):
-                content_text = ""
-                if isinstance(msg.content, str):
-                    content_text = msg.content
-                elif hasattr(msg.content, '__iter__'):
-                    parts = []
-                    for part in msg.content:
-                        if isinstance(part, str):
-                            parts.append(part)
-                        elif hasattr(part, 'text') and part.text:
-                            parts.append(part.text)
-                    content_text = " ".join(parts)
-                
-                if content_text.strip():
-                    logger.info(f"Agent speech: {content_text}")
-                    if agent.settings.enable_transcripts and agent.transcript_session_id:
-                        transcript_service.add_transcript_entry(
-                            agent.transcript_session_id,
-                            speaker="agent",
-                            text=content_text
-                        )
         
         # Start recording AFTER session setup as a background task
         if getattr(agent.settings, "enable_recording", True):
