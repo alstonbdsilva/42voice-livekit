@@ -18,6 +18,8 @@ import {
   Upload,
   File as FileIcon,
   Sliders,
+  Webhook,
+  Key,
 } from "lucide-react";
 import AgentService, { CreateAgentDto } from "@/services/agent.service";
 import PhoneNumberService from "@/services/phone-number.service";
@@ -34,6 +36,8 @@ import ElevenLabsVoiceSelector, {
   ElevenLabsVoiceSettings,
   DEFAULT_ELEVENLABS_SETTINGS,
 } from "@/components/voice/ElevenLabsVoiceSelector";
+import TriggerWebhookUrls from "@/components/webhook/TriggerWebhookUrls";
+import WebhookLogsTable from "@/components/webhook/WebhookLogsTable";
 import {
   Select,
   SelectContent,
@@ -120,6 +124,18 @@ export default function CreateAgent() {
   // Tools available
   const [tools, setTools] = useState<Tool[]>([]);
   const [selectedToolIds, setSelectedToolIds] = useState<string[]>([]);
+
+  // Webhooks configuration
+  const [webhookUrl, setWebhookUrl] = useState("");
+  const [webhookAuthType, setWebhookAuthType] = useState<"bearer_token" | "api_key" | "basic_auth" | "none">("bearer_token");
+  const [webhookToken, setWebhookToken] = useState("");
+  const [webhookSecret, setWebhookSecret] = useState(() => `whsec_${Math.random().toString(36).substring(2, 18)}`);
+  const [webhookEvents, setWebhookEvents] = useState<string[]>([
+    "call.started",
+    "call.completed",
+    "transcript.completed",
+    "analysis.completed",
+  ]);
 
   useEffect(() => {
     const fetchNumbers = async () => {
@@ -316,7 +332,7 @@ export default function CreateAgent() {
 
       <form onSubmit={handleSubmit}>
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <TabsList className="grid w-full grid-cols-5 mb-6">
+          <TabsList className="grid w-full grid-cols-6 mb-6">
             <TabsTrigger
               value="basic"
               className="flex items-center justify-center gap-2 border border-transparent data-[state=active]:border-zinc-200 shadow-none data-[state=active]:shadow-none"
@@ -351,6 +367,13 @@ export default function CreateAgent() {
             >
               <Sliders className="w-4 h-4" />
               Tools
+            </TabsTrigger>
+            <TabsTrigger
+              value="webhooks"
+              className="flex items-center justify-center gap-2 border border-transparent data-[state=active]:border-zinc-200 shadow-none data-[state=active]:shadow-none"
+            >
+              <Webhook className="w-4 h-4 text-indigo-600" />
+              Webhooks
             </TabsTrigger>
           </TabsList>
 
@@ -693,6 +716,111 @@ export default function CreateAgent() {
                   })}
                 </div>
               )}
+            </div>
+          </TabsContent>
+
+          {/* ── Webhooks ─────────────────────────────────────────────────── */}
+          <TabsContent value="webhooks" className="outline-none space-y-6">
+            <div className="bg-white border border-zinc-200 p-6 rounded-sm shadow-xs space-y-5 w-full">
+              <div className="flex items-center justify-between border-b border-zinc-200 pb-3">
+                <div>
+                  <h3 className="text-sm font-bold text-zinc-950 flex items-center gap-2">
+                    <Webhook className="w-4 h-4 text-indigo-600" /> Outbound Webhook Callbacks
+                  </h3>
+                  <p className="text-xs text-zinc-500">Configure HTTP URL to receive real-time call status and transcript events for this agent.</p>
+                </div>
+                <span className="px-2.5 py-0.5 text-[10px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-full">
+                  Webhook Active
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-semibold text-zinc-700">Target Webhook Endpoint URL</Label>
+                  <Input
+                    placeholder="https://api.yourdomain.com/webhooks/agent-events"
+                    value={webhookUrl}
+                    onChange={(e) => setWebhookUrl(e.target.value)}
+                    className="text-xs font-mono"
+                  />
+                  <p className="text-[11px] text-zinc-500">Must be an HTTP or HTTPS URL accessible on the public internet.</p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-semibold text-zinc-700">Authentication Header</Label>
+                  <select
+                    value={webhookAuthType}
+                    onChange={(e) => setWebhookAuthType(e.target.value as any)}
+                    className="w-full text-xs h-9 rounded-sm border border-zinc-300 bg-white px-2.5 shadow-xs focus:outline-hidden focus:ring-1 focus:ring-zinc-950"
+                  >
+                    <option value="bearer_token">Bearer Token (Authorization: Bearer ...)</option>
+                    <option value="api_key">API Key Header (X-API-Key: ...)</option>
+                    <option value="basic_auth">HTTP Basic Authentication</option>
+                    <option value="none">No Authentication Header</option>
+                  </select>
+                </div>
+              </div>
+
+              {webhookAuthType !== "none" && (
+                <div className="space-y-1.5 bg-zinc-50 p-3 rounded-sm border border-zinc-200">
+                  <Label className="text-xs font-medium text-zinc-700">Secret Token / API Key</Label>
+                  <Input
+                    type="password"
+                    placeholder="your-secret-token"
+                    value={webhookToken}
+                    onChange={(e) => setWebhookToken(e.target.value)}
+                    className="text-xs font-mono bg-white"
+                  />
+                </div>
+              )}
+
+              {/* Event Triggers */}
+              <div className="space-y-2 pt-2 border-t border-zinc-100">
+                <Label className="text-xs font-semibold text-zinc-700">Subscribed Event Triggers</Label>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  {[
+                    { id: "call.started", label: "Call Started" },
+                    { id: "call.completed", label: "Call Completed" },
+                    { id: "transcript.completed", label: "Transcript Ready" },
+                    { id: "analysis.completed", label: "Intent Extracted" },
+                  ].map((evt) => {
+                    const isChecked = webhookEvents.includes(evt.id);
+                    return (
+                      <label
+                        key={evt.id}
+                        className={`flex items-center gap-2 p-2.5 border rounded-sm cursor-pointer text-xs font-medium transition-all ${
+                          isChecked
+                            ? "bg-zinc-950 text-white border-zinc-950 shadow-xs"
+                            : "bg-zinc-50 text-zinc-700 border-zinc-200 hover:bg-zinc-100"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => {
+                            if (isChecked) {
+                              setWebhookEvents(webhookEvents.filter((e) => e !== evt.id));
+                            } else {
+                              setWebhookEvents([...webhookEvents, evt.id]);
+                            }
+                          }}
+                          className="rounded border-zinc-300 text-zinc-950 focus:ring-zinc-950"
+                        />
+                        <span>{evt.label}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* Inbound Trigger URLs */}
+            <TriggerWebhookUrls agentId={name ? name.toLowerCase().replace(/\s+/g, "_") : "new_agent"} />
+
+            {/* Delivery Logs */}
+            <div className="space-y-2">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-900">Agent Webhook Delivery Logs</h3>
+              <WebhookLogsTable />
             </div>
           </TabsContent>
         </Tabs>

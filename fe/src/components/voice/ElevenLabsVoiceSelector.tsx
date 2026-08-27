@@ -68,10 +68,6 @@ export default function ElevenLabsVoiceSelector({
   const [loadingAudioId, setLoadingAudioId] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Custom Voice ID state
-  const [isCustomMode, setIsCustomMode] = useState(false);
-  const [customVoiceId, setCustomVoiceId] = useState("");
-  const [customVoiceName, setCustomVoiceName] = useState("");
 
   // Settings dropdown accordion
   const [showSettings, setShowSettings] = useState(false);
@@ -197,33 +193,9 @@ export default function ElevenLabsVoiceSelector({
     }
   };
 
-  const handlePlayCustomPreview = async () => {
-    if (!customVoiceId.trim()) {
-      return toast.error("Please enter an ElevenLabs Voice ID.");
-    }
-
-    const tempVoice: ElevenLabsVoice = {
-      voice_id: customVoiceId.trim(),
-      name: customVoiceName.trim() || "Custom Voice",
-      gender: selectedVoiceGender,
-      description: "Custom ElevenLabs Voice ID",
-    };
-
-    await handlePlayPreview(tempVoice);
-  };
-
   const handleSelectVoiceCard = (voice: ElevenLabsVoice) => {
     if (disabled) return;
     onSelectVoice(voice.name, voice.gender === "male" ? "male" : "female", voice.voice_id);
-  };
-
-  const handleApplyCustomVoice = () => {
-    if (!customVoiceId.trim()) {
-      return toast.error("Please enter a valid ElevenLabs Voice ID.");
-    }
-    const nameToSave = customVoiceName.trim() ? customVoiceName.trim() : customVoiceId.trim();
-    onSelectVoice(nameToSave, selectedVoiceGender, customVoiceId.trim());
-    toast.success(`Selected ElevenLabs voice ID: ${customVoiceId.trim()}`);
   };
 
   const handleSettingChange = <K extends keyof ElevenLabsVoiceSettings>(
@@ -394,29 +366,14 @@ export default function ElevenLabsVoiceSelector({
         </div>
       )}
 
-      {/* ── Mode Switcher: Pre-built vs Custom Voice ID ────────────────────── */}
+      {/* ── ElevenLabs Voice Catalog Header ───────────────────────────────── */}
       <div className="flex items-center justify-between gap-3 bg-white p-3 border border-zinc-200 rounded-sm shadow-xs flex-wrap">
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setIsCustomMode(false)}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-sm transition-all flex items-center gap-1.5 ${!isCustomMode
-              ? "bg-zinc-950 text-white shadow-xs"
-              : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200"
-              }`}
-          >
-            <Mic className="w-3.5 h-3.5" /> ElevenLabs Voice Catalog ({voices.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setIsCustomMode(true)}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-sm transition-all flex items-center gap-1.5 ${isCustomMode
-              ? "bg-zinc-950 text-white shadow-xs"
-              : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200"
-              }`}
-          >
-            <Sparkles className="w-3.5 h-3.5" /> Custom Voice ID / Cloned Voice
-          </button>
+        <div className="flex items-center gap-2 font-semibold text-xs text-zinc-900">
+          <Mic className="w-3.5 h-3.5 text-zinc-700" />
+          <span>ElevenLabs Voice Catalog</span>
+          <span className="px-2 py-0.5 text-[10px] bg-zinc-100 border border-zinc-200 text-zinc-600 rounded-full font-medium">
+            {voices.length} voices available
+          </span>
         </div>
 
         <div className="text-[11px] text-zinc-500 font-medium">
@@ -424,74 +381,9 @@ export default function ElevenLabsVoiceSelector({
         </div>
       </div>
 
-      {/* ── CUSTOM VOICE ID MODE ───────────────────────────────────────────── */}
-      {isCustomMode ? (
-        <div className="bg-white border border-zinc-200 p-6 rounded-sm shadow-xs space-y-4">
-          <div className="space-y-1">
-            <h3 className="text-sm font-bold text-zinc-900 flex items-center gap-2">
-              <Sparkles className="w-4 h-4 text-amber-500" /> Use Custom ElevenLabs Voice ID
-            </h3>
-            <p className="text-xs text-zinc-500">
-              Enter your cloned or private ElevenLabs Voice ID generated from your ElevenLabs dashboard.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-1.5">
-              <Label className="text-xs font-medium">ElevenLabs Voice ID *</Label>
-              <Input
-                placeholder="e.g. 21m00Tcm4TlvDq8ikWAM or custom_voice_id"
-                value={customVoiceId}
-                onChange={(e) => setCustomVoiceId(e.target.value)}
-                className="text-xs font-mono"
-                disabled={disabled}
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label className="text-xs font-medium">Custom Voice Name (Optional)</Label>
-              <Input
-                placeholder="e.g. My Executive Brand Voice"
-                value={customVoiceName}
-                onChange={(e) => setCustomVoiceName(e.target.value)}
-                className="text-xs"
-                disabled={disabled}
-              />
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3 pt-2">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={handlePlayCustomPreview}
-              disabled={disabled || !customVoiceId.trim()}
-              className="text-xs"
-            >
-              {loadingAudioId === customVoiceId.trim() ? (
-                <RefreshCw className="w-3.5 h-3.5 mr-1.5 animate-spin" />
-              ) : playingVoiceId === customVoiceId.trim() ? (
-                <Pause className="w-3.5 h-3.5 mr-1.5 text-rose-600" />
-              ) : (
-                <Play className="w-3.5 h-3.5 mr-1.5 text-emerald-600" />
-              )}
-              {playingVoiceId === customVoiceId.trim() ? "Stop Audio" : "Test Custom Voice"}
-            </Button>
-
-            <Button
-              type="button"
-              onClick={handleApplyCustomVoice}
-              disabled={disabled || !customVoiceId.trim()}
-              className="text-xs bg-zinc-950 hover:bg-zinc-800 text-white"
-            >
-              Apply Custom Voice ID
-            </Button>
-          </div>
-        </div>
-      ) : (
-        /* ── PRE-BUILT CATALOG MODE ───────────────────────────────────────── */
-        <div className="space-y-4">
-          {/* Filters Bar */}
+      {/* ── VOICE CATALOG ─────────────────────────────────────────────────── */}
+      <div className="space-y-4">
+        {/* Filters Bar */}
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-white p-3 border border-zinc-200 rounded-sm shadow-xs">
             <div className="relative w-full sm:w-64">
               <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-zinc-400" />
@@ -657,7 +549,6 @@ export default function ElevenLabsVoiceSelector({
             </div>
           )}
         </div>
-      )}
 
       {/* ── Active Selection Preview Footer ──────────────────────────────── */}
       <div className="bg-zinc-900 text-zinc-100 p-4 rounded-sm shadow-xs flex items-center justify-between flex-wrap gap-3 border border-zinc-800">

@@ -51,8 +51,11 @@ import {
   Loader2,
   Bot,
   Send,
-  Radio
+  Radio,
+  Webhook
 } from "lucide-react";
+import TriggerWebhookUrls from "@/components/webhook/TriggerWebhookUrls";
+import WebhookLogsTable from "@/components/webhook/WebhookLogsTable";
 
 import {
   Room,
@@ -725,7 +728,7 @@ export default function AgentDetail() {
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-8 mb-6 bg-zinc-100 p-0.5 rounded-sm">
+        <TabsList className="grid w-full grid-cols-9 mb-6 bg-zinc-100 p-0.5 rounded-sm">
           <TabsTrigger
             value="basic"
             className="flex items-center justify-center gap-1.5 py-1.5 text-xs border border-transparent data-[state=active]:bg-white data-[state=active]:border-zinc-200 shadow-none"
@@ -766,7 +769,14 @@ export default function AgentDetail() {
             className="flex items-center justify-center gap-1.5 py-1.5 text-xs border border-transparent data-[state=active]:bg-white data-[state=active]:border-zinc-200 shadow-none"
           >
             <Sliders className="w-3.5 h-3.5" />
-            Tool Configuration
+            Tool Config
+          </TabsTrigger>
+          <TabsTrigger
+            value="webhooks"
+            className="flex items-center justify-center gap-1.5 py-1.5 text-xs border border-transparent data-[state=active]:bg-white data-[state=active]:border-zinc-200 shadow-none"
+          >
+            <Webhook className="w-3.5 h-3.5 text-indigo-600" />
+            Webhooks
           </TabsTrigger>
           <TabsTrigger
             value="conversations"
@@ -1276,6 +1286,66 @@ export default function AgentDetail() {
                 })}
               </div>
             )}
+          </div>
+        </TabsContent>
+
+        {/* ── Webhook Configuration Tab ─────────────────────────────── */}
+        <TabsContent value="webhooks" className="outline-none space-y-6">
+          <div className="bg-white border border-zinc-200 p-6 rounded-sm shadow-xs space-y-5 w-full">
+            <div className="flex items-center justify-between border-b border-zinc-200 pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-zinc-950 flex items-center gap-2">
+                  <Webhook className="w-4 h-4 text-indigo-600" /> Outbound Webhook Callbacks
+                </h3>
+                <p className="text-xs text-zinc-500">Configure HTTP URL to receive real-time call status and transcript events for this agent.</p>
+              </div>
+              <span className="px-2.5 py-0.5 text-[10px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-full">
+                Webhook Active
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label className="text-xs font-semibold text-zinc-700">Target Webhook Endpoint URL</Label>
+                <Input
+                  placeholder="https://api.yourdomain.com/webhooks/agent-events"
+                  defaultValue="https://api.yourdomain.com/webhooks/voice-events"
+                  className="text-xs font-mono"
+                />
+                <p className="text-[11px] text-zinc-500">Must be an HTTP or HTTPS URL accessible on the public internet.</p>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs font-semibold text-zinc-700">Authentication Header</Label>
+                <select
+                  defaultValue="bearer_token"
+                  className="w-full text-xs h-9 rounded-sm border border-zinc-300 bg-white px-2.5 shadow-xs focus:outline-hidden focus:ring-1 focus:ring-zinc-950"
+                >
+                  <option value="bearer_token">Bearer Token (Authorization: Bearer ...)</option>
+                  <option value="api_key">API Key Header (X-API-Key: ...)</option>
+                  <option value="basic_auth">HTTP Basic Authentication</option>
+                  <option value="none">No Authentication Header</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-1.5 bg-zinc-50 p-3 rounded-sm border border-zinc-200">
+              <Label className="text-xs font-medium text-zinc-700">Secret Token / API Key</Label>
+              <Input
+                type="password"
+                defaultValue="secret_bearer_token_voice_991823"
+                className="text-xs font-mono bg-white"
+              />
+            </div>
+          </div>
+
+          {/* Inbound Trigger Endpoints */}
+          <TriggerWebhookUrls agentId={a?.name ? a.name.toLowerCase().replace(/\s+/g, "_") : "agent"} />
+
+          {/* Delivery Logs */}
+          <div className="space-y-2">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-900">Agent Webhook Delivery Logs</h3>
+            <WebhookLogsTable />
           </div>
         </TabsContent>
 

@@ -80,3 +80,12 @@
 {"timestamp":"2026-08-04T09:37:53","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 67eed603-abfb-4f23-a349-b01e0b9a5def - IP: 127.0.0.1 - Payload: None"}
 {"timestamp":"2026-08-04T11:32:23","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 67eed603-abfb-4f23-a349-b01e0b9a5def - IP: 127.0.0.1 - Payload: None"}
 {"timestamp":"2026-08-07T09:24:12","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-08-17T08:51:52","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-08-17T09:34:04","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-08-17T09:34:06","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-08-17T09:46:00","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-08-17T09:55:35","level":"INFO","logger":"api.audit","message":"Audit Event: RESELLER_CREATE - User: dd49f492-5c2c-4f62-a2c3-7c55188e1978 - IP: 127.0.0.1 - Payload: {'reseller_id': 'bdd5bc71-6c73-419c-8f48-0c6c03cf66d0', 'email': '42@gmail.com'}"}
+{"timestamp":"2026-08-17T09:56:34","level":"INFO","logger":"api.audit","message":"Audit Event: CLIENT_CREATE - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: {'client_id': 'dd685b7d-1614-40a2-a83d-1899240af490', 'name': 'lokesh', 'reseller_id': 'bdd5bc71-6c73-419c-8f48-0c6c03cf66d0'}"}
+{"timestamp":"2026-08-17T09:57:01","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-08-17T09:57:03","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-08-17T09:57:20","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: a7ac1de4-02ee-4e49-b815-83d085506f45 - IP: 127.0.0.1 - Payload: None"}

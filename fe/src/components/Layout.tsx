@@ -5,7 +5,7 @@ import { LucideIcon } from "lucide-react";
 import {
   LayoutDashboard, Users, Briefcase, Bot, MessageSquare, Mic, FileText,
   Receipt, CreditCard, FileSignature, RefreshCw, Bell, BarChart3, Settings,
-  ChevronDown, Search, LogOut, Wallet, ScrollText, Phone, PhoneCall, Wrench, Megaphone
+  ChevronDown, Search, LogOut, Wallet, ScrollText, Phone, PhoneCall, Wrench, Megaphone, Webhook
 } from "lucide-react";
 
 interface NavLinkItem {
