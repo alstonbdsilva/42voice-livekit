@@ -23,10 +23,10 @@ if ! command -v docker &> /dev/null; then
     rm get-docker.sh
 fi
 
-echo "[2/4] Stopping any existing/legacy containers..."
-docker compose down --remove-orphans 2>/dev/null || true
+echo "[2/4] Stopping any existing containers..."
+docker compose down -t 5 --remove-orphans 2>/dev/null || true
 
-echo "[3/4] Building Docker Services (Sequential for Memory Efficiency)..."
+echo "[3/4] Building Docker Services (Sequential)..."
 docker compose build
 
 echo "[4/4] Starting 42Voice Containers..."
