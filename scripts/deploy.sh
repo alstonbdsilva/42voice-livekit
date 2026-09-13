@@ -26,8 +26,8 @@ fi
 echo "[2/4] Stopping any existing/legacy containers..."
 docker compose down --remove-orphans 2>/dev/null || true
 
-echo "[3/4] Pulling & Building Docker Services..."
-docker compose build --parallel
+echo "[3/4] Building Docker Services (Sequential for Memory Efficiency)..."
+docker compose build
 
 echo "[4/4] Starting 42Voice Containers..."
 docker compose up -d --remove-orphans

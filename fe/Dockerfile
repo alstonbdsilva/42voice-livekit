@@ -5,6 +5,9 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# Cap Node memory usage during build to prevent OOM
+ENV NODE_OPTIONS="--max-old-space-size=2048"
+
 # Copy package manifests
 COPY package.json package-lock.json* yarn.lock* ./
 
