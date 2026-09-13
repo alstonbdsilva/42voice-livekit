@@ -1,4 +1,3 @@
-#!/usr/bin/env font
 #!/bin/bash
 set -e
 
@@ -35,7 +34,8 @@ sleep 5
 docker compose -f docker-compose.prod.yml ps
 
 echo "=========================================================="
-echo "  Deployment Complete! "
-echo "  Frontend & API Domain: https://${DOMAIN:-localhost}"
-echo "  LiveKit WebRTC Server: wss://${DOMAIN:-localhost}/livekit"
+echo "  Deployment Complete!"
+echo "  Frontend Dashboard: https://${DASHBOARD_DOMAIN:-dashboard.42voice.com}"
+echo "  API Endpoint:       https://${API_DOMAIN:-api.42voice.com}"
+echo "  LiveKit Server:     wss://${WS_DOMAIN:-ws.42voice.com}"
 echo "=========================================================="

@@ -1,4 +1,3 @@
-#!/usr/bin/env font
 #!/bin/bash
 set -e
 
