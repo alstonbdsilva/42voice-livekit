@@ -41,6 +41,7 @@ import CampaignDetail from "@/pages/CampaignDetail";
 import Outbound from "@/pages/Outbound";
 import Tools from "@/pages/Tools";
 import ToolDetail from "@/pages/ToolDetail";
+import CalendarPage from "@/pages/CalendarPage";
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
@@ -76,6 +77,7 @@ export default function App() {
         <Route path="/campaigns" element={<Shell><Campaigns /></Shell>} />
         <Route path="/campaigns/new" element={<Shell><CreateCampaign /></Shell>} />
         <Route path="/campaigns/:id" element={<Shell><CampaignDetail /></Shell>} />
+        <Route path="/calendar" element={<Shell><CalendarPage /></Shell>} />
         <Route path="/outbound" element={<Navigate to="/campaigns" replace />} />
         <Route path="/tools" element={<Shell><Tools /></Shell>} />
         <Route path="/tools/:toolUuid" element={<Shell><ToolDetail /></Shell>} />

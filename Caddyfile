@@ -1,0 +1,27 @@
+# ==============================================================================
+# Caddyfile - Multi-Domain SSL Reverse Proxy for 42Voice
+# Automatically manages Let's Encrypt SSL certificates for all 3 subdomains
+# ==============================================================================
+
+# 1. Frontend Web Dashboard
+dashboard.42voice.com {
+    encode gzip zstd
+    reverse_proxy fe:80
+}
+
+# 2. FastAPI Backend REST API
+api.42voice.com {
+    encode gzip zstd
+    reverse_proxy backend:8000
+}
+
+# 3. LiveKit SFU WebRTC / WebSocket Server
+ws.42voice.com {
+    encode gzip zstd
+    reverse_proxy livekit:7880 {
+        header_up Host {host}
+        header_up X-Real-IP {remote}
+        header_up X-Forwarded-For {remote}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}

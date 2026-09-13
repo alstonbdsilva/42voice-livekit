@@ -1,0 +1,41 @@
+#!/usr/bin/env font
+#!/bin/bash
+set -e
+
+echo "=========================================================="
+echo "      42Voice - Hostinger VPS Deployment Script           "
+echo "=========================================================="
+
+# Check if .env exists
+if [ ! -f .env ]; then
+    echo "Error: .env file not found!"
+    echo "Please copy .env.docker.example to .env and configure your Supabase & LiveKit credentials."
+    exit 1
+fi
+
+# Load variables
+export $(grep -v '^#' .env | xargs)
+
+echo "[1/4] Checking Docker and Docker Compose..."
+if ! command -v docker &> /dev/null; then
+    echo "Docker is not installed. Installing Docker..."
+    curl -fsSL https://get.docker.com -o get-docker.sh
+    sh get-docker.sh
+    rm get-docker.sh
+fi
+
+echo "[2/4] Pulling & Building Docker Services..."
+docker compose -f docker-compose.prod.yml build --parallel
+
+echo "[3/4] Starting 42Voice Containers..."
+docker compose -f docker-compose.prod.yml up -d
+
+echo "[4/4] Verifying Container Health..."
+sleep 5
+docker compose -f docker-compose.prod.yml ps
+
+echo "=========================================================="
+echo "  Deployment Complete! "
+echo "  Frontend & API Domain: https://${DOMAIN:-localhost}"
+echo "  LiveKit WebRTC Server: wss://${DOMAIN:-localhost}/livekit"
+echo "=========================================================="

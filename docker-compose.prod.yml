@@ -1,0 +1,125 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redissecret}
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redissecret}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - app-network
+
+  livekit:
+    image: livekit/livekit-server:v1.8
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "50000-60000:50000-60000/udp"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  backend:
+    build:
+      context: ./voice-agent
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["./entrypoint.sh", "backend"]
+    env_file:
+      - .env
+    environment:
+      - ENVIRONMENT=production
+      - PORT=8000
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redissecret}@redis:6379/0
+      - LIVEKIT_URL=http://livekit:7880
+      - BACKEND_URL=https://api.42voice.com/api/v1
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - app-network
+
+  voice-agent:
+    build:
+      context: ./voice-agent
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["./entrypoint.sh", "worker"]
+    env_file:
+      - .env
+    environment:
+      - ENVIRONMENT=production
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redissecret}@redis:6379/0
+      - LIVEKIT_URL=ws://livekit:7880
+      - BACKEND_URL=https://api.42voice.com/api/v1
+    depends_on:
+      backend:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+    networks:
+      - app-network
+
+  fe:
+    build:
+      context: ./fe
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL:-https://api.42voice.com/api/v1}
+        REACT_APP_LIVEKIT_URL: ${REACT_APP_LIVEKIT_URL:-wss://ws.42voice.com}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - fe
+      - backend
+      - livekit
+    networks:
+      - app-network
+
+volumes:
+  redis_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  app-network:
+    driver: bridge
