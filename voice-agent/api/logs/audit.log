@@ -89,3 +89,11 @@
 {"timestamp":"2026-08-17T09:57:01","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: None"}
 {"timestamp":"2026-08-17T09:57:03","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: None"}
 {"timestamp":"2026-08-17T09:57:20","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: a7ac1de4-02ee-4e49-b815-83d085506f45 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-09-13T07:58:49","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-09-13T08:44:30","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 47793892-50c8-4a80-a064-9e55aaed9b72 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-09-13T08:49:19","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 47793892-50c8-4a80-a064-9e55aaed9b72 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-09-13T08:49:33","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-09-13T08:53:47","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-09-13T08:53:52","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGOUT - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-09-13T08:53:56","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 47793892-50c8-4a80-a064-9e55aaed9b72 - IP: 127.0.0.1 - Payload: None"}
+{"timestamp":"2026-09-13T09:13:28","level":"INFO","logger":"api.audit","message":"Audit Event: USER_LOGIN - User: 72e947c6-0bb4-4826-965d-13e6c56e8a78 - IP: 127.0.0.1 - Payload: None"}
