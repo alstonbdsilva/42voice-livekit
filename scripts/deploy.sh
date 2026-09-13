@@ -23,13 +23,16 @@ if ! command -v docker &> /dev/null; then
     rm get-docker.sh
 fi
 
-echo "[2/4] Pulling & Building Docker Services..."
+echo "[2/4] Stopping any existing/legacy containers..."
+docker compose -f docker-compose.prod.yml down --remove-orphans 2>/dev/null || true
+
+echo "[3/4] Pulling & Building Docker Services..."
 docker compose -f docker-compose.prod.yml build --parallel
 
-echo "[3/4] Starting 42Voice Containers..."
-docker compose -f docker-compose.prod.yml up -d
+echo "[4/4] Starting 42Voice Containers..."
+docker compose -f docker-compose.prod.yml up -d --remove-orphans
 
-echo "[4/4] Verifying Container Health..."
+echo "Verifying Container Health..."
 sleep 5
 docker compose -f docker-compose.prod.yml ps
 
