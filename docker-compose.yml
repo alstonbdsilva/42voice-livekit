@@ -20,8 +20,6 @@ services:
       - "7880:7880"
       - "7881:7881"
       - "50000-60000:50000-60000/udp"
-    depends_on:
-      - redis
     networks:
       - app-network
 
@@ -39,8 +37,6 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redissecret}@redis:6379/0
       - LIVEKIT_URL=http://livekit:7880
       - BACKEND_URL=https://api.42voice.com/api/v1
-    depends_on:
-      - redis
     networks:
       - app-network
 
@@ -57,9 +53,6 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redissecret}@redis:6379/0
       - LIVEKIT_URL=ws://livekit:7880
       - BACKEND_URL=https://api.42voice.com/api/v1
-    depends_on:
-      - backend
-      - livekit
     networks:
       - app-network
 
@@ -71,8 +64,6 @@ services:
         REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL:-https://api.42voice.com/api/v1}
         REACT_APP_LIVEKIT_URL: ${REACT_APP_LIVEKIT_URL:-wss://ws.42voice.com}
     restart: unless-stopped
-    depends_on:
-      - backend
     networks:
       - app-network
 
@@ -86,10 +77,6 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
       - caddy_config:/config
-    depends_on:
-      - fe
-      - backend
-      - livekit
     networks:
       - app-network
 
