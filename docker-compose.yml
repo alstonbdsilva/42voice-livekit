@@ -7,11 +7,6 @@ services:
       - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redissecret}", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
     networks:
       - app-network
 
@@ -26,8 +21,7 @@ services:
       - "7881:7881"
       - "50000-60000:50000-60000/udp"
     depends_on:
-      redis:
-        condition: service_healthy
+      - redis
     networks:
       - app-network
 
@@ -46,14 +40,13 @@ services:
       - LIVEKIT_URL=http://livekit:7880
       - BACKEND_URL=https://api.42voice.com/api/v1
     depends_on:
-      redis:
-        condition: service_healthy
+      - redis
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
       retries: 5
-      start_period: 20s
+      start_period: 5s
     networks:
       - app-network
 
@@ -71,10 +64,8 @@ services:
       - LIVEKIT_URL=ws://livekit:7880
       - BACKEND_URL=https://api.42voice.com/api/v1
     depends_on:
-      backend:
-        condition: service_healthy
-      livekit:
-        condition: service_started
+      - backend
+      - livekit
     networks:
       - app-network
 
@@ -87,8 +78,7 @@ services:
         REACT_APP_LIVEKIT_URL: ${REACT_APP_LIVEKIT_URL:-wss://ws.42voice.com}
     restart: unless-stopped
     depends_on:
-      backend:
-        condition: service_healthy
+      - backend
     networks:
       - app-network
 
