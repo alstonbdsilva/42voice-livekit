@@ -24,17 +24,17 @@ if ! command -v docker &> /dev/null; then
 fi
 
 echo "[2/4] Stopping any existing/legacy containers..."
-docker compose -f docker-compose.prod.yml down --remove-orphans 2>/dev/null || true
+docker compose down --remove-orphans 2>/dev/null || true
 
 echo "[3/4] Pulling & Building Docker Services..."
-docker compose -f docker-compose.prod.yml build --parallel
+docker compose build --parallel
 
 echo "[4/4] Starting 42Voice Containers..."
-docker compose -f docker-compose.prod.yml up -d --remove-orphans
+docker compose up -d --remove-orphans
 
 echo "Verifying Container Health..."
 sleep 5
-docker compose -f docker-compose.prod.yml ps
+docker compose ps
 
 echo "=========================================================="
 echo "  Deployment Complete!"
