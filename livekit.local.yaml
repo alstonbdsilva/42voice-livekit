@@ -1,0 +1,20 @@
+port: 7880
+bind_addresses:
+  - ""
+
+rtc:
+  udp_port: 7882
+  tcp_port: 7881
+  use_external_ip: false
+
+redis:
+  address: redis:6379
+  password: redissecret
+  db: 0
+
+keys:
+  myapikey: mysupersecret
+
+logging:
+  json: false
+  level: info
