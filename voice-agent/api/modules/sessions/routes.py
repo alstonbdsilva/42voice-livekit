@@ -184,6 +184,7 @@ class LiveKitTokenRequest(BaseModel):
 async def generate_livekit_token(req_body: LiveKitTokenRequest):
     """
     Generate a LiveKit JWT AccessToken for web browser WebRTC voice calls.
+    Ensures the room exists in LiveKit SFU before returning the roomJoin-scoped token to the browser.
     """
     try:
         settings = get_settings()
@@ -191,6 +192,39 @@ async def generate_livekit_token(req_body: LiveKitTokenRequest):
         participant_identity = req_body.identity or f"user-{uuid.uuid4().hex[:6]}"
         participant_name = req_body.name or "Web Caller"
         
+        logger.info(f"[LiveKit Token] Request received for room_name='{room_name}', identity='{participant_identity}'")
+
+        # Connect to LiveKit SFU server to ensure room exists and dispatch agent worker
+        try:
+            async with lk_api.LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret) as lk:
+                # 1. Explicitly ensure/create room using RoomService API
+                logger.info(f"[LiveKit Token] Ensuring room '{room_name}' exists via RoomService API")
+                try:
+                    create_room_req = lk_api.CreateRoomRequest(
+                        name=room_name,
+                        empty_timeout=300
+                    )
+                    await lk.room.create_room(create_room_req)
+                    logger.info(f"[LiveKit Token] Room '{room_name}' created / confirmed existing")
+                except Exception as room_err:
+                    logger.info(f"[LiveKit Token] Room '{room_name}' already exists or creation note: {room_err}")
+
+                # 2. Create Agent Dispatch for that exact room
+                dispatch_metadata = json.dumps({
+                    "agent_id": req_body.agentId or "",
+                    "agent_name": req_body.agentName or "Voice Agent"
+                })
+                dispatch_req = lk_api.CreateAgentDispatchRequest(
+                    agent_name=settings.livekit_agent_name,
+                    room=room_name,
+                    metadata=dispatch_metadata
+                )
+                await lk.agent_dispatch.create_dispatch(dispatch_req)
+                logger.info(f"[LiveKit Token] Dispatch created for agent '{settings.livekit_agent_name}' in room '{room_name}'")
+        except Exception as lk_err:
+            logger.warning(f"[LiveKit Token] Error interacting with LiveKit API for room '{room_name}': {lk_err}")
+
+        # 3. Generate browser participant token (roomJoin-scoped)
         token = lk_api.AccessToken(settings.livekit_api_key, settings.livekit_api_secret) \
             .with_identity(participant_identity) \
             .with_name(participant_name) \
@@ -209,25 +243,9 @@ async def generate_livekit_token(req_body: LiveKitTokenRequest):
             }))
 
         jwt_token = token.to_jwt()
+        logger.info(f"[LiveKit Token] Browser participant token generated for identity='{participant_identity}', room='{room_name}'")
 
-        # Create Agent Dispatch so the registered LiveKit worker (inbound-agent) joins the room
-        try:
-            async with lk_api.LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret) as lk:
-                dispatch_metadata = json.dumps({
-                    "agent_id": req_body.agentId or "",
-                    "agent_name": req_body.agentName or "Voice Agent"
-                })
-                dispatch_req = lk_api.CreateAgentDispatchRequest(
-                    agent_name=settings.livekit_agent_name,
-                    room=room_name,
-                    metadata=dispatch_metadata
-                )
-                await lk.agent_dispatch.create_dispatch(dispatch_req)
-                logger.info(f"[LiveKit Token] Dispatched agent '{settings.livekit_agent_name}' to room '{room_name}'")
-        except Exception as dispatch_err:
-            logger.warning(f"[LiveKit Token] Could not create agent dispatch for room '{room_name}': {dispatch_err}")
-
-        # Resolve public browser-facing LiveKit WebSocket URL for client WebRTC calls
+        # 4. Resolve public browser-facing LiveKit WebSocket URL for client WebRTC calls
         import os
         public_livekit_url = settings.livekit_public_url or os.getenv("LIVEKIT_PUBLIC_URL")
         if not public_livekit_url or "livekit:" in public_livekit_url:
@@ -235,6 +253,8 @@ async def generate_livekit_token(req_body: LiveKitTokenRequest):
                 public_livekit_url = "ws://localhost:7880"
             else:
                 public_livekit_url = "wss://ws.42voice.com"
+
+        logger.info(f"[LiveKit Token] Returning token response for room='{room_name}', identity='{participant_identity}', url='{public_livekit_url}'")
 
         return {
             "token": jwt_token,
