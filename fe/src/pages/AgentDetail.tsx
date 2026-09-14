@@ -60,6 +60,7 @@ import WebhookLogsTable from "@/components/webhook/WebhookLogsTable";
 import {
   Room,
   RoomEvent,
+  ConnectionState,
   Track,
   LocalAudioTrack,
   RemoteParticipant,
@@ -145,9 +146,9 @@ export default function AgentDetail() {
   const [testerMode, setTesterMode] = useState<"audio" | "text">("audio");
   
   // Real LiveKit WebRTC Audio State (Dograh EmbeddedVoiceTester style)
-  // Real LiveKit WebRTC Audio State (Dograh EmbeddedVoiceTester style)
   const [lkRoom, setLkRoom] = useState<Room | null>(null);
   const roomRef = React.useRef<Room | null>(null);
+  const connectingRef = React.useRef<boolean>(false);
   const [isCallActive, setIsCallActive] = useState(false);
   const [isConnectingCall, setIsConnectingCall] = useState(false);
   const [isMicMuted, setIsMicMuted] = useState(false);
@@ -235,6 +236,20 @@ export default function AgentDetail() {
 
   const startLivekitVoiceCall = async () => {
     if (!id || !a) return;
+
+    const existingRoom = roomRef.current;
+
+    if (
+      connectingRef.current ||
+      (existingRoom && existingRoom.state !== ConnectionState.Disconnected)
+    ) {
+      console.log(
+        "[LiveKit UI] Call already active/connecting. Ignoring duplicate start request."
+      );
+      return;
+    }
+
+    connectingRef.current = true;
     setTestMessages([]);
 
     // Cleanly disconnect any active or connecting room stored in roomRef
@@ -378,6 +393,8 @@ export default function AgentDetail() {
       setIsConnectingCall(false);
       setIsCallActive(false);
       toast.error("LiveKit connection error: " + (err?.message || "Check LiveKit server"));
+    } finally {
+      connectingRef.current = false;
     }
   };
 
