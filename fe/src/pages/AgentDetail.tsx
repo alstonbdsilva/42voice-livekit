@@ -145,7 +145,9 @@ export default function AgentDetail() {
   const [testerMode, setTesterMode] = useState<"audio" | "text">("audio");
   
   // Real LiveKit WebRTC Audio State (Dograh EmbeddedVoiceTester style)
+  // Real LiveKit WebRTC Audio State (Dograh EmbeddedVoiceTester style)
   const [lkRoom, setLkRoom] = useState<Room | null>(null);
+  const roomRef = React.useRef<Room | null>(null);
   const [isCallActive, setIsCallActive] = useState(false);
   const [isConnectingCall, setIsConnectingCall] = useState(false);
   const [isMicMuted, setIsMicMuted] = useState(false);
@@ -167,6 +169,25 @@ export default function AgentDetail() {
     }
   }, [testMessages, isThinking, activeTab]);
 
+  // Clean unmount cleanup hook to ensure disconnect runs ONLY on true component unmount
+  useEffect(() => {
+    return () => {
+      console.log("[LiveKit UI] Component unmounting -> cleaning up active room...");
+      if (localTrackRef.current) {
+        try {
+          localTrackRef.current.stop();
+        } catch (e) {}
+        localTrackRef.current = null;
+      }
+      if (roomRef.current) {
+        try {
+          console.log("[LiveKit UI] Executing unmount room.disconnect()");
+          roomRef.current.disconnect();
+        } catch (e) {}
+        roomRef.current = null;
+      }
+    };
+  }, []);
 
   const addOrUpdateTranscriptMessage = (speaker: "user" | "agent", text: string) => {
     const cleanText = text.trim();
@@ -216,12 +237,19 @@ export default function AgentDetail() {
     if (!id || !a) return;
     setTestMessages([]);
 
-    if (lkRoom) {
+    // Cleanly disconnect any active or connecting room stored in roomRef
+    if (roomRef.current) {
+      console.log("[LiveKit UI] Explicit disconnect source: startLivekitVoiceCall cleaning previous room instance");
       try {
-        await lkRoom.disconnect();
+        if (localTrackRef.current) {
+          localTrackRef.current.stop();
+          localTrackRef.current = null;
+        }
+        await roomRef.current.disconnect();
       } catch (e) {
-        // ignore disconnect error for previous room
+        // ignore
       }
+      roomRef.current = null;
       setLkRoom(null);
     }
 
@@ -231,23 +259,27 @@ export default function AgentDetail() {
 
     try {
       const roomName = `test-room-${id.substring(0, 8)}-${Date.now().toString(36)}`;
+      const participantIdentity = `web-user-${Date.now().toString(36)}`;
+      console.log(`[LiveKit UI] Requesting token for room='${roomName}', identity='${participantIdentity}'`);
+
       const tokenRes = await api.post("/livekit/token", {
         roomName,
         agentId: id,
         agentName: a.name,
-        identity: `web-user-${Date.now().toString(36)}`,
+        identity: participantIdentity,
         name: "Web Tester",
       });
 
       const token = tokenRes?.token || tokenRes?.data?.token;
       let url = tokenRes?.url || tokenRes?.data?.url || process.env.REACT_APP_LIVEKIT_URL || "wss://ws.42voice.com";
-      if (url.includes("livekit:") || url.includes("localhost:7880") && process.env.REACT_APP_LIVEKIT_URL) {
+      if (url.includes("livekit:") || (url.includes("localhost:7880") && process.env.REACT_APP_LIVEKIT_URL)) {
         url = process.env.REACT_APP_LIVEKIT_URL;
       }
 
       if (!token) throw new Error("Failed to receive token from backend");
 
       setLivekitStatusText("Connecting to WebRTC server...");
+      console.log(`[LiveKit UI] Room instance created for roomName='${roomName}'`);
 
       const room = new Room({
         adaptiveStream: true,
@@ -259,7 +291,11 @@ export default function AgentDetail() {
         },
       });
 
+      // Synchronously store roomRef so all re-renders know an active room exists
+      roomRef.current = room;
+
       room.on(RoomEvent.Connected, () => {
+        console.log(`[LiveKit UI] Connected successfully to room='${roomName}'`);
         setLivekitStatus("active");
         setLivekitStatusText("Call Active 🟢");
         setIsCallActive(true);
@@ -268,6 +304,10 @@ export default function AgentDetail() {
       });
 
       room.on(RoomEvent.Disconnected, (reason) => {
+        console.log(`[LiveKit UI] Disconnected event received. Reason='${reason}'`);
+        if (roomRef.current === room) {
+          roomRef.current = null;
+        }
         setLivekitStatus("ended");
         setLivekitStatusText(`Call Ended (${reason || "User hung up"})`);
         setIsCallActive(false);
@@ -278,6 +318,7 @@ export default function AgentDetail() {
 
       room.on(RoomEvent.TrackSubscribed, (track: Track, publication, participant: RemoteParticipant) => {
         if (track.kind === Track.Kind.Audio) {
+          console.log(`[LiveKit UI] TrackSubscribed: audio track from participant='${participant.identity}'`);
           setLivekitStatusText(`Agent Speaking (${participant.name || participant.identity || a.name})`);
           const audioElement = track.attach();
           audioElement.id = `lk-audio-${participant.sid}`;
@@ -288,6 +329,7 @@ export default function AgentDetail() {
       });
 
       room.on(RoomEvent.TrackUnsubscribed, (track: Track) => {
+        console.log("[LiveKit UI] TrackUnsubscribed: detaching audio track");
         track.detach().forEach((el) => el.remove());
       });
 
@@ -314,22 +356,23 @@ export default function AgentDetail() {
         });
       });
 
-
-
+      console.log(`[LiveKit UI] Starting room.connect() to url='${url}'`);
       await room.connect(url, token);
 
       try {
         const localAudioTrack = await createLocalAudioTrack();
         await room.localParticipant.publishTrack(localAudioTrack);
         localTrackRef.current = localAudioTrack;
+        console.log("[LiveKit UI] Local microphone track published successfully");
       } catch (micErr) {
-        console.warn("Microphone capture issue:", micErr);
+        console.warn("[LiveKit UI] Microphone capture issue:", micErr);
         toast.warning("Call connected, but microphone access was denied.");
       }
 
       setLkRoom(room);
     } catch (err: any) {
-      console.error("LiveKit Call Failed:", err);
+      console.error("[LiveKit UI] LiveKit Call Failed:", err);
+      roomRef.current = null;
       setLivekitStatus("failed");
       setLivekitStatusText("Connection Failed");
       setIsConnectingCall(false);
@@ -339,12 +382,19 @@ export default function AgentDetail() {
   };
 
   const endLivekitVoiceCall = async () => {
+    console.log("[LiveKit UI] Explicit endLivekitVoiceCall invoked by user");
     if (localTrackRef.current) {
-      localTrackRef.current.stop();
+      try {
+        localTrackRef.current.stop();
+      } catch (e) {}
       localTrackRef.current = null;
     }
-    if (lkRoom) {
-      await lkRoom.disconnect();
+    const currentRoom = roomRef.current || lkRoom;
+    if (currentRoom) {
+      roomRef.current = null;
+      try {
+        await currentRoom.disconnect();
+      } catch (e) {}
       setLkRoom(null);
     }
     setIsCallActive(false);
@@ -1566,7 +1616,6 @@ export default function AgentDetail() {
                     </div>
                   )}
                 </div>
-                <div ref={audioContainerRef} className="hidden" />
               </div>
             )}
 
@@ -1691,6 +1740,8 @@ export default function AgentDetail() {
         </TabsContent>
       </Tabs>
 
+      {/* Persistent WebRTC audio container element */}
+      <div ref={audioContainerRef} className="hidden" />
     </div>
   );
 }
