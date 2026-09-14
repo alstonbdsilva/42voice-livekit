@@ -216,12 +216,21 @@ export default function AgentDetail() {
     if (!id || !a) return;
     setTestMessages([]);
 
+    if (lkRoom) {
+      try {
+        await lkRoom.disconnect();
+      } catch (e) {
+        // ignore disconnect error for previous room
+      }
+      setLkRoom(null);
+    }
+
     setIsConnectingCall(true);
     setLivekitStatus("connecting");
     setLivekitStatusText("Requesting connection token...");
 
     try {
-      const roomName = `test-room-${id.substring(0, 8)}`;
+      const roomName = `test-room-${id.substring(0, 8)}-${Date.now().toString(36)}`;
       const tokenRes = await api.post("/livekit/token", {
         roomName,
         agentId: id,
