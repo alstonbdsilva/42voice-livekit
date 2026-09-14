@@ -19,7 +19,7 @@ services:
     ports:
       - "7880:7880"
       - "7881:7881"
-      - "50000-60000:50000-60000/udp"
+      - "7882:7882/udp"
     networks:
       - app-network
 
