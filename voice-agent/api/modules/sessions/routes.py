@@ -227,9 +227,18 @@ async def generate_livekit_token(req_body: LiveKitTokenRequest):
         except Exception as dispatch_err:
             logger.warning(f"[LiveKit Token] Could not create agent dispatch for room '{room_name}': {dispatch_err}")
 
+        # Resolve public browser-facing LiveKit WebSocket URL for client WebRTC calls
+        import os
+        public_livekit_url = settings.livekit_public_url or os.getenv("LIVEKIT_PUBLIC_URL")
+        if not public_livekit_url or "livekit:" in public_livekit_url:
+            if "localhost" in settings.livekit_url:
+                public_livekit_url = "ws://localhost:7880"
+            else:
+                public_livekit_url = "wss://ws.42voice.com"
+
         return {
             "token": jwt_token,
-            "url": settings.livekit_url,
+            "url": public_livekit_url,
             "roomName": room_name,
             "identity": participant_identity
         }

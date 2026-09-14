@@ -231,7 +231,10 @@ export default function AgentDetail() {
       });
 
       const token = tokenRes?.token || tokenRes?.data?.token;
-      const url = tokenRes?.url || tokenRes?.data?.url || "ws://localhost:7880";
+      let url = tokenRes?.url || tokenRes?.data?.url || process.env.REACT_APP_LIVEKIT_URL || "wss://ws.42voice.com";
+      if (url.includes("livekit:") || url.includes("localhost:7880") && process.env.REACT_APP_LIVEKIT_URL) {
+        url = process.env.REACT_APP_LIVEKIT_URL;
+      }
 
       if (!token) throw new Error("Failed to receive token from backend");
 

@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     
     # LiveKit Configuration - Remote Server
     livekit_url: str = Field(default="wss://ws.42voice.com", validation_alias="LIVEKIT_URL")
+    livekit_public_url: Optional[str] = Field(default=None, validation_alias="LIVEKIT_PUBLIC_URL")
     livekit_api_key: str = Field(default="devkey", validation_alias="LIVEKIT_API_KEY")
     livekit_api_secret: str = Field(default="secret", validation_alias="LIVEKIT_API_SECRET")
     livekit_agent_name: str = Field(default="inbound-agent", validation_alias="LIVEKIT_AGENT_NAME")
