@@ -17,7 +17,7 @@ services:
     volumes:
       - ./livekit.yaml:/etc/livekit.yaml
     ports:
-      - "7880:7880"
+      - "127.0.0.1:7880:7880"
       - "7881:7881"
       - "7882:7882/udp"
     networks:
@@ -37,6 +37,8 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redissecret}@redis:6379/0
       - LIVEKIT_URL=http://livekit:7880
       - BACKEND_URL=https://api.42voice.com/api/v1
+    ports:
+      - "127.0.0.1:8000:8000"
     networks:
       - app-network
 
@@ -64,26 +66,13 @@ services:
         REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL:-https://api.42voice.com/api/v1}
         REACT_APP_LIVEKIT_URL: ${REACT_APP_LIVEKIT_URL:-wss://ws.42voice.com}
     restart: unless-stopped
-    networks:
-      - app-network
-
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
-      - caddy_data:/data
-      - caddy_config:/config
+      - "127.0.0.1:8080:80"
     networks:
       - app-network
 
 volumes:
   redis_data:
-  caddy_data:
-  caddy_config:
 
 networks:
   app-network:
