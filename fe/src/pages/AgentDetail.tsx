@@ -371,17 +371,29 @@ export default function AgentDetail() {
         });
       });
 
-      console.log(`[LiveKit UI] Starting room.connect() to url='${url}'`);
+      console.log("[LiveKit UI] room.connect START");
       await room.connect(url, token);
+      console.log("[LiveKit UI] room.connect DONE");
 
       try {
+        console.log("[LiveKit UI] createLocalAudioTrack START");
         const localAudioTrack = await createLocalAudioTrack();
+        console.log("[LiveKit UI] createLocalAudioTrack DONE");
+
+        console.log("[LiveKit UI] publishTrack START");
         await room.localParticipant.publishTrack(localAudioTrack);
+        console.log("[LiveKit UI] publishTrack DONE");
+
         localTrackRef.current = localAudioTrack;
-        console.log("[LiveKit UI] Local microphone track published successfully");
-      } catch (micErr) {
-        console.warn("[LiveKit UI] Microphone capture issue:", micErr);
-        toast.warning("Call connected, but microphone access was denied.");
+      } catch (micErr: any) {
+        console.error(
+          "[LiveKit UI] Microphone capture/publish failed:",
+          micErr
+        );
+        toast.warning(
+          "Microphone publish failed: " +
+          (micErr?.message || "Unknown microphone error")
+        );
       }
 
       setLkRoom(room);
