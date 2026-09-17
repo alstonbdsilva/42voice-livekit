@@ -2,9 +2,11 @@
 FastAPI Routes for Telephony Configurations & Phone Numbers (Twilio & Vobiz).
 """
 
+import json
+import uuid
+import logging
 from typing import Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
-import logging
 
 from api.middlewares.auth import get_current_user
 from api.utils.api_response import ApiResponse
@@ -297,7 +299,6 @@ async def initiate_call(
     req: InitiateCallRequest,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    import uuid
     import httpx
     from config import get_settings
     from api import database
@@ -342,11 +343,57 @@ async def initiate_call(
 
     logger.info(f"Initiating call to {dest_number} (Agent: '{agent_name}', Config: {config.get('name') if config else 'None'}, CallerID: {from_number})")
 
-    # 4. If provider is Twilio: trigger Twilio REST API call
+    # 4. Prepare Metadata for LiveKit Dispatch & Worker
+    metadata_dict = {
+        "agent_id": req.agent_id,
+        "agent_name": agent_name,
+        "from_phone_number": from_number,
+        "dest_number": dest_number
+    } if req.agent_id else {}
+    metadata_payload = json.dumps(metadata_dict) if metadata_dict else ""
+
+    # 5. Initiate via LiveKit SIP API if configured
+    settings = get_settings()
+    if settings.livekit_url and settings.livekit_api_key and settings.livekit_api_secret:
+        try:
+            from livekit import api as lk_api
+            lk = lk_api.LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret)
+            room_name = f"call-{uuid.uuid4().hex[:8]}"
+            
+            # Dispatch agent worker to the room
+            if settings.livekit_agent_name:
+                try:
+                    await lk.agent_dispatch.create_dispatch(
+                        lk_api.CreateAgentDispatchRequest(
+                            agent_name=settings.livekit_agent_name,
+                            room=room_name,
+                            metadata=metadata_payload
+                        )
+                    )
+                    logger.info(f"Dispatched agent '{settings.livekit_agent_name}' to room '{room_name}' with metadata: {metadata_payload}")
+                except Exception as dispatch_err:
+                    logger.warning(f"Could not dispatch agent to room {room_name}: {dispatch_err}")
+
+            # Initiate SIP Participant Outbound Call
+            sip_req = lk_api.CreateSIPParticipantRequest(
+                sip_call_to=dest_number,
+                room_name=room_name,
+                participant_identity=f"sip-{dest_number}",
+                participant_name=dest_number,
+                participant_metadata=metadata_payload,
+                play_ringtone=True,
+            )
+            res = await lk.sip.create_sip_participant(sip_req)
+            await lk.aclose()
+            return ApiResponse.success(message=f"Call initiated to {dest_number} with agent '{agent_name}' (Participant ID: {res.participant_id})")
+        except Exception as lk_err:
+            logger.warning(f"LiveKit SIP participant dispatch warning: {lk_err}")
+
+    # 6. Fallback to Twilio REST API if Twilio configuration provided
     if config and config.get("provider") == "twilio":
         raw_creds = config.get("raw_credentials") or {}
-        account_sid = raw_creds.get("account_sid")
-        auth_token = raw_creds.get("auth_token")
+        account_sid = raw_creds.get("account_sid") or settings.twilio_account_sid
+        auth_token = raw_creds.get("auth_token") or settings.twilio_auth_token
 
         if not account_sid or not auth_token:
             raise HTTPException(
@@ -361,7 +408,10 @@ async def initiate_call(
             )
 
         url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Calls.json"
-        twiml = f"<Response><Say>Hello! This is a test call from your 42 Voice agent, {agent_name}.</Say><Pause length=\"5\"/><Say>Call completed successfully. Goodbye.</Say></Response>"
+        
+        # If Twilio SIP domain is set, bridge call to LiveKit SIP trunk
+        sip_domain = settings.twilio_sip_domain or "42voice.pstn.sydney.twilio.com"
+        twiml = f"<Response><Dial><Sip>sip:{dest_number}@{sip_domain}</Sip></Dial></Response>"
         data = {
             "To": dest_number,
             "From": from_number,
@@ -375,7 +425,7 @@ async def initiate_call(
                 if resp.status_code in (200, 201):
                     call_sid = resp_json.get("sid", "N/A")
                     logger.info(f"Twilio call dispatched successfully. Call SID: {call_sid}")
-                    return ApiResponse.success(message=f"Test call successfully initiated to {dest_number}! (Twilio Call SID: {call_sid})")
+                    return ApiResponse.success(message=f"Outbound call successfully initiated to {dest_number} with agent '{agent_name}'! (Twilio Call SID: {call_sid})")
                 else:
                     err_msg = resp_json.get("message") or resp_json.get("detail") or resp.text or "Twilio API error"
                     logger.error(f"Twilio call error ({resp.status_code}): {err_msg}")
@@ -391,37 +441,6 @@ async def initiate_call(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to connect to Twilio API: {str(e)}"
             )
-
-    # 5. Try LiveKit SIP API if configured
-    settings = get_settings()
-    if settings.livekit_url and settings.livekit_api_key and settings.livekit_api_secret:
-        try:
-            from livekit import api as lk_api
-            lk = lk_api.LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret)
-            room_name = f"call-{uuid.uuid4().hex[:8]}"
-            if settings.livekit_agent_name:
-                try:
-                    await lk.agent_dispatch.create_dispatch(
-                        lk_api.CreateAgentDispatchRequest(
-                            agent_name=settings.livekit_agent_name,
-                            room=room_name
-                        )
-                    )
-                except Exception as dispatch_err:
-                    logger.warning(f"Could not dispatch agent to room {room_name}: {dispatch_err}")
-
-            sip_req = lk_api.CreateSIPParticipantRequest(
-                sip_call_to=dest_number,
-                room_name=room_name,
-                participant_identity=f"sip-{dest_number}",
-                participant_name=dest_number,
-                play_ringtone=True,
-            )
-            res = await lk.sip.create_sip_participant(sip_req)
-            await lk.aclose()
-            return ApiResponse.success(message=f"LiveKit SIP call initiated to {dest_number} (Participant ID: {res.participant_id})")
-        except Exception as lk_err:
-            logger.warning(f"LiveKit SIP participant dispatch note: {lk_err}")
 
     # Fallback response
     return ApiResponse.success(message=f"Test call simulation initiated for {dest_number}. (Telephony configuration verified)")

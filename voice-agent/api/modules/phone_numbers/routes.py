@@ -531,8 +531,8 @@ async def assign_agent(id: str, req_body: AssignAgentRequest, current_user: Dict
             [agent_uuid, number_uuid]
         )
         
-        # Publish change event on event bus (invalidates cache)
-        phone_sync_service.publish_configuration_changed(num_record["number"], action="assign_agent")
+        # Sync LiveKit SIP trunk & dispatch rules and publish configuration event
+        await phone_sync_service.synchronize_phone_number(str(number_uuid), action="assign_agent")
         
         return ApiResponse.success(message="Phone number routing updated successfully.")
     except Exception as e:

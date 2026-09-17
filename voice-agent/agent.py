@@ -792,6 +792,18 @@ async def entrypoint(ctx: JobContext):
     client_id = None
     agent_id = None
     
+    # Check metadata first (passed during outbound call dispatches or Web calls)
+    call_metadata = {}
+    try:
+        if participant.metadata:
+            call_metadata = json.loads(participant.metadata)
+        elif hasattr(ctx, 'job') and getattr(ctx.job, 'metadata', None):
+            call_metadata = json.loads(ctx.job.metadata)
+    except Exception as meta_err:
+        logger.warning(f"[Metadata] Failed to parse metadata: {meta_err}")
+
+    target_agent_id = call_metadata.get("agent_id")
+    
     called_number = (
         participant.attributes.get("sip.trunkPhoneNumber") or
         participant.attributes.get("sip.toUser") or
@@ -801,10 +813,57 @@ async def entrypoint(ctx: JobContext):
     logger.info("[SIP] Participant Connected")
     logger.info(f"[SIP] Participant identity: {participant.identity}")
     logger.info(f"[SIP] Participant attributes: {participant.attributes}")
-    logger.info(f"[SIP] Resolved called_number using attribute: {called_number}")
+    logger.info(f"[SIP] Resolved called_number: {called_number}, target_agent_id in metadata: {target_agent_id}")
     
-    if called_number:
-        logger.info(f"[Backend] Starting routing lookup for {called_number} at {backend_url}/phone-numbers/lookup")
+    # Case A: Explicit agent_id provided in metadata (Outbound call or Web Agent session)
+    if target_agent_id:
+        logger.info(f"[Agent] Target agent_id '{target_agent_id}' provided in metadata. Loading agent configuration directly...")
+        try:
+            if database.pool is None:
+                await database.init_pool()
+            agent_rows = await database.query("SELECT * FROM agents WHERE id = $1::uuid", [target_agent_id])
+            if agent_rows:
+                ag_data = agent_rows[0]
+                agent_id = str(ag_data.get("id"))
+                agent_name = ag_data.get("name", "Voice Agent")
+                use_case = ag_data.get("use_case", "")
+                activity_desc = ag_data.get("activity_description", "")
+                custom_guardrails = ag_data.get("custom_guardrails", "")
+                knowledge_items = ag_data.get("knowledge_items", [])
+                if isinstance(knowledge_items, str):
+                    try:
+                        knowledge_items = json.loads(knowledge_items)
+                    except Exception:
+                        knowledge_items = []
+                client_id = str(ag_data.get("client_id")) if ag_data.get("client_id") else None
+
+                prompt_parts = [f"You are {agent_name}, an AI voice assistant."]
+                if use_case:
+                    prompt_parts.append(f"Use Case: {use_case}")
+                if activity_desc:
+                    prompt_parts.append(f"System Instructions:\n{activity_desc}")
+                if custom_guardrails:
+                    prompt_parts.append(f"Guardrails:\n{custom_guardrails}")
+                if knowledge_items and isinstance(knowledge_items, list):
+                    kb_lines = [f"- {k.get('label', '')}: {k.get('value', '')}" for k in knowledge_items if isinstance(k, dict)]
+                    if kb_lines:
+                        prompt_parts.append("Knowledge Base:\n" + "\n".join(kb_lines))
+
+                custom_prompt = "\n\n".join(prompt_parts)
+                unassigned_number = False
+                logger.info(f"[Agent] Successfully loaded configuration for agent '{agent_name}' ({agent_id})")
+            else:
+                logger.warning(f"[Agent] Agent ID '{target_agent_id}' not found in database.")
+                unassigned_number = True
+                custom_prompt = "The requested agent could not be found. Please contact support."
+        except Exception as db_err:
+            logger.error(f"[Agent] Database error fetching agent '{target_agent_id}': {db_err}")
+            unassigned_number = True
+            custom_prompt = "An error occurred while loading agent settings."
+            
+    # Case B: Inbound call to a phone number (Lookup assigned agent via called_number)
+    elif called_number:
+        logger.info(f"[Backend] Starting routing lookup for inbound call to {called_number} at {backend_url}/phone-numbers/lookup")
         try:
             async with httpx.AsyncClient() as http_client:
                 lookup_resp = await http_client.get(
@@ -818,7 +877,6 @@ async def entrypoint(ctx: JobContext):
                     logger.info(f"[Backend] Lookup success: {lookup_data}")
                     client_id = lookup_data.get("client_id")
                     
-                    # Runtime validation before starting the voice agent
                     if not lookup_data.get("has_credits", True):
                         logger.warning(f"[Credits] Insufficient credits for {called_number}")
                         out_of_credits = True
@@ -867,65 +925,9 @@ async def entrypoint(ctx: JobContext):
             unassigned_number = True
             custom_prompt = "An error occurred while processing your call. Please try again later."
     else:
-        logger.info("[Web/Non-SIP] No called_number attribute found. Checking participant/job metadata for Web Call routing...")
-        web_metadata = {}
-        try:
-            if participant.metadata:
-                web_metadata = json.loads(participant.metadata)
-            elif hasattr(ctx, 'job') and getattr(ctx.job, 'metadata', None):
-                web_metadata = json.loads(ctx.job.metadata)
-        except Exception as meta_err:
-            logger.warning(f"[Web] Failed to parse metadata: {meta_err}")
-
-        target_agent_id = web_metadata.get("agent_id")
-        if target_agent_id:
-            logger.info(f"[Web] Found agent_id '{target_agent_id}' in metadata. Loading agent configuration...")
-            try:
-                if database.pool is None:
-                    await database.init_pool()
-                agent_rows = await database.query("SELECT * FROM agents WHERE id = $1::uuid", [target_agent_id])
-                if agent_rows:
-                    ag_data = agent_rows[0]
-                    agent_id = str(ag_data.get("id"))
-                    agent_name = ag_data.get("name", "Voice Agent")
-                    use_case = ag_data.get("use_case", "")
-                    activity_desc = ag_data.get("activity_description", "")
-                    custom_guardrails = ag_data.get("custom_guardrails", "")
-                    knowledge_items = ag_data.get("knowledge_items", [])
-                    if isinstance(knowledge_items, str):
-                        try:
-                            knowledge_items = json.loads(knowledge_items)
-                        except Exception:
-                            knowledge_items = []
-                    client_id = str(ag_data.get("client_id")) if ag_data.get("client_id") else None
-
-                    prompt_parts = [f"You are {agent_name}, an AI voice assistant."]
-                    if use_case:
-                        prompt_parts.append(f"Use Case: {use_case}")
-                    if activity_desc:
-                        prompt_parts.append(f"System Instructions:\n{activity_desc}")
-                    if custom_guardrails:
-                        prompt_parts.append(f"Guardrails:\n{custom_guardrails}")
-                    if knowledge_items and isinstance(knowledge_items, list):
-                        kb_lines = [f"- {k.get('label', '')}: {k.get('value', '')}" for k in knowledge_items if isinstance(k, dict)]
-                        if kb_lines:
-                            prompt_parts.append("Knowledge Base:\n" + "\n".join(kb_lines))
-
-                    custom_prompt = "\n\n".join(prompt_parts)
-                    unassigned_number = False
-                    logger.info(f"[Web] Successfully loaded configuration for agent '{agent_name}' ({agent_id})")
-                else:
-                    logger.warning(f"[Web] Agent ID '{target_agent_id}' not found in database.")
-                    unassigned_number = True
-                    custom_prompt = "The requested agent could not be found. Please contact support."
-            except Exception as db_err:
-                logger.error(f"[Web] Database error fetching agent '{target_agent_id}': {db_err}")
-                unassigned_number = True
-                custom_prompt = "An error occurred while loading agent settings."
-        else:
-            logger.warning("[Web] No agent_id found in participant or job metadata.")
-            unassigned_number = True
-            custom_prompt = "This call cannot be routed. Please dial a configured phone number or select an agent."
+        logger.warning("[Routing] Neither agent_id metadata nor called_number found.")
+        unassigned_number = True
+        custom_prompt = "This call cannot be routed. Please dial a configured phone number or select an agent."
 
     
     # Validate required voice service configuration is present
