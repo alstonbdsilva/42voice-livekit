@@ -780,7 +780,12 @@ async def entrypoint(ctx: JobContext):
     from recording_service import recording_service
     
     # Wait for the first participant to connect
-    participant = await ctx.wait_for_participant()
+    try:
+        participant = await ctx.wait_for_participant()
+    except Exception as e:
+        logger.warning(f"No participant connected to room {room_name}: {e}")
+        return
+
     logger.info(f"PARTICIPANT CONNECTED: {participant.identity}")
     
     # 1. Resolve the called phone number from SIP participant attributes

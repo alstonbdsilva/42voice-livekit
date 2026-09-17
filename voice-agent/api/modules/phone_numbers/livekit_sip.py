@@ -3,8 +3,19 @@ from typing import Optional, Tuple, Dict, Any
 from livekit import api as lk_api
 from config import get_settings
 from api.utils.phone import normalize_phone_number
+from api.utils.encryption import token_encryptor
 
 logger = logging.getLogger("voice-agent.api.phone_numbers.livekit_sip")
+
+
+def safe_decrypt(token: Optional[str]) -> str:
+    if not token:
+        return ""
+    try:
+        return token_encryptor.decrypt(token)
+    except Exception:
+        return str(token)
+
 
 class LiveKitSipService:
     """Service to provision and manage LiveKit SIP Trunks and Dispatch Rules."""
@@ -57,10 +68,10 @@ class LiveKitSipService:
         try:
             # 1. Create Inbound Trunk
             logger.info(f"Registering Inbound SIP Trunk in LiveKit for number: {number}")
-            auth_password = sip_config.get("password", "")
-            auth_realm = sip_config.get("domain", "")
+            auth_password = safe_decrypt(sip_config.get("sip_password") or sip_config.get("password") or "")
+            auth_realm = sip_config.get("sip_domain") or sip_config.get("domain") or ""
             if auth_password and auth_realm:
-                auth_username = sip_config.get("authUsername", number)
+                auth_username = sip_config.get("sip_username") or sip_config.get("authUsername") or number
             else:
                 auth_username = ""
                 auth_password = ""
@@ -176,9 +187,18 @@ class LiveKitSipService:
             
         try:
             logger.info(f"Registering Outbound SIP Trunk in LiveKit for number: {number}")
-            auth_username = sip_config.get("auth_username") or sip_config.get("account_sid") or sip_config.get("username") or ""
-            auth_password = sip_config.get("auth_password") or sip_config.get("auth_token") or sip_config.get("password") or ""
-            address = sip_config.get("domain") or sip_config.get("sip_domain") or self.settings.twilio_sip_domain or "42voice.pstn.sydney.twilio.com"
+            auth_username = sip_config.get("sip_username") or sip_config.get("auth_username") or ""
+            raw_password = sip_config.get("sip_password") or sip_config.get("auth_password") or ""
+            auth_password = safe_decrypt(raw_password)
+            address = sip_config.get("sip_domain") or sip_config.get("domain") or ""
+
+            if not address:
+                logger.error(f"sip_domain is missing in telephony configuration for {number}.")
+                return None, "sip_domain is missing in telephony configuration."
+
+            if not auth_username or not auth_password:
+                logger.error(f"SIP Digest credentials (sip_username/sip_password) missing in user telephony config for {number}. LiveKit Outbound Trunk not created.")
+                return None, "SIP credentials (sip_username/sip_password) are missing from configuration."
 
             trunk_info = lk_api.SIPOutboundTrunkInfo(
                 name=f"Outbound Trunk - {name} ({number})",
@@ -283,10 +303,10 @@ class LiveKitSipService:
             
         try:
             logger.info(f"Updating Inbound SIP Trunk {trunk_id} in LiveKit for number: {number}")
-            auth_password = sip_config.get("password", "")
-            auth_realm = sip_config.get("domain", "")
+            auth_password = safe_decrypt(sip_config.get("sip_password") or sip_config.get("password") or "")
+            auth_realm = sip_config.get("sip_domain") or sip_config.get("domain") or ""
             if auth_password and auth_realm:
-                auth_username = sip_config.get("authUsername", number)
+                auth_username = sip_config.get("sip_username") or sip_config.get("authUsername") or number
             else:
                 auth_username = ""
                 auth_password = ""

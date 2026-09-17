@@ -2,14 +2,19 @@
 FastAPI Routes for Telephony Configurations & Phone Numbers (Twilio & Vobiz).
 """
 
+import asyncio
 import json
 import uuid
 import logging
+import httpx
 from typing import Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
+from twilio.rest import Client
+from twilio.base.exceptions import TwilioRestException
 
 from api.middlewares.auth import get_current_user
 from api.utils.api_response import ApiResponse
+from api.utils.encryption import token_encryptor
 from api.modules.telephony_configs.schemas import (
     TelephonyProviderMetadataResponse,
     TelephonyConfigurationCreateRequest,
@@ -111,10 +116,231 @@ def get_scoped_client_id(current_user: Dict[str, Any]) -> Optional[str]:
     return current_user.get("client_id")
 
 
+def safe_decrypt(token: Optional[str]) -> str:
+    if not token:
+        return ""
+    try:
+        return token_encryptor.decrypt(token)
+    except Exception:
+        return str(token)
+
+
 @router.get("/metadata")
 async def get_telephony_providers_metadata(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Return provider metadata fields for Twilio and Vobiz ONLY."""
     return ApiResponse.success(data={"providers": [TWILIO_METADATA, VOBIZ_METADATA]})
+
+
+def _sync_provision_twilio_user_sip_trunk(
+    provider: str,
+    credentials: Dict[str, Any],
+    existing_credentials: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Synchronous auto-provisioning flow using official Twilio Python SDK.
+    
+    1. Using user's account_sid + auth_token, find (by TK... SID) or create Elastic SIP Trunk.
+    2. Ensure trunk has a unique Termination SIP URI / domain (sip_domain).
+    3. Find (by CL... SID) or create Credential List (CL...).
+    4. Verify/Create SIP username & password credentials.
+    5. Verify/Attach Credential List to Elastic SIP Trunk.
+    6. Encrypt auth_token and sip_password before returning for DB storage.
+    """
+    if provider != "twilio":
+        return credentials
+
+    if not credentials and not existing_credentials:
+        return credentials
+
+    existing_credentials = existing_credentials or {}
+
+    account_sid = credentials.get("account_sid") or existing_credentials.get("account_sid")
+    raw_auth_token = credentials.get("auth_token") or existing_credentials.get("auth_token")
+
+    if not account_sid or not raw_auth_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Twilio integration requires both Account SID and Auth Token."
+        )
+
+    # Handle UI masked values "****"
+    if str(account_sid).startswith("****") and existing_credentials.get("account_sid"):
+        account_sid = existing_credentials.get("account_sid")
+    if str(raw_auth_token).startswith("****") and existing_credentials.get("auth_token"):
+        raw_auth_token = existing_credentials.get("auth_token")
+
+    plain_auth_token = safe_decrypt(raw_auth_token)
+
+    try:
+        client = Client(account_sid, plain_auth_token)
+
+        # 1. Find or Create Twilio Elastic SIP Trunk (TK...)
+        trunk_sid = credentials.get("twilio_trunk_sid") or existing_credentials.get("twilio_trunk_sid")
+        sip_domain = credentials.get("sip_domain") or existing_credentials.get("sip_domain")
+        trunk = None
+
+        if trunk_sid and isinstance(trunk_sid, str):
+            try:
+                trunk = client.trunking.v1.trunks(trunk_sid).fetch()
+                sip_domain = trunk.domain_name or sip_domain
+            except TwilioRestException as tre:
+                if tre.status in (401, 403) or tre.code in (20003, 20401):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Invalid Twilio Account SID or Auth Token. Authentication failed."
+                    )
+                trunk_sid = None
+                trunk = None
+
+        if not trunk_sid:
+            trunks_list = client.trunking.v1.trunks.list(limit=50)
+            for t in trunks_list:
+                if t.friendly_name == "LiveKit-SIP-Trunk":
+                    trunk = t
+                    trunk_sid = t.sid
+                    sip_domain = t.domain_name or sip_domain
+                    break
+
+        if not trunk_sid or not trunk:
+            trunk = client.trunking.v1.trunks.create(friendly_name="LiveKit-SIP-Trunk")
+            trunk_sid = trunk.sid
+            sip_domain = trunk.domain_name
+
+        trunk_sid_str = str(trunk_sid)
+
+        # 2. Ensure unique Termination SIP URI / domain
+        if not sip_domain or not sip_domain.strip():
+            desired_domain = f"42v-{uuid.uuid4().hex[:8]}.pstn.twilio.com"
+            updated_trunk = client.trunking.v1.trunks(trunk_sid_str).update(domain_name=desired_domain)
+            sip_domain = updated_trunk.domain_name or desired_domain
+
+        # 3. Find or Create Credential List (CL...)
+        cl_sid = credentials.get("sip_credential_list_sid") or existing_credentials.get("sip_credential_list_sid")
+        cl = None
+
+        if cl_sid and isinstance(cl_sid, str):
+            try:
+                cl = client.sip.credential_lists(cl_sid).fetch()
+            except TwilioRestException as tre:
+                if tre.status in (401, 403) or tre.code in (20003, 20401):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Invalid Twilio Account SID or Auth Token. Authentication failed."
+                    )
+                cl_sid = None
+                cl = None
+
+        if not cl_sid:
+            cl_list = client.sip.credential_lists.list(limit=50)
+            for item in cl_list:
+                if item.friendly_name and item.friendly_name.startswith("LiveKit-CL"):
+                    cl = item
+                    cl_sid = item.sid
+                    break
+
+        if not cl_sid or not cl:
+            cl_friendly_name = f"LiveKit-CL-{uuid.uuid4().hex[:6]}"
+            cl = client.sip.credential_lists.create(friendly_name=cl_friendly_name)
+            cl_sid = cl.sid
+
+        cl_sid_str = str(cl_sid)
+
+        # 4. Create or reuse SIP username & password credentials
+        sip_username = credentials.get("sip_username") or existing_credentials.get("sip_username")
+        raw_sip_pass = credentials.get("sip_password") or existing_credentials.get("sip_password")
+
+        if str(sip_username).startswith("****") and existing_credentials.get("sip_username"):
+            sip_username = existing_credentials.get("sip_username")
+        if str(raw_sip_pass).startswith("****") and existing_credentials.get("sip_password"):
+            raw_sip_pass = existing_credentials.get("sip_password")
+
+        plain_sip_password = safe_decrypt(raw_sip_pass) if raw_sip_pass else None
+
+        cred_exists = False
+        if sip_username and plain_sip_password:
+            existing_creds = client.sip.credential_lists(cl_sid_str).credentials.list(limit=50)
+            for c in existing_creds:
+                if c.username == sip_username:
+                    cred_exists = True
+                    break
+
+        if not cred_exists or not sip_username or not plain_sip_password:
+            if not sip_username:
+                sip_username = f"lk_{uuid.uuid4().hex[:10]}"
+            if not plain_sip_password:
+                plain_sip_password = f"P@ss-{uuid.uuid4().hex[:10]}A!1"
+
+            client.sip.credential_lists(cl_sid_str).credentials.create(
+                username=sip_username,
+                password=plain_sip_password
+            )
+
+        # 5. Attach Credential List to Elastic SIP Trunk if not already attached
+        assoc_exists = False
+        assoc_list = client.trunking.v1.trunks(trunk_sid_str).credentials_lists.list(limit=50)
+        for a in assoc_list:
+            if a.sid == cl_sid_str:
+                assoc_exists = True
+                break
+
+        if not assoc_exists:
+            client.trunking.v1.trunks(trunk_sid_str).credentials_lists.create(credential_list_sid=cl_sid_str)
+
+        # 6. Store and encrypt credentials
+        res_creds = dict(credentials)
+        res_creds["account_sid"] = account_sid
+        res_creds["auth_token"] = token_encryptor.encrypt(plain_auth_token)
+        res_creds["twilio_trunk_sid"] = trunk_sid
+        res_creds["sip_domain"] = sip_domain
+        res_creds["sip_credential_list_sid"] = cl_sid
+        res_creds["sip_username"] = sip_username
+        res_creds["sip_password"] = token_encryptor.encrypt(plain_sip_password)
+
+        logger.info(f"Successfully auto-provisioned Twilio Elastic SIP Trunk '{trunk_sid}' using Twilio SDK for Account '{account_sid}' with domain '{sip_domain}' and Credential List '{cl_sid}'.")
+        return res_creds
+
+    except HTTPException:
+        raise
+    except TwilioRestException as tre:
+        logger.error(f"TwilioRestException during SIP provisioning: code={tre.code}, status={tre.status}, msg={tre.msg}")
+        if tre.status in (401, 403) or tre.code in (20003, 20401):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid Twilio Account SID or Auth Token. Authentication failed."
+            )
+        elif tre.status >= 500:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Twilio API service is currently unavailable. Please try again later."
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Twilio SIP provisioning failed: {tre.msg}"
+            )
+    except Exception as err:
+        logger.error(f"Twilio SDK SIP provisioning internal error: {err}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Twilio SIP provisioning failed: {str(err)}"
+        )
+
+
+async def provision_twilio_user_sip_trunk(
+    provider: str,
+    credentials: Dict[str, Any],
+    existing_credentials: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Async wrapper executing Twilio SDK provisioning in a thread pool using asyncio.to_thread.
+    """
+    if provider != "twilio":
+        return credentials
+
+    if not credentials and not existing_credentials:
+        return credentials
+
+    return await asyncio.to_thread(_sync_provision_twilio_user_sip_trunk, provider, credentials, existing_credentials)
 
 
 @router.get("")
@@ -138,6 +364,9 @@ async def create_telephony_configuration(
         )
     config_data = dict(req.config)
     config_data.pop("provider", None)
+
+    # Auto-provision per-user Twilio SIP credentials & Trunk association
+    config_data = await provision_twilio_user_sip_trunk(provider, config_data)
 
     created = await db_service.create_telephony_configuration(
         name=req.name,
@@ -169,14 +398,25 @@ async def update_telephony_configuration(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     client_id = get_scoped_client_id(current_user)
-    config_data = dict(req.config) if req.config else None
-    if config_data:
-        config_data.pop("provider", None)
+    existing = await db_service.get_telephony_configuration(config_id, client_id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Configuration not found")
+
+    existing_raw = existing.get("raw_credentials") or {}
+    config_data = dict(req.config) if req.config else dict(existing_raw)
+    provider = config_data.pop("provider", None) or existing.get("provider") or "twilio"
+
+    merged_data = dict(existing_raw)
+    for k, v in config_data.items():
+        if not str(v).startswith("****"):
+            merged_data[k] = v
+
+    merged_data = await provision_twilio_user_sip_trunk(provider, merged_data, existing_credentials=existing_raw)
 
     updated = await db_service.update_telephony_configuration(
         config_id=config_id,
         name=req.name,
-        credentials=config_data,
+        credentials=merged_data,
         client_id=client_id
     )
     if not updated:
@@ -475,11 +715,13 @@ async def initiate_call(
             sip_req = lk_api.CreateSIPParticipantRequest(
                 sip_trunk_id=sip_trunk_id,
                 sip_call_to=dest_number,
+                sip_number=from_number or settings.twilio_phone_number,
                 room_name=room_name,
                 participant_identity=f"sip-{dest_number}",
                 participant_name=dest_number,
                 participant_metadata=metadata_payload,
                 play_ringtone=True,
+                wait_until_answered=True,
             )
             res = await lk.sip.create_sip_participant(sip_req)
             await lk.aclose()
