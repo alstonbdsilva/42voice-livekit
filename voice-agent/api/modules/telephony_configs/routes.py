@@ -334,6 +334,7 @@ async def initiate_call(
 
     # 2. Fetch caller ID phone number
     from_number = None
+    phone_obj = None
     if config:
         numbers = await db_service.list_phone_numbers(config["id"])
         if req.from_phone_number_id:
