@@ -14,8 +14,8 @@ if [ "$1" = "backend" ]; then
     exec uvicorn main:app --host 0.0.0.0 --port 8000 --workers ${FASTAPI_WORKERS:-2}
 
 elif [ "$1" = "worker" ]; then
-    echo "[Worker] Starting LiveKit Voice Agent Worker..."
-    exec python agent.py dev
+    echo "[Worker] Starting LiveKit Voice Agent Worker in production mode..."
+    exec python agent.py start
 
 else
     exec "$@"

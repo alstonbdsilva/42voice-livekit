@@ -5,6 +5,7 @@ Listens for SIP room creation and manages the AI audio pipeline.
 import asyncio
 import logging
 import sys
+import time
 import warnings
 from typing import Dict, Any, Optional
 from urllib.parse import urlparse
@@ -748,16 +749,23 @@ async def register_call_with_backend(agent, started_at, ended_at):
 
 def prewarm(proc: JobProcess):
     """Preload VAD model to reduce startup time."""
+    t0 = time.perf_counter()
     proc.userdata["vad"] = silero.VAD.load()
+    logger.info(f"[CALL_TIMING] prewarm_vad_loaded elapsed={time.perf_counter() - t0:.3f}s")
 
 
 async def entrypoint(ctx: JobContext):
     """Entry point for LiveKit agent jobs."""
+    t_start = time.perf_counter()
     settings = get_settings()
     room_name = ctx.room.name
+    job_id = getattr(getattr(ctx, 'job', None), 'id', room_name)
+    logger.info(f"[CALL_TIMING] job={job_id} stage=T6_agent_entrypoint_started room={room_name} elapsed=0.000s")
     
+    t_conn_start = time.perf_counter()
     logger.info(f"Connecting to room {room_name}")
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+    logger.info(f"[CALL_TIMING] job={job_id} stage=room_connect_done total_elapsed={time.perf_counter() - t_start:.3f}s step={time.perf_counter() - t_conn_start:.3f}s")
     
     shutdown_event = asyncio.Event()
     
@@ -773,20 +781,23 @@ async def entrypoint(ctx: JobContext):
     ctx.add_shutdown_callback(on_shutdown)
     
     # Initialize services
+    t_imp = time.perf_counter()
     from session_manager import SessionManager
     from agents.booking_agent import BookingAgent
     from agents.sales_agent import SalesAgent
     from agents.support_agent import SupportAgent
     from recording_service import recording_service
+    logger.info(f"[CALL_TIMING] job={job_id} stage=imports_done total_elapsed={time.perf_counter() - t_start:.3f}s step={time.perf_counter() - t_imp:.3f}s")
     
     # Wait for the first participant to connect
+    t_part_wait = time.perf_counter()
     try:
         participant = await ctx.wait_for_participant()
     except Exception as e:
         logger.warning(f"No participant connected to room {room_name}: {e}")
         return
 
-    logger.info(f"PARTICIPANT CONNECTED: {participant.identity}")
+    logger.info(f"[CALL_TIMING] job={job_id} stage=T7_participant_connected total_elapsed={time.perf_counter() - t_start:.3f}s wait_step={time.perf_counter() - t_part_wait:.3f}s participant={participant.identity}")
     
     # 1. Resolve the called phone number from SIP participant attributes
     backend_url = settings.backend_url
@@ -1225,7 +1236,9 @@ async def entrypoint(ctx: JobContext):
             
             agent._recording_task = asyncio.create_task(start_recording_task())
 
+        logger.info(f"[CALL_TIMING] job={job_id} stage=T11_AgentSession_starting total_elapsed={time.perf_counter() - t_start:.3f}s")
         await session.start(room=ctx.room, agent=agent)
+        logger.info(f"[CALL_TIMING] job={job_id} stage=T11_AgentSession_started total_elapsed={time.perf_counter() - t_start:.3f}s")
         logger.info("SESSION STARTED")
         await shutdown_event.wait()
     finally:
