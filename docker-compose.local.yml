@@ -23,6 +23,17 @@ services:
     networks:
       - app-network
 
+  sip:
+    image: livekit/sip:v1.1.0
+    restart: unless-stopped
+    network_mode: host
+    command: --config /etc/livekit-sip.yaml
+    volumes:
+      - ./voice-agent/livekit/sip.yaml:/etc/livekit-sip.yaml
+    depends_on:
+      - livekit
+      - redis
+
   backend:
     build:
       context: ./voice-agent
