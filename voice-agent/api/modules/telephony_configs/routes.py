@@ -48,6 +48,15 @@ TWILIO_METADATA = {
             "placeholder": "••••••••••••••••••••••••••••••••"
         },
         {
+            "name": "sip_trunk_id",
+            "label": "SIP Trunk ID (Optional)",
+            "type": "text",
+            "required": False,
+            "sensitive": False,
+            "description": "Optional LiveKit Outbound SIP Trunk ID (ST_...). Leave blank to use server TWILIO_SIP_TRUNK_ID",
+            "placeholder": "ST_..."
+        },
+        {
             "name": "amd_enabled",
             "label": "Answering Machine Detection (AMD)",
             "type": "boolean",
@@ -375,17 +384,30 @@ async def initiate_call(
                     logger.warning(f"Could not dispatch agent to room {room_name}: {dispatch_err}")
 
             # Initiate SIP Participant Outbound Call
-            sip_req = lk_api.CreateSIPParticipantRequest(
-                sip_call_to=dest_number,
-                room_name=room_name,
-                participant_identity=f"sip-{dest_number}",
-                participant_name=dest_number,
-                participant_metadata=metadata_payload,
-                play_ringtone=True,
+            raw_creds = config.get("raw_credentials") or {} if config else {}
+            sip_trunk_id = (
+                (phone_obj.get("lk_sip_trunk_id") if phone_obj else None)
+                or raw_creds.get("sip_trunk_id")
+                or raw_creds.get("twilio_sip_trunk_id")
+                or settings.twilio_sip_trunk_id
             )
-            res = await lk.sip.create_sip_participant(sip_req)
-            await lk.aclose()
-            return ApiResponse.success(message=f"Call initiated to {dest_number} with agent '{agent_name}' (Participant ID: {res.participant_id})")
+            
+            if sip_trunk_id:
+                sip_req = lk_api.CreateSIPParticipantRequest(
+                    sip_trunk_id=sip_trunk_id,
+                    sip_call_to=dest_number,
+                    room_name=room_name,
+                    participant_identity=f"sip-{dest_number}",
+                    participant_name=dest_number,
+                    participant_metadata=metadata_payload,
+                    play_ringtone=True,
+                )
+                res = await lk.sip.create_sip_participant(sip_req)
+                await lk.aclose()
+                return ApiResponse.success(message=f"Call initiated to {dest_number} with agent '{agent_name}' via LiveKit SIP (Participant ID: {res.participant_id})")
+            else:
+                logger.info("No outbound LiveKit SIP Trunk ID configured (TWILIO_SIP_TRUNK_ID or lk_sip_trunk_id). Attempting provider fallback...")
+                await lk.aclose()
         except Exception as lk_err:
             logger.warning(f"LiveKit SIP participant dispatch warning: {lk_err}")
 
