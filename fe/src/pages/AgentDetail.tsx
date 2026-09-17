@@ -361,6 +361,9 @@ export default function AgentDetail() {
       const currentConnectedId = connected ? connected.id : "none";
 
       if (selectedPhoneNumberId !== currentConnectedId) {
+        if (currentConnectedId && currentConnectedId !== "none") {
+          await PhoneNumberService.assignAgent(currentConnectedId, null);
+        }
         if (selectedPhoneNumberId && selectedPhoneNumberId !== "none") {
           await PhoneNumberService.assignAgent(selectedPhoneNumberId, id);
         }
