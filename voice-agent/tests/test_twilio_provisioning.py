@@ -452,6 +452,302 @@ class TestMultiUserIsolationAndTrunkAuth(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(len(outbound_call_args["auth_password"]) > 0)
 
 
+
+
+
+class TestPhoneNumberDeletionFlow(unittest.IsolatedAsyncioTestCase):
+
+    @patch("api.modules.telephony_configs.routes.db_service")
+    @patch("api.modules.telephony_configs.routes.livekit_sip_service")
+    @patch("api.modules.telephony_configs.routes.cleanup_twilio_phone_number_routing")
+    async def test_normal_deletion_order(self, mock_twilio_cleanup, mock_lk_service, mock_db_service):
+        """Test 1 - Normal deletion executes in exact order and cleans all phone-specific resources."""
+        from api.modules.telephony_configs.routes import delete_phone_number
+
+        mock_user = {"client_id": "client_user_a"}
+        mock_db_service.get_telephony_configuration = unittest.mock.AsyncMock(return_value={
+            "id": "cfg_1",
+            "provider": "twilio",
+            "raw_credentials": {
+                "account_sid": "AC_user_a",
+                "auth_token": "token_a",
+                "twilio_trunk_sid": "TK_user_a",
+                "phone_number_sids": {"+111111111": "PN_111"}
+            }
+        })
+        mock_db_service.list_phone_numbers = unittest.mock.AsyncMock(return_value=[{
+            "id": "phone_1",
+            "address": "+111111111",
+            "lk_sip_dispatch_rule_id": "DR_111",
+            "lk_sip_trunk_id": "ST_in_111",
+            "lk_outbound_sip_trunk_id": "ST_out_111"
+        }])
+
+        call_order = []
+        mock_lk_service.delete_dispatch_rule = unittest.mock.AsyncMock(side_effect=lambda dr_id: call_order.append(f"delete_dispatch:{dr_id}"))
+        mock_lk_service.delete_trunk = unittest.mock.AsyncMock(side_effect=lambda st_id: call_order.append(f"delete_trunk:{st_id}"))
+        mock_twilio_cleanup.side_effect = lambda *args: call_order.append("disassociate_twilio_pn")
+        mock_db_service.delete_phone_number = unittest.mock.AsyncMock(side_effect=lambda p_id, c_id: call_order.append("delete_db_record"))
+        mock_db_service.update_telephony_configuration = unittest.mock.AsyncMock()
+
+        res = await delete_phone_number(config_id="cfg_1", phone_number_id="phone_1", current_user=mock_user)
+
+        self.assertEqual(call_order, [
+            "delete_dispatch:DR_111",
+            "delete_trunk:ST_in_111",
+            "delete_trunk:ST_out_111",
+            "disassociate_twilio_pn",
+            "delete_db_record"
+        ])
+
+    @patch("api.modules.telephony_configs.routes.Client")
+    def test_shared_twilio_resources_preserved(self, mock_client_cls):
+        """Test 2 - Deleting one phone number preserves shared Twilio TK, CL, OU, and credentials."""
+        from api.modules.telephony_configs.routes import _sync_cleanup_twilio_phone_number_routing
+
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+
+        pn_mock = MagicMock(sid="PN_phone_a", trunk_sid="TK_shared")
+        mock_client.incoming_phone_numbers.return_value.fetch.return_value = pn_mock
+
+        creds = {
+            "account_sid": "AC_user_shared",
+            "auth_token": "token_shared",
+            "twilio_trunk_sid": "TK_shared",
+            "sip_credential_list_sid": "CL_shared",
+            "twilio_origination_url_sid": "OU_shared",
+            "sip_username": "lk_user_shared",
+            "sip_password": "pass_shared"
+        }
+
+        _sync_cleanup_twilio_phone_number_routing(creds, "+111111111", persisted_pn_sid="PN_phone_a")
+
+        # Verify TK, CL, OU, and Account are NOT deleted on Twilio
+        mock_client.trunking.v1.trunks.return_value.delete.assert_not_called()
+        mock_client.sip.credential_lists.return_value.delete.assert_not_called()
+        mock_client.incoming_phone_numbers.return_value.delete.assert_not_called()
+
+        # Only disassociation from TK trunk was called
+        mock_client.trunking.v1.trunks.return_value.phone_numbers.return_value.delete.assert_called_once()
+
+    @patch("api.modules.telephony_configs.routes.Client")
+    def test_pn_already_disassociated(self, mock_client_cls):
+        """Test 3 - Phone number already disassociated (trunk_sid=None) succeeds without error."""
+        from api.modules.telephony_configs.routes import _sync_cleanup_twilio_phone_number_routing
+
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+
+        pn_mock = MagicMock(sid="PN_clean", trunk_sid=None)
+        mock_client.incoming_phone_numbers.return_value.fetch.return_value = pn_mock
+
+        creds = {"account_sid": "AC_acc", "auth_token": "token", "twilio_trunk_sid": "TK_my"}
+
+        _sync_cleanup_twilio_phone_number_routing(creds, "+111111111", persisted_pn_sid="PN_clean")
+
+        # Disassociate should be skipped
+        mock_client.trunking.v1.trunks.return_value.phone_numbers.return_value.delete.assert_not_called()
+
+    @patch("api.modules.telephony_configs.routes.Client")
+    def test_pn_belongs_to_another_tk_conflict(self, mock_client_cls):
+        """Test 4 - PN belonging to a different TK logs a conflict and refuses to modify unowned trunk."""
+        from api.modules.telephony_configs.routes import _sync_cleanup_twilio_phone_number_routing
+
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+
+        pn_mock = MagicMock(sid="PN_conflict", trunk_sid="TK_OTHER_USER")
+        mock_client.incoming_phone_numbers.return_value.fetch.return_value = pn_mock
+
+        creds = {"account_sid": "AC_acc", "auth_token": "token", "twilio_trunk_sid": "TK_MY_TRUNK"}
+
+        _sync_cleanup_twilio_phone_number_routing(creds, "+111111111", persisted_pn_sid="PN_conflict")
+
+        # Refuse to disassociate from TK_OTHER_USER
+        mock_client.trunking.v1.trunks.return_value.phone_numbers.return_value.delete.assert_not_called()
+
+    @patch("api.modules.telephony_configs.routes.db_service")
+    @patch("api.modules.telephony_configs.routes.livekit_sip_service")
+    @patch("api.modules.telephony_configs.routes.cleanup_twilio_phone_number_routing")
+    async def test_livekit_inbound_st_already_missing(self, mock_twilio_cleanup, mock_lk_service, mock_db_service):
+        """Test 5 - Missing inbound trunk log warning and continues deletion."""
+        from api.modules.telephony_configs.routes import delete_phone_number
+
+        mock_user = {"client_id": "client_user_a"}
+        mock_db_service.get_telephony_configuration = unittest.mock.AsyncMock(return_value={"id": "cfg_1", "provider": "vobiz", "raw_credentials": {}})
+        mock_db_service.list_phone_numbers = unittest.mock.AsyncMock(return_value=[{
+            "id": "phone_1",
+            "address": "+111111111",
+            "lk_sip_dispatch_rule_id": "DR_111",
+            "lk_sip_trunk_id": "ST_in_missing",
+            "lk_outbound_sip_trunk_id": None
+        }])
+        mock_db_service.delete_phone_number = unittest.mock.AsyncMock()
+
+        mock_lk_service.delete_trunk = unittest.mock.AsyncMock(side_effect=Exception("Trunk not found"))
+        mock_lk_service.delete_dispatch_rule = unittest.mock.AsyncMock()
+
+        res = await delete_phone_number(config_id="cfg_1", phone_number_id="phone_1", current_user=mock_user)
+        mock_db_service.delete_phone_number.assert_called_once_with("phone_1", "cfg_1")
+
+    @patch("api.modules.telephony_configs.routes.db_service")
+    @patch("api.modules.telephony_configs.routes.livekit_sip_service")
+    @patch("api.modules.telephony_configs.routes.cleanup_twilio_phone_number_routing")
+    async def test_dispatch_rule_already_missing(self, mock_twilio_cleanup, mock_lk_service, mock_db_service):
+        """Test 6 - Missing dispatch rule logs warning and continues deletion."""
+        from api.modules.telephony_configs.routes import delete_phone_number
+
+        mock_user = {"client_id": "client_user_a"}
+        mock_db_service.get_telephony_configuration = unittest.mock.AsyncMock(return_value={"id": "cfg_1", "provider": "vobiz", "raw_credentials": {}})
+        mock_db_service.list_phone_numbers = unittest.mock.AsyncMock(return_value=[{
+            "id": "phone_1",
+            "address": "+111111111",
+            "lk_sip_dispatch_rule_id": "DR_missing",
+            "lk_sip_trunk_id": None,
+            "lk_outbound_sip_trunk_id": None
+        }])
+        mock_db_service.delete_phone_number = unittest.mock.AsyncMock()
+
+        mock_lk_service.delete_dispatch_rule = unittest.mock.AsyncMock(side_effect=Exception("Rule not found"))
+        mock_lk_service.delete_trunk = unittest.mock.AsyncMock()
+
+        res = await delete_phone_number(config_id="cfg_1", phone_number_id="phone_1", current_user=mock_user)
+        mock_db_service.delete_phone_number.assert_called_once_with("phone_1", "cfg_1")
+
+    @patch("api.modules.telephony_configs.routes.db_service")
+    @patch("api.modules.telephony_configs.routes.livekit_sip_service")
+    @patch("api.modules.telephony_configs.routes.cleanup_twilio_phone_number_routing")
+    async def test_outbound_trunk_already_missing(self, mock_twilio_cleanup, mock_lk_service, mock_db_service):
+        """Test 7 - Missing outbound trunk logs warning and continues deletion."""
+        from api.modules.telephony_configs.routes import delete_phone_number
+
+        mock_user = {"client_id": "client_user_a"}
+        mock_db_service.get_telephony_configuration = unittest.mock.AsyncMock(return_value={"id": "cfg_1", "provider": "vobiz", "raw_credentials": {}})
+        mock_db_service.list_phone_numbers = unittest.mock.AsyncMock(return_value=[{
+            "id": "phone_1",
+            "address": "+111111111",
+            "lk_sip_dispatch_rule_id": None,
+            "lk_sip_trunk_id": None,
+            "lk_outbound_sip_trunk_id": "ST_out_missing"
+        }])
+        mock_db_service.delete_phone_number = unittest.mock.AsyncMock()
+
+        mock_lk_service.delete_trunk = unittest.mock.AsyncMock(side_effect=Exception("Outbound trunk missing"))
+        mock_lk_service.delete_dispatch_rule = unittest.mock.AsyncMock()
+
+        res = await delete_phone_number(config_id="cfg_1", phone_number_id="phone_1", current_user=mock_user)
+        mock_db_service.delete_phone_number.assert_called_once_with("phone_1", "cfg_1")
+
+    @patch("api.modules.telephony_configs.routes.db_service")
+    @patch("api.modules.telephony_configs.routes.livekit_sip_service")
+    @patch("api.modules.telephony_configs.routes.cleanup_twilio_phone_number_routing")
+    async def test_cross_user_deletion_attempt(self, mock_twilio_cleanup, mock_lk_service, mock_db_service):
+        """Test 8 - User B attempting to delete User A's phone number returns 404 without API or DB calls."""
+        from api.modules.telephony_configs.routes import delete_phone_number
+
+        mock_user_b = {"client_id": "client_user_b"}
+        # get_telephony_configuration scoped to User B returns None for User A's config
+        mock_db_service.get_telephony_configuration = unittest.mock.AsyncMock(return_value=None)
+        mock_db_service.delete_phone_number = unittest.mock.AsyncMock()
+        mock_lk_service.delete_dispatch_rule = unittest.mock.AsyncMock()
+        mock_lk_service.delete_trunk = unittest.mock.AsyncMock()
+
+        with self.assertRaises(HTTPException) as ctx:
+            await delete_phone_number(config_id="cfg_user_a", phone_number_id="phone_user_a", current_user=mock_user_b)
+
+        self.assertEqual(ctx.exception.status_code, 404)
+        mock_lk_service.delete_dispatch_rule.assert_not_called()
+        mock_lk_service.delete_trunk.assert_not_called()
+        mock_twilio_cleanup.assert_not_called()
+        mock_db_service.delete_phone_number.assert_not_called()
+
+    @patch("api.modules.telephony_configs.routes.db_service")
+    @patch("api.modules.telephony_configs.routes.livekit_sip_service")
+    @patch("api.modules.telephony_configs.routes.cleanup_twilio_phone_number_routing")
+    async def test_deleting_one_number_does_not_break_another_number(self, mock_twilio_cleanup, mock_lk_service, mock_db_service):
+        """Test 9 - Deleting Phone A leaves Phone B resources working and intact."""
+        from api.modules.telephony_configs.routes import delete_phone_number
+
+        mock_user = {"client_id": "client_user_a"}
+        raw_creds = {
+            "account_sid": "AC_shared",
+            "auth_token": "token_shared",
+            "twilio_trunk_sid": "TK_shared",
+            "phone_number_sids": {"+111111111": "PN_111", "+222222222": "PN_222"}
+        }
+        mock_db_service.get_telephony_configuration = unittest.mock.AsyncMock(return_value={
+            "id": "cfg_1",
+            "provider": "twilio",
+            "raw_credentials": raw_creds
+        })
+        mock_db_service.list_phone_numbers = unittest.mock.AsyncMock(return_value=[
+            {"id": "phone_a", "address": "+111111111", "lk_sip_dispatch_rule_id": "DR_a", "lk_sip_trunk_id": "ST_in_a", "lk_outbound_sip_trunk_id": "ST_out_a"},
+            {"id": "phone_b", "address": "+222222222", "lk_sip_dispatch_rule_id": "DR_b", "lk_sip_trunk_id": "ST_in_b", "lk_outbound_sip_trunk_id": "ST_out_b"}
+        ])
+        mock_db_service.delete_phone_number = unittest.mock.AsyncMock()
+        mock_db_service.update_telephony_configuration = unittest.mock.AsyncMock()
+        mock_lk_service.delete_dispatch_rule = unittest.mock.AsyncMock()
+        mock_lk_service.delete_trunk = unittest.mock.AsyncMock()
+
+        await delete_phone_number(config_id="cfg_1", phone_number_id="phone_a", current_user=mock_user)
+
+        # Verify only Phone A's resources were deleted from LiveKit
+        mock_lk_service.delete_dispatch_rule.assert_called_once_with("DR_a")
+        mock_lk_service.delete_trunk.assert_has_calls([unittest.mock.call("ST_in_a"), unittest.mock.call("ST_out_a")], any_order=True)
+
+        # Verify Phone B's SID remains in phone_number_sids
+        self.assertIn("+222222222", raw_creds["phone_number_sids"])
+        self.assertNotIn("+111111111", raw_creds["phone_number_sids"])
+
+    @patch("api.modules.phone_numbers.livekit_sip.lk_api")
+    async def test_delete_then_readd_same_number(self, mock_lk_api):
+        """Test 10 - Deleting a number and re-adding it results in fresh trunks without orphan accumulation."""
+        from api.modules.phone_numbers.livekit_sip import livekit_sip_service
+
+        sip_config = {
+            "provider": "twilio",
+            "sip_domain": "42v-test.pstn.twilio.com",
+            "sip_username": "lk_user_test",
+            "sip_password": "test_password_123"
+        }
+
+        with patch.object(livekit_sip_service, "_get_client") as mock_get_client:
+            mock_lk = MagicMock()
+            mock_get_client.return_value = mock_lk
+            mock_lk.sip.create_inbound_trunk = unittest.mock.AsyncMock(return_value=MagicMock(sip_trunk_id="ST_in_v1"))
+            mock_lk.sip.create_dispatch_rule = unittest.mock.AsyncMock(return_value=MagicMock(sip_dispatch_rule_id="DR_v1"))
+            mock_lk.sip.create_outbound_trunk = unittest.mock.AsyncMock(return_value=MagicMock(sip_trunk_id="ST_out_v1"))
+            mock_lk.sip.delete_trunk = unittest.mock.AsyncMock()
+            mock_lk.sip.delete_dispatch_rule = unittest.mock.AsyncMock()
+            mock_lk.aclose = unittest.mock.AsyncMock()
+
+            # 1. Provision initial number
+            in_1, dr_1, _ = await livekit_sip_service.provision_inbound_trunk("+111111111", "Line 1", sip_config)
+            out_1, _ = await livekit_sip_service.provision_outbound_trunk("+111111111", "Line 1", sip_config)
+
+            # 2. Delete number
+            await livekit_sip_service.delete_dispatch_rule(dr_1)
+            await livekit_sip_service.delete_trunk(in_1)
+            await livekit_sip_service.delete_trunk(out_1)
+
+            # Verify delete APIs were invoked
+            mock_lk.sip.delete_dispatch_rule.assert_called_once()
+            self.assertEqual(mock_lk.sip.delete_trunk.call_count, 2)
+
+            # 3. Re-add same number
+            mock_lk.sip.create_inbound_trunk.return_value = MagicMock(sip_trunk_id="ST_in_v2")
+            mock_lk.sip.create_dispatch_rule.return_value = MagicMock(sip_trunk_id="DR_v2")
+            mock_lk.sip.create_outbound_trunk.return_value = MagicMock(sip_trunk_id="ST_out_v2")
+
+            in_2, dr_2, _ = await livekit_sip_service.provision_inbound_trunk("+111111111", "Line 1", sip_config)
+            out_2, _ = await livekit_sip_service.provision_outbound_trunk("+111111111", "Line 1", sip_config)
+
+            self.assertNotEqual(in_1, in_2)
+            self.assertNotEqual(out_1, out_2)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

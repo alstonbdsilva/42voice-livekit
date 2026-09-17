@@ -243,9 +243,11 @@ class LiveKitSipService:
             return await self.delete_trunk(trunk_id)
         return True, None
 
-    async def delete_trunk(self, trunk_id: str) -> Tuple[bool, Optional[str]]:
+    async def delete_trunk(self, trunk_id: Optional[str]) -> Tuple[bool, Optional[str]]:
         """Delete a SIP Trunk directly from LiveKit."""
-        if trunk_id.startswith("mock-") or trunk_id.startswith("err-"):
+        if not trunk_id:
+            return True, None
+        if str(trunk_id).startswith("mock-") or str(trunk_id).startswith("err-"):
             logger.info(f"Delete bypassed for simulated trunk: {trunk_id}")
             return True, None
             
@@ -254,8 +256,8 @@ class LiveKitSipService:
             return True, "LiveKit client not initialized."
             
         try:
-            logger.info(f"Deleting LiveKit SIP Inbound Trunk: {trunk_id}")
-            del_trunk_req = lk_api.DeleteSIPTrunkRequest(sip_trunk_id=trunk_id)
+            logger.info(f"Deleting LiveKit SIP Trunk: {trunk_id}")
+            del_trunk_req = lk_api.DeleteSIPTrunkRequest(sip_trunk_id=str(trunk_id))
             await lk.sip.delete_trunk(del_trunk_req)
             await lk.aclose()
             return True, None
@@ -267,9 +269,11 @@ class LiveKitSipService:
                 pass
             return False, str(e)
 
-    async def delete_dispatch_rule(self, dispatch_rule_id: str) -> Tuple[bool, Optional[str]]:
+    async def delete_dispatch_rule(self, dispatch_rule_id: Optional[str]) -> Tuple[bool, Optional[str]]:
         """Delete a SIP Dispatch Rule directly from LiveKit."""
-        if dispatch_rule_id.startswith("mock-") or dispatch_rule_id.startswith("err-"):
+        if not dispatch_rule_id:
+            return True, None
+        if str(dispatch_rule_id).startswith("mock-") or str(dispatch_rule_id).startswith("err-"):
             logger.info(f"Delete bypassed for simulated dispatch rule: {dispatch_rule_id}")
             return True, None
             
@@ -279,7 +283,7 @@ class LiveKitSipService:
             
         try:
             logger.info(f"Deleting LiveKit SIP Dispatch Rule: {dispatch_rule_id}")
-            del_rule_req = lk_api.DeleteSIPDispatchRuleRequest(sip_dispatch_rule_id=dispatch_rule_id)
+            del_rule_req = lk_api.DeleteSIPDispatchRuleRequest(sip_dispatch_rule_id=str(dispatch_rule_id))
             await lk.sip.delete_dispatch_rule(del_rule_req)
             await lk.aclose()
             return True, None

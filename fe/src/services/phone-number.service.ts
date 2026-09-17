@@ -24,7 +24,7 @@ class PhoneNumberServiceClass {
   async getAll(status?: string): Promise<any[]> {
     const list: any[] = [];
 
-    // 1. Fetch phone numbers from Telephony Configurations API (/telephony-configs)
+    // 1. Fetch phone numbers exclusively from Telephony Configurations API (/telephony-configs)
     try {
       const configRes = await TelephonyConfigService.listConfigurations();
       const configs = configRes?.configurations || [];
@@ -57,28 +57,6 @@ class PhoneNumberServiceClass {
       }
     } catch (err) {
       console.error("Failed to load telephony configurations for phone numbers:", err);
-    }
-
-    // 2. Fallback / merge from legacy phone-numbers API
-    try {
-      const url = status 
-        ? `${API_ENDPOINTS.PHONE_NUMBERS}?status=${status}`
-        : API_ENDPOINTS.PHONE_NUMBERS;
-      const res = await api.get<any>(url);
-      const data = res?.data ?? res;
-      const legacyArr = Array.isArray(data) ? data : (data?.data ?? []);
-      for (const item of legacyArr) {
-        if (!list.some((existing) => existing.id === item.id || existing.number === item.number)) {
-          list.push({
-            ...item,
-            address: item.address || item.number,
-            number: item.number || item.address,
-            agentId: item.agentId || item.inbound_agent_id,
-          });
-        }
-      }
-    } catch (err) {
-      // Legacy API may be deprecated or unpopulated
     }
 
     return list;

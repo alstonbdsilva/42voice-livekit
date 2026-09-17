@@ -139,7 +139,8 @@ export default function AgentDetail() {
   const filteredNumbersForDropdown = phoneNumbers.filter((num) => {
     if (isSuperAdmin) return true;
     const numOwnerId = num.clientId || num.resellerId;
-    return numOwnerId && String(numOwnerId) === String(userOwnerId);
+    if (!numOwnerId) return true;
+    return String(numOwnerId) === String(userOwnerId);
   });
 
   const connectedNumbers = filteredNumbersForDropdown.filter(

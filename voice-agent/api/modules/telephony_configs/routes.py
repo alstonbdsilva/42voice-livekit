@@ -492,6 +492,96 @@ async def provision_twilio_inbound_number(
     return await asyncio.to_thread(_sync_provision_twilio_inbound_number, credentials, phone_number, origination_uri)
 
 
+def _sync_cleanup_twilio_phone_number_routing(
+    credentials: Dict[str, Any],
+    phone_address: str,
+    persisted_pn_sid: Optional[str] = None
+) -> None:
+    """
+    Synchronous helper to disassociate a Twilio phone number (PN...) from user's Elastic SIP Trunk (TK...).
+    Does NOT release/cancel/delete the actual purchased Twilio phone number.
+    Preserves shared TK..., CL..., and Origination URL resources.
+    """
+    account_sid = credentials.get("account_sid")
+    raw_auth_token = credentials.get("auth_token")
+    trunk_sid = credentials.get("twilio_trunk_sid")
+
+    if not account_sid or not raw_auth_token or not trunk_sid:
+        logger.info(f"Twilio credentials or trunk SID missing for number {phone_address}. Skipping Twilio disassociation.")
+        return
+
+    plain_auth_token = safe_decrypt(raw_auth_token)
+    from api.utils.phone import normalize_phone_number
+    clean_number = normalize_phone_number(phone_address)
+
+    try:
+        client = Client(account_sid, plain_auth_token)
+        trunk_sid_str = str(trunk_sid)
+
+        # 1. Resolve Twilio Phone Number SID (PN...) if not persisted
+        pn_sid = persisted_pn_sid
+        pn_obj = None
+
+        if pn_sid and isinstance(pn_sid, str):
+            try:
+                pn_obj = client.incoming_phone_numbers(pn_sid).fetch()
+            except TwilioRestException:
+                pn_sid = None
+
+        if not pn_sid or not pn_obj:
+            incoming = client.incoming_phone_numbers.list(phone_number=clean_number, limit=10)
+            if incoming:
+                pn_obj = incoming[0]
+                pn_sid = pn_obj.sid
+            else:
+                all_numbers = client.incoming_phone_numbers.list(limit=100)
+                for item in all_numbers:
+                    if item.phone_number and normalize_phone_number(item.phone_number) == clean_number:
+                        pn_obj = item
+                        pn_sid = item.sid
+                        break
+
+        if not pn_sid or not pn_obj:
+            logger.info(f"Phone number '{phone_address}' not found in user's Twilio account '{account_sid}'. Disassociation skipped.")
+            return
+
+        pn_sid_str: str = str(pn_sid)
+        current_trunk_sid = getattr(pn_obj, "trunk_sid", None)
+
+        # 2. Check trunk association status
+        if not current_trunk_sid:
+            logger.info(f"Phone number {phone_address} ({pn_sid_str}) has no trunk associated. Disassociation skipped.")
+            return
+
+        if str(current_trunk_sid) != trunk_sid_str:
+            logger.warning(
+                f"Conflict: Phone number {phone_address} ({pn_sid_str}) is assigned to trunk '{current_trunk_sid}', "
+                f"not user's trunk '{trunk_sid_str}'. Refusing to disassociate from un-owned trunk."
+            )
+            return
+
+        # 3. Disassociate PN... from user's TK... trunk using Twilio SDK (does NOT delete incoming phone number)
+        try:
+            client.trunking.v1.trunks(trunk_sid_str).phone_numbers(pn_sid_str).delete()
+            logger.info(f"Successfully disassociated phone number {phone_address} ({pn_sid_str}) from trunk {trunk_sid_str}.")
+        except TwilioRestException as tre:
+            if tre.status == 404 or tre.code == 20404 or "not found" in str(tre.msg).lower():
+                logger.info(f"Phone number {pn_sid_str} was already disassociated from trunk {trunk_sid_str}.")
+            else:
+                logger.error(f"Error disassociating phone number {pn_sid_str} from trunk {trunk_sid_str}: {tre.msg}")
+
+    except Exception as err:
+        logger.error(f"Twilio phone number cleanup error for {phone_address}: {err}", exc_info=True)
+
+
+async def cleanup_twilio_phone_number_routing(
+    credentials: Dict[str, Any],
+    phone_address: str,
+    persisted_pn_sid: Optional[str] = None
+) -> None:
+    await asyncio.to_thread(_sync_cleanup_twilio_phone_number_routing, credentials, phone_address, persisted_pn_sid)
+
+
 @router.get("")
 async def list_telephony_configurations(current_user: Dict[str, Any] = Depends(get_current_user)):
     client_id = get_scoped_client_id(current_user)
@@ -769,25 +859,62 @@ async def delete_phone_number(
     client_id = get_scoped_client_id(current_user)
     config = await db_service.get_telephony_configuration(config_id, client_id)
     if not config:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Configuration not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Phone number not found")
 
     numbers = await db_service.list_phone_numbers(config_id)
     phone_obj = next((n for n in numbers if n["id"] == phone_number_id), None)
-    if phone_obj:
-        inbound_trunk = phone_obj.get("lk_sip_trunk_id")
-        outbound_trunk = phone_obj.get("lk_outbound_sip_trunk_id")
-        dispatch_rule = phone_obj.get("lk_sip_dispatch_rule_id")
+    if not phone_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Phone number not found")
 
-        if inbound_trunk or dispatch_rule:
-            await livekit_sip_service.deprovision_inbound_trunk(
-                trunk_id=inbound_trunk,
-                dispatch_rule_id=dispatch_rule
-            )
-        if outbound_trunk:
+    logger.info(
+        f"Initiating phone number deletion: phone_id={phone_number_id}, config_id={config_id}, client_id={client_id}"
+    )
+
+    # 1. Delete LiveKit dispatch rule
+    dispatch_rule = phone_obj.get("lk_sip_dispatch_rule_id")
+    if dispatch_rule:
+        try:
+            await livekit_sip_service.delete_dispatch_rule(dispatch_rule)
+        except Exception as err:
+            logger.warning(f"Warning/Error deleting LiveKit dispatch rule '{dispatch_rule}': {err}")
+
+    # 2. Delete LiveKit inbound trunk
+    inbound_trunk = phone_obj.get("lk_sip_trunk_id")
+    if inbound_trunk:
+        try:
+            await livekit_sip_service.delete_trunk(inbound_trunk)
+        except Exception as err:
+            logger.warning(f"Warning/Error deleting LiveKit inbound trunk '{inbound_trunk}': {err}")
+
+    # 3. Delete LiveKit outbound trunk
+    outbound_trunk = phone_obj.get("lk_outbound_sip_trunk_id")
+    if outbound_trunk:
+        try:
             await livekit_sip_service.delete_trunk(outbound_trunk)
+        except Exception as err:
+            logger.warning(f"Warning/Error deleting LiveKit outbound trunk '{outbound_trunk}': {err}")
 
+    # 4. Disassociate Twilio PN from user's TK
+    provider = config.get("provider", "twilio")
+    raw_creds = config.get("raw_credentials") or {}
+    phone_address = phone_obj.get("address")
+
+    if provider == "twilio" and phone_address:
+        pn_sids = raw_creds.get("phone_number_sids") or {}
+        persisted_pn_sid = pn_sids.get(phone_address) if isinstance(pn_sids, dict) else None
+        await cleanup_twilio_phone_number_routing(raw_creds, phone_address, persisted_pn_sid)
+
+        # 5. Clear phone-number-specific metadata / IDs
+        if isinstance(pn_sids, dict) and phone_address in pn_sids:
+            del pn_sids[phone_address]
+            raw_creds["phone_number_sids"] = pn_sids
+            await db_service.update_telephony_configuration(config_id, credentials=raw_creds, client_id=client_id)
+
+    # 6. Delete DB record
     await db_service.delete_phone_number(phone_number_id, config_id)
+    logger.info(f"Successfully deleted phone number {phone_number_id} ({phone_address})")
     return ApiResponse.success(message="Phone number deleted")
+
 
 
 @router.post("/{config_id}/phone-numbers/{phone_number_id}/set-default-caller")
