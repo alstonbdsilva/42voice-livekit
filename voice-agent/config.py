@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     livekit_api_key: str = Field(default="devkey", validation_alias="LIVEKIT_API_KEY")
     livekit_api_secret: str = Field(default="secret", validation_alias="LIVEKIT_API_SECRET")
     livekit_agent_name: str = Field(default="inbound-agent", validation_alias="LIVEKIT_AGENT_NAME")
+    livekit_sip_public_uri: Optional[str] = Field(default=None, validation_alias="LIVEKIT_SIP_PUBLIC_URI")
     
     # Twilio SIP Configuration
     twilio_sip_username: Optional[str] = Field(default=None, validation_alias="TWILIO_SIP_USERNAME")

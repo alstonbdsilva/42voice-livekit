@@ -68,15 +68,10 @@ class LiveKitSipService:
         try:
             # 1. Create Inbound Trunk
             logger.info(f"Registering Inbound SIP Trunk in LiveKit for number: {number}")
-            auth_password = safe_decrypt(sip_config.get("sip_password") or sip_config.get("password") or "")
-            auth_realm = sip_config.get("sip_domain") or sip_config.get("domain") or ""
-            if auth_password and auth_realm:
-                auth_username = sip_config.get("sip_username") or sip_config.get("authUsername") or number
-            else:
-                auth_username = ""
-                auth_password = ""
-                auth_realm = ""
-            
+            raw_domain = sip_config.get("sip_domain") or sip_config.get("domain") or ""
+            provider = sip_config.get("provider") or ""
+            is_twilio = (provider == "twilio") or ("pstn.twilio.com" in str(raw_domain).lower())
+
             # Format number to remove spaces/symbols for standard registration
             clean_number = normalize_phone_number(number)
             
@@ -86,7 +81,6 @@ class LiveKitSipService:
                 no_plus = clean_number[1:]
                 if no_plus not in numbers_list:
                     numbers_list.append(no_plus)
-                # Add local NZ/AU zero-prefix fallback if country code is +64 or +61
                 if clean_number.startswith("+64") and len(clean_number) > 3:
                     local_nz = "0" + clean_number[3:]
                     if local_nz not in numbers_list:
@@ -95,14 +89,29 @@ class LiveKitSipService:
                     local_au = "0" + clean_number[3:]
                     if local_au not in numbers_list:
                         numbers_list.append(local_au)
-            
-            trunk_info = lk_api.SIPInboundTrunkInfo(
-                name=f"Trunk - {name} ({number})",
-                numbers=numbers_list,
-                auth_username=auth_username,
-                auth_password=auth_password,
-                auth_realm=auth_realm
-            )
+
+            if is_twilio:
+                trunk_info = lk_api.SIPInboundTrunkInfo(
+                    name=f"Trunk - {name} ({number})",
+                    numbers=numbers_list,
+                )
+            else:
+                auth_password = safe_decrypt(sip_config.get("sip_password") or sip_config.get("password") or "")
+                auth_realm = raw_domain
+                if auth_password and auth_realm:
+                    auth_username = sip_config.get("sip_username") or sip_config.get("authUsername") or number
+                else:
+                    auth_username = ""
+                    auth_password = ""
+                    auth_realm = ""
+
+                trunk_info = lk_api.SIPInboundTrunkInfo(
+                    name=f"Trunk - {name} ({number})",
+                    numbers=numbers_list,
+                    auth_username=auth_username,
+                    auth_password=auth_password,
+                    auth_realm=auth_realm
+                )
             
             trunk_id = None
             trunk_created = False
@@ -303,15 +312,10 @@ class LiveKitSipService:
             
         try:
             logger.info(f"Updating Inbound SIP Trunk {trunk_id} in LiveKit for number: {number}")
-            auth_password = safe_decrypt(sip_config.get("sip_password") or sip_config.get("password") or "")
-            auth_realm = sip_config.get("sip_domain") or sip_config.get("domain") or ""
-            if auth_password and auth_realm:
-                auth_username = sip_config.get("sip_username") or sip_config.get("authUsername") or number
-            else:
-                auth_username = ""
-                auth_password = ""
-                auth_realm = ""
-            
+            raw_domain = sip_config.get("sip_domain") or sip_config.get("domain") or ""
+            provider = sip_config.get("provider") or ""
+            is_twilio = (provider == "twilio") or ("pstn.twilio.com" in str(raw_domain).lower())
+
             clean_number = normalize_phone_number(number)
             
             numbers_list = [clean_number]
@@ -327,14 +331,29 @@ class LiveKitSipService:
                     local_au = "0" + clean_number[3:]
                     if local_au not in numbers_list:
                         numbers_list.append(local_au)
-                        
-            trunk_info = lk_api.SIPInboundTrunkInfo(
-                name=f"Trunk - {name} ({number})",
-                numbers=numbers_list,
-                auth_username=auth_username,
-                auth_password=auth_password,
-                auth_realm=auth_realm
-            )
+
+            if is_twilio:
+                trunk_info = lk_api.SIPInboundTrunkInfo(
+                    name=f"Trunk - {name} ({number})",
+                    numbers=numbers_list,
+                )
+            else:
+                auth_password = safe_decrypt(sip_config.get("sip_password") or sip_config.get("password") or "")
+                auth_realm = raw_domain
+                if auth_password and auth_realm:
+                    auth_username = sip_config.get("sip_username") or sip_config.get("authUsername") or number
+                else:
+                    auth_username = ""
+                    auth_password = ""
+                    auth_realm = ""
+
+                trunk_info = lk_api.SIPInboundTrunkInfo(
+                    name=f"Trunk - {name} ({number})",
+                    numbers=numbers_list,
+                    auth_username=auth_username,
+                    auth_password=auth_password,
+                    auth_realm=auth_realm
+                )
             
             await lk.sip.update_inbound_trunk(trunk_id, trunk_info)
             logger.info(f"Successfully updated LiveKit SIP Inbound Trunk: {trunk_id}")

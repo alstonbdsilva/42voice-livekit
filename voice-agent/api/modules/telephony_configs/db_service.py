@@ -222,12 +222,17 @@ async def list_phone_numbers(config_id: str) -> List[Dict[str, Any]]:
         ORDER BY p.created_at ASC
     """
     rows = await database.query(sql, [config_id])
+    config = await get_telephony_configuration(config_id)
+    raw_creds = config.get("raw_credentials") or {} if config else {}
+    pn_sids = raw_creds.get("phone_number_sids") or {}
+
     result = []
     for r in rows:
+        addr = r["address"]
         result.append({
             "id": str(r["id"]),
             "telephony_configuration_id": str(r["telephony_configuration_id"]),
-            "address": r["address"],
+            "address": addr,
             "address_type": r["address_type"],
             "country_code": r["country_code"],
             "label": r["label"],
@@ -238,6 +243,7 @@ async def list_phone_numbers(config_id: str) -> List[Dict[str, Any]]:
             "lk_sip_trunk_id": r.get("lk_sip_trunk_id"),
             "lk_outbound_sip_trunk_id": r.get("lk_outbound_sip_trunk_id"),
             "lk_sip_dispatch_rule_id": r.get("lk_sip_dispatch_rule_id"),
+            "twilio_phone_number_sid": pn_sids.get(addr),
             "created_at": r["created_at"].isoformat() if r["created_at"] else "",
             "updated_at": r["updated_at"].isoformat() if r["updated_at"] else ""
         })

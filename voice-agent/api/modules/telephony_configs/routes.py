@@ -343,6 +343,155 @@ async def provision_twilio_user_sip_trunk(
     return await asyncio.to_thread(_sync_provision_twilio_user_sip_trunk, provider, credentials, existing_credentials)
 
 
+def _sync_provision_twilio_inbound_number(
+    credentials: Dict[str, Any],
+    phone_number: str,
+    origination_uri: Optional[str]
+) -> Dict[str, Any]:
+    """
+    Synchronous helper to resolve PN... SID, associate PN with TK... trunk,
+    and ensure Origination URL is configured on TK... trunk.
+    """
+    if not origination_uri or not str(origination_uri).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="LIVEKIT_SIP_PUBLIC_URI is not configured on the server. Inbound SIP routing cannot be provisioned."
+        )
+
+    account_sid = credentials.get("account_sid")
+    raw_auth_token = credentials.get("auth_token")
+    trunk_sid = credentials.get("twilio_trunk_sid")
+
+    if not account_sid or not raw_auth_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Twilio integration requires Account SID and Auth Token."
+        )
+
+    if not trunk_sid:
+        credentials = _sync_provision_twilio_user_sip_trunk("twilio", credentials)
+        trunk_sid = credentials.get("twilio_trunk_sid")
+
+    if not trunk_sid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Twilio Elastic SIP Trunk could not be found or created."
+        )
+
+    plain_auth_token = safe_decrypt(raw_auth_token)
+    from api.utils.phone import normalize_phone_number
+    clean_number = normalize_phone_number(phone_number)
+
+    try:
+        client = Client(account_sid, plain_auth_token)
+        trunk_sid_str = str(trunk_sid)
+
+        # 1. Resolve Twilio Phone Number SID (PN...)
+        incoming_numbers = client.incoming_phone_numbers.list(phone_number=clean_number, limit=10)
+        pn_obj = None
+        if incoming_numbers:
+            pn_obj = incoming_numbers[0]
+        else:
+            all_numbers = client.incoming_phone_numbers.list(limit=100)
+            for item in all_numbers:
+                if item.phone_number and normalize_phone_number(item.phone_number) == clean_number:
+                    pn_obj = item
+                    break
+
+        if not pn_obj or not pn_obj.sid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Phone number '{phone_number}' not found in this Twilio account."
+            )
+
+        pn_sid_str: str = str(pn_obj.sid)
+
+        # 2. Protection against re-assigning phone numbers already associated with a different trunk
+        current_trunk_sid = getattr(pn_obj, "trunk_sid", None)
+        if current_trunk_sid and str(current_trunk_sid) != trunk_sid_str:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Phone number '{phone_number}' is already assigned to a different Twilio Elastic SIP Trunk ({current_trunk_sid}). Cannot reassign."
+            )
+
+        # 3. Associate PN... -> TK... trunk idempotently
+        trunk_numbers = client.trunking.v1.trunks(trunk_sid_str).phone_numbers.list(limit=100)
+        already_associated = False
+        for tn in trunk_numbers:
+            tn_num = getattr(tn, "phone_number", None)
+            if tn.sid == pn_sid_str or (tn_num and normalize_phone_number(str(tn_num)) == clean_number):
+                already_associated = True
+                break
+
+        if not already_associated:
+            try:
+                client.trunking.v1.trunks(trunk_sid_str).phone_numbers.create(phone_number_sid=pn_sid_str)
+                logger.info(f"Associated Twilio phone number {phone_number} ({pn_sid_str}) with trunk {trunk_sid_str}.")
+            except TwilioRestException as tre:
+                if "already" in str(tre.msg).lower() or tre.code in (21404, 21405):
+                    logger.info(f"Phone number {pn_sid_str} already associated with trunk {trunk_sid_str}.")
+                else:
+                    raise
+
+        # 4. Create / Reuse Origination URL on TK... trunk idempotently & retrieve OU... SID
+        orig_urls = client.trunking.v1.trunks(trunk_sid_str).origination_urls.list(limit=50)
+        existing_ou = next((ou for ou in orig_urls if ou.sip_url == origination_uri), None)
+
+        if existing_ou:
+            ou_sid = existing_ou.sid
+            logger.info(f"Reusing existing Origination URL '{origination_uri}' ({ou_sid}) on trunk {trunk_sid_str}.")
+        else:
+            new_ou = client.trunking.v1.trunks(trunk_sid_str).origination_urls.create(
+                friendly_name="42voice-LiveKit-Inbound",
+                sip_url=origination_uri,
+                priority=1,
+                weight=1,
+                enabled=True
+            )
+            ou_sid = new_ou.sid
+            logger.info(f"Created Origination URL '{origination_uri}' ({ou_sid}) on trunk {trunk_sid_str}.")
+
+        return {
+            "twilio_phone_number_sid": pn_sid_str,
+            "twilio_origination_url_sid": ou_sid,
+            "twilio_trunk_sid": trunk_sid_str
+        }
+
+    except HTTPException:
+        raise
+    except TwilioRestException as tre:
+        logger.error(f"TwilioRestException during inbound phone number provisioning: code={tre.code}, status={tre.status}, msg={tre.msg}")
+        if tre.status in (401, 403) or tre.code in (20003, 20401):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid Twilio Account SID or Auth Token."
+            )
+        elif tre.status >= 500:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Twilio API service is currently unavailable."
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Twilio inbound configuration failed: {tre.msg}"
+            )
+    except Exception as err:
+        logger.error(f"Inbound phone number provisioning error: {err}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Twilio inbound configuration failed: {str(err)}"
+        )
+
+
+async def provision_twilio_inbound_number(
+    credentials: Dict[str, Any],
+    phone_number: str,
+    origination_uri: Optional[str]
+) -> Dict[str, Any]:
+    return await asyncio.to_thread(_sync_provision_twilio_inbound_number, credentials, phone_number, origination_uri)
+
+
 @router.get("")
 async def list_telephony_configurations(current_user: Dict[str, Any] = Depends(get_current_user)):
     client_id = get_scoped_client_id(current_user)
@@ -474,20 +623,38 @@ async def add_phone_number(
     if not config:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Configuration not found")
 
+    provider = config.get("provider", "twilio")
     raw_creds = config.get("raw_credentials") or {}
+    sip_config_with_provider = {**raw_creds, "provider": provider}
 
-    # 1. Provision LiveKit SIP inbound trunk & dispatch rule
+    # 1. If provider is Twilio, provision Twilio inbound routing (PN association & Origination URL)
+    if provider == "twilio":
+        from config import get_settings
+        settings = get_settings()
+        origination_uri = settings.livekit_sip_public_uri
+        inbound_res = await provision_twilio_inbound_number(raw_creds, req.address, origination_uri)
+        if inbound_res:
+            raw_creds["twilio_origination_url_sid"] = inbound_res.get("twilio_origination_url_sid")
+            pn_sids = raw_creds.get("phone_number_sids")
+            if not isinstance(pn_sids, dict):
+                pn_sids = {}
+            pn_sids[req.address] = inbound_res.get("twilio_phone_number_sid")
+            raw_creds["phone_number_sids"] = pn_sids
+            await db_service.update_telephony_configuration(config_id, credentials=raw_creds, client_id=client_id)
+            sip_config_with_provider = {**raw_creds, "provider": provider}
+
+    # 2. Provision LiveKit SIP inbound trunk & dispatch rule
     trunk_id, dispatch_rule_id, _ = await livekit_sip_service.provision_inbound_trunk(
         number=req.address,
         name=req.label or f"{config.get('name', 'DID')} Line",
-        sip_config=raw_creds
+        sip_config=sip_config_with_provider
     )
 
-    # 2. Provision LiveKit SIP outbound trunk
+    # 3. Provision LiveKit SIP outbound trunk
     outbound_trunk_id, _ = await livekit_sip_service.provision_outbound_trunk(
         number=req.address,
         name=req.label or f"{config.get('name', 'DID')} Line",
-        sip_config=raw_creds
+        sip_config=sip_config_with_provider
     )
 
     number = await db_service.add_phone_number(
@@ -528,19 +695,37 @@ async def update_phone_number(
     # If address changed or trunk missing, provision/update
     target_address = req.address if req.address is not None else (existing_phone.get("address") if existing_phone else None)
     if target_address:
+        provider = config.get("provider", "twilio")
         raw_creds = config.get("raw_credentials") or {}
+        sip_config_with_provider = {**raw_creds, "provider": provider}
+
+        if provider == "twilio":
+            from config import get_settings
+            settings = get_settings()
+            origination_uri = settings.livekit_sip_public_uri
+            inbound_res = await provision_twilio_inbound_number(raw_creds, target_address, origination_uri)
+            if inbound_res:
+                raw_creds["twilio_origination_url_sid"] = inbound_res.get("twilio_origination_url_sid")
+                pn_sids = raw_creds.get("phone_number_sids")
+                if not isinstance(pn_sids, dict):
+                    pn_sids = {}
+                pn_sids[target_address] = inbound_res.get("twilio_phone_number_sid")
+                raw_creds["phone_number_sids"] = pn_sids
+                await db_service.update_telephony_configuration(config_id, credentials=raw_creds, client_id=client_id)
+                sip_config_with_provider = {**raw_creds, "provider": provider}
+
         if not trunk_id:
             trunk_id, dispatch_rule_id, _ = await livekit_sip_service.provision_inbound_trunk(
                 number=target_address,
                 name=req.label or f"{config.get('name', 'DID')} Line",
-                sip_config=raw_creds
+                sip_config=sip_config_with_provider
             )
         else:
             await livekit_sip_service.update_inbound_trunk(
                 trunk_id=trunk_id,
                 number=target_address,
                 name=req.label or f"{config.get('name', 'DID')} Line",
-                sip_config=raw_creds
+                sip_config=sip_config_with_provider
             )
             if dispatch_rule_id:
                 await livekit_sip_service.update_dispatch_rule(
@@ -554,7 +739,7 @@ async def update_phone_number(
             outbound_trunk_id, _ = await livekit_sip_service.provision_outbound_trunk(
                 number=target_address,
                 name=req.label or f"{config.get('name', 'DID')} Line",
-                sip_config=raw_creds
+                sip_config=sip_config_with_provider
             )
 
     updated = await db_service.update_phone_number(
