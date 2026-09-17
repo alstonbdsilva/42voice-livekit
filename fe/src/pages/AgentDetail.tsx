@@ -54,6 +54,7 @@ import {
 } from "lucide-react";
 import TriggerWebhookUrls from "@/components/webhook/TriggerWebhookUrls";
 import WebhookLogsTable from "@/components/webhook/WebhookLogsTable";
+import PhoneCallDialog from "@/components/telephony/PhoneCallDialog";
 
 
 
@@ -98,6 +99,7 @@ export default function AgentDetail() {
   const { user } = useAuth();
   const [a, setA] = useState<Agent | null>(null);
   const [activeTab, setActiveTab] = useState("basic");
+  const [phoneCallDialogOpen, setPhoneCallDialogOpen] = useState(false);
 
   const isAdmin = user?.role === "super_admin" || user?.role === "finance_admin";
   const isReseller = user?.role === "reseller";
@@ -407,7 +409,14 @@ export default function AgentDetail() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setPhoneCallDialogOpen(true)}
+            className="border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+          >
+            <PhoneCall className="w-4 h-4 mr-2 text-emerald-600" /> Phone call
+          </Button>
 
           {canEdit && (
             <Button type="button" disabled={savingDetails} onClick={() => handleSaveAllChanges()} className="min-w-[130px]">
@@ -1028,6 +1037,12 @@ export default function AgentDetail() {
 
 
       </Tabs>
+
+      <PhoneCallDialog
+        open={phoneCallDialogOpen}
+        onOpenChange={setPhoneCallDialogOpen}
+        agentId={id}
+      />
     </div>
   );
 }

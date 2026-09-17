@@ -38,7 +38,7 @@ const navItems: NavItem[] = [
   { to: "/recordings", label: "Recordings", icon: Mic, roles: [] },
   { to: "/messages", label: "Messages", icon: MessageSquare, roles: [] },
   { to: "/phone-numbers", label: "Phone Numbers", icon: Phone, roles: [] },
-  { to: "/telephony-configurations", label: "Telephony Configurations", icon: PhoneCall, roles: [] },
+  { to: "/telephony-configurations", label: "Telephony", icon: PhoneCall, roles: [] },
   { to: "/campaigns", label: "Campaigns", icon: Megaphone, roles: [] },
   { to: "/calendar", label: "Calendar", icon: Calendar, roles: [] },
   { to: "/tools", label: "Tools", icon: Wrench, roles: [] },
@@ -98,8 +98,8 @@ function Sidebar() {
                       <span>{it.label}</span>
                     </div>
                     <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-sm uppercase tracking-wider scale-90 origin-right transition-colors ${isActive
-                        ? "bg-zinc-800 text-zinc-300"
-                        : "bg-zinc-100 text-zinc-500"
+                      ? "bg-zinc-800 text-zinc-300"
+                      : "bg-zinc-100 text-zinc-500"
                       }`}>
                       Soon
                     </span>

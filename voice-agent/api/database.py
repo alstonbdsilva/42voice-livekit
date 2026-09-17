@@ -129,6 +129,48 @@ async def init_pool() -> None:
             except Exception as e:
                 logger.warning(f"Could not verify tools table: {e}")
 
+            # Self-healing migration for telephony_configurations table
+            try:
+                logger.info("Verifying telephony_configurations table exists...")
+                async with pool.acquire() as conn:
+                    await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS telephony_configurations (
+                        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                        name VARCHAR(255) NOT NULL,
+                        provider VARCHAR(50) NOT NULL,
+                        credentials JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        is_default_outbound BOOLEAN NOT NULL DEFAULT false,
+                        client_id UUID REFERENCES clients(id) ON DELETE CASCADE,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_telephony_configurations_client ON telephony_configurations(client_id);
+                    CREATE INDEX IF NOT EXISTS idx_telephony_configurations_provider ON telephony_configurations(provider);
+
+                    CREATE TABLE IF NOT EXISTS telephony_phone_numbers (
+                        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                        telephony_configuration_id UUID REFERENCES telephony_configurations(id) ON DELETE CASCADE,
+                        address VARCHAR(255) NOT NULL,
+                        address_type VARCHAR(50) NOT NULL DEFAULT 'pstn',
+                        country_code VARCHAR(10),
+                        label VARCHAR(255),
+                        is_active BOOLEAN NOT NULL DEFAULT true,
+                        is_default_caller_id BOOLEAN NOT NULL DEFAULT false,
+                        inbound_agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS country_code VARCHAR(10);
+                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS label VARCHAR(255);
+                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS address_type VARCHAR(50) DEFAULT 'pstn';
+                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true;
+                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS is_default_caller_id BOOLEAN DEFAULT false;
+                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS inbound_agent_id UUID REFERENCES agents(id) ON DELETE SET NULL;
+                    CREATE INDEX IF NOT EXISTS idx_telephony_phone_numbers_config ON telephony_phone_numbers(telephony_configuration_id);
+                    """)
+                logger.info("Verified telephony_configurations and telephony_phone_numbers tables.")
+            except Exception as e:
+                logger.warning(f"Could not verify telephony tables: {e}")
             # Self-healing migration for external_credentials table
             try:
                 logger.info("Verifying external_credentials table exists...")
