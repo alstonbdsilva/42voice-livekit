@@ -968,7 +968,7 @@ async def initiate_call(
         numbers = await db_service.list_phone_numbers(config["id"])
         if req.from_phone_number_id:
             phone_obj = next((n for n in numbers if n["id"] == req.from_phone_number_id), None)
-        else:
+        if not phone_obj:
             phone_obj = next((n for n in numbers if n.get("is_default_caller_id")), numbers[0] if numbers else None)
         if phone_obj:
             from_number = phone_obj.get("address")
