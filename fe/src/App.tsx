@@ -35,6 +35,7 @@ import Commissions from "@/pages/Commissions";
 import Plans from "@/pages/Plans";
 import PhoneNumbers from "@/pages/PhoneNumbers";
 import AddPhoneNumber from "@/pages/AddPhoneNumber";
+import TelephonyConfigurations from "@/pages/TelephonyConfigurations";
 import Campaigns from "@/pages/Campaigns";
 import CreateCampaign from "@/pages/CreateCampaign";
 import CampaignDetail from "@/pages/CampaignDetail";
@@ -74,6 +75,7 @@ export default function App() {
         <Route path="/messages" element={<Shell><Messages /></Shell>} />
         <Route path="/phone-numbers" element={<Shell><PhoneNumbers /></Shell>} />
         <Route path="/phone-numbers/add" element={<Shell><AddPhoneNumber /></Shell>} />
+        <Route path="/telephony-configurations" element={<Shell><TelephonyConfigurations /></Shell>} />
         <Route path="/campaigns" element={<Shell><Campaigns /></Shell>} />
         <Route path="/campaigns/new" element={<Shell><CreateCampaign /></Shell>} />
         <Route path="/campaigns/:id" element={<Shell><CampaignDetail /></Shell>} />

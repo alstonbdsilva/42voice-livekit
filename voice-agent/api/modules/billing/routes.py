@@ -164,7 +164,7 @@ async def process_successful_payment(
 @router.post("/buy-plan")
 async def buy_plan(req_body: BuyPlanRequest, request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     settings = get_settings()
-    origin = request.headers.get("origin") or "http://localhost:3000"
+    origin = request.headers.get("origin") or "http://localhost:3002"
     plan_id = req_body.planId
 
     # Find the plan

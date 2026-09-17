@@ -38,6 +38,7 @@ const navItems: NavItem[] = [
   { to: "/recordings", label: "Recordings", icon: Mic, roles: [] },
   { to: "/messages", label: "Messages", icon: MessageSquare, roles: [] },
   { to: "/phone-numbers", label: "Phone Numbers", icon: Phone, roles: [] },
+  { to: "/telephony-configurations", label: "Telephony Configurations", icon: PhoneCall, roles: [] },
   { to: "/campaigns", label: "Campaigns", icon: Megaphone, roles: [] },
   { to: "/calendar", label: "Calendar", icon: Calendar, roles: [] },
   { to: "/tools", label: "Tools", icon: Wrench, roles: [] },

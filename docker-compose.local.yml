@@ -68,7 +68,7 @@ services:
         REACT_APP_LIVEKIT_URL: ws://localhost:7880
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "3002:80"
     networks:
       - app-network
 
