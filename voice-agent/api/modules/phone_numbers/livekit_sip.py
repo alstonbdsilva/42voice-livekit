@@ -72,23 +72,14 @@ class LiveKitSipService:
             provider = sip_config.get("provider") or ""
             is_twilio = (provider == "twilio") or ("pstn.twilio.com" in str(raw_domain).lower())
 
-            # Format number to remove spaces/symbols for standard registration
+            # Format number to canonical E.164 for LiveKit inbound trunk matching
             clean_number = normalize_phone_number(number)
-            
-            # Format number variations to ensure it matches incoming carrier headers
+            if not clean_number or not clean_number.startswith("+"):
+                logger.error(f"Invalid E.164 phone number format: '{number}'")
+                return None, None, f"Invalid E.164 phone number format: '{number}'"
+
+            # LiveKit Inbound SIP Trunk receives strictly canonical E.164 number
             numbers_list = [clean_number]
-            if clean_number.startswith("+"):
-                no_plus = clean_number[1:]
-                if no_plus not in numbers_list:
-                    numbers_list.append(no_plus)
-                if clean_number.startswith("+64") and len(clean_number) > 3:
-                    local_nz = "0" + clean_number[3:]
-                    if local_nz not in numbers_list:
-                        numbers_list.append(local_nz)
-                elif clean_number.startswith("+61") and len(clean_number) > 3:
-                    local_au = "0" + clean_number[3:]
-                    if local_au not in numbers_list:
-                        numbers_list.append(local_au)
 
             if is_twilio:
                 trunk_info = lk_api.SIPInboundTrunkInfo(
@@ -321,20 +312,12 @@ class LiveKitSipService:
             is_twilio = (provider == "twilio") or ("pstn.twilio.com" in str(raw_domain).lower())
 
             clean_number = normalize_phone_number(number)
-            
+            if not clean_number or not clean_number.startswith("+"):
+                logger.error(f"Invalid E.164 phone number format: '{number}'")
+                return False, f"Invalid E.164 phone number format: '{number}'"
+
+            # LiveKit Inbound SIP Trunk receives strictly canonical E.164 number
             numbers_list = [clean_number]
-            if clean_number.startswith("+"):
-                no_plus = clean_number[1:]
-                if no_plus not in numbers_list:
-                    numbers_list.append(no_plus)
-                if clean_number.startswith("+64") and len(clean_number) > 3:
-                    local_nz = "0" + clean_number[3:]
-                    if local_nz not in numbers_list:
-                        numbers_list.append(local_nz)
-                elif clean_number.startswith("+61") and len(clean_number) > 3:
-                    local_au = "0" + clean_number[3:]
-                    if local_au not in numbers_list:
-                        numbers_list.append(local_au)
 
             if is_twilio:
                 trunk_info = lk_api.SIPInboundTrunkInfo(

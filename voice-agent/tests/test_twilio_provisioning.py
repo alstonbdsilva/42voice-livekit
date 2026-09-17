@@ -455,6 +455,104 @@ class TestMultiUserIsolationAndTrunkAuth(unittest.IsolatedAsyncioTestCase):
 
 
 
+
+
+
+class TestLiveKitInboundCanonicalE164Numbering(unittest.IsolatedAsyncioTestCase):
+
+    @patch("api.modules.phone_numbers.livekit_sip.lk_api")
+    async def test_nz_number_canonical_e164_only(self, mock_lk_api):
+        """Test 1 - NZ number +6498736772 generates numbers=['+6498736772'] only without aliases."""
+        from api.modules.phone_numbers.livekit_sip import livekit_sip_service
+
+        sip_config = {"provider": "twilio", "sip_domain": "42v-test.pstn.twilio.com"}
+
+        with patch.object(livekit_sip_service, "_get_client") as mock_get_client:
+            mock_lk = MagicMock()
+            mock_get_client.return_value = mock_lk
+            mock_lk.sip.create_inbound_trunk = unittest.mock.AsyncMock(return_value=MagicMock(sip_trunk_id="ST_nz"))
+            mock_lk.sip.create_dispatch_rule = unittest.mock.AsyncMock(return_value=MagicMock(sip_dispatch_rule_id="DR_nz"))
+            mock_lk.aclose = unittest.mock.AsyncMock()
+
+            await livekit_sip_service.provision_inbound_trunk("+6498736772", "NZ Line", sip_config)
+
+            inbound_info = mock_lk_api.SIPInboundTrunkInfo.call_args[1]
+            self.assertEqual(inbound_info["numbers"], ["+6498736772"])
+            self.assertNotIn("6498736772", inbound_info["numbers"])
+            self.assertNotIn("098736772", inbound_info["numbers"])
+
+    @patch("api.modules.phone_numbers.livekit_sip.lk_api")
+    async def test_india_number_canonical_e164_only(self, mock_lk_api):
+        """Test 2 - India number +919381408134 generates numbers=['+919381408134'] only."""
+        from api.modules.phone_numbers.livekit_sip import livekit_sip_service
+
+        sip_config = {"provider": "twilio", "sip_domain": "42v-test.pstn.twilio.com"}
+
+        with patch.object(livekit_sip_service, "_get_client") as mock_get_client:
+            mock_lk = MagicMock()
+            mock_get_client.return_value = mock_lk
+            mock_lk.sip.create_inbound_trunk = unittest.mock.AsyncMock(return_value=MagicMock(sip_trunk_id="ST_in"))
+            mock_lk.sip.create_dispatch_rule = unittest.mock.AsyncMock(return_value=MagicMock(sip_dispatch_rule_id="DR_in"))
+            mock_lk.aclose = unittest.mock.AsyncMock()
+
+            await livekit_sip_service.provision_inbound_trunk("+919381408134", "India Line", sip_config)
+
+            inbound_info = mock_lk_api.SIPInboundTrunkInfo.call_args[1]
+            self.assertEqual(inbound_info["numbers"], ["+919381408134"])
+
+    @patch("api.modules.phone_numbers.livekit_sip.lk_api")
+    async def test_twilio_inbound_trunk_has_no_auth(self, mock_lk_api):
+        """Test 3 - Twilio inbound trunk has no auth fields set."""
+        from api.modules.phone_numbers.livekit_sip import livekit_sip_service
+
+        sip_config = {"provider": "twilio", "sip_domain": "42v-test.pstn.twilio.com"}
+
+        with patch.object(livekit_sip_service, "_get_client") as mock_get_client:
+            mock_lk = MagicMock()
+            mock_get_client.return_value = mock_lk
+            mock_lk.sip.create_inbound_trunk = unittest.mock.AsyncMock(return_value=MagicMock(sip_trunk_id="ST_twilio"))
+            mock_lk.sip.create_dispatch_rule = unittest.mock.AsyncMock(return_value=MagicMock(sip_dispatch_rule_id="DR_twilio"))
+            mock_lk.aclose = unittest.mock.AsyncMock()
+
+            await livekit_sip_service.provision_inbound_trunk("+14155552671", "US Line", sip_config)
+
+            inbound_info = mock_lk_api.SIPInboundTrunkInfo.call_args[1]
+            self.assertNotIn("auth_username", inbound_info)
+            self.assertNotIn("auth_password", inbound_info)
+
+    @patch("api.modules.phone_numbers.livekit_sip.lk_api")
+    async def test_outbound_trunk_behavior_unchanged(self, mock_lk_api):
+        """Test 4 - Outbound trunk receives canonical number and digest auth credentials."""
+        from api.modules.phone_numbers.livekit_sip import livekit_sip_service
+
+        sip_config = {
+            "provider": "twilio",
+            "sip_domain": "42v-test.pstn.twilio.com",
+            "sip_username": "lk_user_test",
+            "sip_password": "test_password_123"
+        }
+
+        with patch.object(livekit_sip_service, "_get_client") as mock_get_client:
+            mock_lk = MagicMock()
+            mock_get_client.return_value = mock_lk
+            mock_lk.sip.create_outbound_trunk = unittest.mock.AsyncMock(return_value=MagicMock(sip_trunk_id="ST_outbound"))
+            mock_lk.aclose = unittest.mock.AsyncMock()
+
+            await livekit_sip_service.provision_outbound_trunk("+6498736772", "NZ Line", sip_config)
+
+            outbound_info = mock_lk_api.SIPOutboundTrunkInfo.call_args[1]
+            self.assertEqual(outbound_info["numbers"], ["+6498736772"])
+            self.assertEqual(outbound_info["auth_username"], "lk_user_test")
+
+    def test_lookup_helper_variants_preserved_for_other_uses(self):
+        """Test 7 - Verify get_phone_number_variants still returns aliases for general DB lookups."""
+        from api.utils.phone import get_phone_number_variants
+
+        variants = get_phone_number_variants("+6498736772")
+        self.assertIn("+6498736772", variants)
+        self.assertIn("6498736772", variants)
+
+
 class TestPhoneNumberDeletionFlow(unittest.IsolatedAsyncioTestCase):
 
     @patch("api.modules.telephony_configs.routes.db_service")
