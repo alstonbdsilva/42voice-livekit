@@ -152,9 +152,59 @@ class LiveKitSipService:
                 f"LiveKit SIP provisioning failed: {str(e)}"
             )
 
+    async def provision_outbound_trunk(
+        self,
+        number: str,
+        name: str,
+        sip_config: Dict[str, Any]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Provision a SIP Outbound Trunk in LiveKit.
+        
+        Args:
+            number: The phone number in E.164 format.
+            name: Friendly label for the trunk.
+            sip_config: Dictionary containing domain, username, password, etc.
+            
+        Returns:
+            A tuple of (outbound_trunk_id, warning_message).
+        """
+        lk = self._get_client()
+        clean_number = normalize_phone_number(number)
+        if not lk:
+            return f"mock-outbound-trunk-{clean_number.replace(' ', '')}", "LiveKit client not initialized. Generated mock outbound ID."
+            
+        try:
+            logger.info(f"Registering Outbound SIP Trunk in LiveKit for number: {number}")
+            auth_username = sip_config.get("auth_username") or sip_config.get("account_sid") or sip_config.get("username") or ""
+            auth_password = sip_config.get("auth_password") or sip_config.get("auth_token") or sip_config.get("password") or ""
+            address = sip_config.get("domain") or sip_config.get("sip_domain") or self.settings.twilio_sip_domain or "42voice.pstn.sydney.twilio.com"
+
+            trunk_info = lk_api.SIPOutboundTrunkInfo(
+                name=f"Outbound Trunk - {name} ({number})",
+                address=address,
+                numbers=[clean_number],
+                auth_username=auth_username,
+                auth_password=auth_password
+            )
+            
+            trunk_request = lk_api.CreateSIPOutboundTrunkRequest(trunk=trunk_info)
+            trunk_response = await lk.sip.create_outbound_trunk(trunk_request)
+            outbound_trunk_id = trunk_response.sip_trunk_id
+            logger.info(f"Successfully created LiveKit SIP Outbound Trunk: {outbound_trunk_id}")
+            await lk.aclose()
+            return outbound_trunk_id, None
+        except Exception as e:
+            logger.error(f"LiveKit SIP outbound trunk provisioning failed for {number}: {e}", exc_info=True)
+            try:
+                await lk.aclose()
+            except:
+                pass
+            return f"err-outbound-trunk-{clean_number.replace(' ', '')}", f"LiveKit SIP outbound trunk provisioning failed: {str(e)}"
+
     async def deprovision_inbound_trunk(
         self, 
-        trunk_id: str, 
+        trunk_id: Optional[str] = None, 
         dispatch_rule_id: Optional[str] = None
     ) -> Tuple[bool, Optional[str]]:
         """Delete a SIP Trunk and Dispatch Rule from LiveKit."""

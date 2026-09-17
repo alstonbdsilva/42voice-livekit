@@ -19,6 +19,7 @@ from api.modules.telephony_configs.schemas import (
     InitiateCallRequest,
 )
 from api.modules.telephony_configs import db_service
+from api.modules.phone_numbers.livekit_sip import livekit_sip_service
 
 router = APIRouter()
 logger = logging.getLogger("voice-agent.api.telephony_configs")
@@ -233,6 +234,22 @@ async def add_phone_number(
     if not config:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Configuration not found")
 
+    raw_creds = config.get("raw_credentials") or {}
+
+    # 1. Provision LiveKit SIP inbound trunk & dispatch rule
+    trunk_id, dispatch_rule_id, _ = await livekit_sip_service.provision_inbound_trunk(
+        number=req.address,
+        name=req.label or f"{config.get('name', 'DID')} Line",
+        sip_config=raw_creds
+    )
+
+    # 2. Provision LiveKit SIP outbound trunk
+    outbound_trunk_id, _ = await livekit_sip_service.provision_outbound_trunk(
+        number=req.address,
+        name=req.label or f"{config.get('name', 'DID')} Line",
+        sip_config=raw_creds
+    )
+
     number = await db_service.add_phone_number(
         config_id=config_id,
         address=req.address,
@@ -241,7 +258,10 @@ async def add_phone_number(
         label=req.label,
         is_active=req.is_active,
         is_default_caller_id=req.is_default_caller_id,
-        inbound_agent_id=req.inbound_agent_id
+        inbound_agent_id=req.inbound_agent_id,
+        lk_sip_trunk_id=trunk_id,
+        lk_outbound_sip_trunk_id=outbound_trunk_id,
+        lk_sip_dispatch_rule_id=dispatch_rule_id
     )
     return ApiResponse.success(status_code=status.HTTP_201_CREATED, message="Phone number added", data=number)
 
@@ -258,6 +278,45 @@ async def update_phone_number(
     if not config:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Configuration not found")
 
+    numbers = await db_service.list_phone_numbers(config_id)
+    existing_phone = next((n for n in numbers if n["id"] == phone_number_id), None)
+
+    trunk_id = existing_phone.get("lk_sip_trunk_id") if existing_phone else None
+    outbound_trunk_id = existing_phone.get("lk_outbound_sip_trunk_id") if existing_phone else None
+    dispatch_rule_id = existing_phone.get("lk_sip_dispatch_rule_id") if existing_phone else None
+
+    # If address changed or trunk missing, provision/update
+    target_address = req.address if req.address is not None else (existing_phone.get("address") if existing_phone else None)
+    if target_address:
+        raw_creds = config.get("raw_credentials") or {}
+        if not trunk_id:
+            trunk_id, dispatch_rule_id, _ = await livekit_sip_service.provision_inbound_trunk(
+                number=target_address,
+                name=req.label or f"{config.get('name', 'DID')} Line",
+                sip_config=raw_creds
+            )
+        else:
+            await livekit_sip_service.update_inbound_trunk(
+                trunk_id=trunk_id,
+                number=target_address,
+                name=req.label or f"{config.get('name', 'DID')} Line",
+                sip_config=raw_creds
+            )
+            if dispatch_rule_id:
+                await livekit_sip_service.update_dispatch_rule(
+                    dispatch_rule_id=dispatch_rule_id,
+                    trunk_id=trunk_id,
+                    number=target_address,
+                    name=req.label or f"{config.get('name', 'DID')} Line"
+                )
+
+        if not outbound_trunk_id:
+            outbound_trunk_id, _ = await livekit_sip_service.provision_outbound_trunk(
+                number=target_address,
+                name=req.label or f"{config.get('name', 'DID')} Line",
+                sip_config=raw_creds
+            )
+
     updated = await db_service.update_phone_number(
         phone_number_id=phone_number_id,
         config_id=config_id,
@@ -266,7 +325,10 @@ async def update_phone_number(
         country_code=req.country_code,
         label=req.label,
         is_active=req.is_active,
-        inbound_agent_id=req.inbound_agent_id
+        inbound_agent_id=req.inbound_agent_id,
+        lk_sip_trunk_id=trunk_id,
+        lk_outbound_sip_trunk_id=outbound_trunk_id,
+        lk_sip_dispatch_rule_id=dispatch_rule_id
     )
     if not updated:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Phone number not found")
@@ -283,6 +345,21 @@ async def delete_phone_number(
     config = await db_service.get_telephony_configuration(config_id, client_id)
     if not config:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Configuration not found")
+
+    numbers = await db_service.list_phone_numbers(config_id)
+    phone_obj = next((n for n in numbers if n["id"] == phone_number_id), None)
+    if phone_obj:
+        inbound_trunk = phone_obj.get("lk_sip_trunk_id")
+        outbound_trunk = phone_obj.get("lk_outbound_sip_trunk_id")
+        dispatch_rule = phone_obj.get("lk_sip_dispatch_rule_id")
+
+        if inbound_trunk or dispatch_rule:
+            await livekit_sip_service.deprovision_inbound_trunk(
+                trunk_id=inbound_trunk,
+                dispatch_rule_id=dispatch_rule
+            )
+        if outbound_trunk:
+            await livekit_sip_service.delete_trunk(outbound_trunk)
 
     await db_service.delete_phone_number(phone_number_id, config_id)
     return ApiResponse.success(message="Phone number deleted")

@@ -214,7 +214,7 @@ async def list_phone_numbers(config_id: str) -> List[Dict[str, Any]]:
         return []
     sql = """
         SELECT p.id, p.telephony_configuration_id, p.address, p.address_type, p.country_code, p.label,
-               p.is_active, p.is_default_caller_id, p.inbound_agent_id, p.lk_sip_trunk_id, p.lk_sip_dispatch_rule_id,
+               p.is_active, p.is_default_caller_id, p.inbound_agent_id, p.lk_sip_trunk_id, p.lk_outbound_sip_trunk_id, p.lk_sip_dispatch_rule_id,
                p.created_at, p.updated_at, a.name as inbound_agent_name
         FROM telephony_phone_numbers p
         LEFT JOIN agents a ON p.inbound_agent_id = a.id
@@ -236,6 +236,7 @@ async def list_phone_numbers(config_id: str) -> List[Dict[str, Any]]:
             "inbound_agent_id": str(r["inbound_agent_id"]) if r["inbound_agent_id"] else None,
             "inbound_agent_name": r["inbound_agent_name"],
             "lk_sip_trunk_id": r.get("lk_sip_trunk_id"),
+            "lk_outbound_sip_trunk_id": r.get("lk_outbound_sip_trunk_id"),
             "lk_sip_dispatch_rule_id": r.get("lk_sip_dispatch_rule_id"),
             "created_at": r["created_at"].isoformat() if r["created_at"] else "",
             "updated_at": r["updated_at"].isoformat() if r["updated_at"] else ""
@@ -253,6 +254,7 @@ async def add_phone_number(
     is_default_caller_id: bool = False,
     inbound_agent_id: Optional[str] = None,
     lk_sip_trunk_id: Optional[str] = None,
+    lk_outbound_sip_trunk_id: Optional[str] = None,
     lk_sip_dispatch_rule_id: Optional[str] = None
 ) -> Dict[str, Any]:
     if not is_valid_uuid(config_id):
@@ -265,11 +267,11 @@ async def add_phone_number(
 
     agent_uuid = inbound_agent_id if (inbound_agent_id and is_valid_uuid(inbound_agent_id)) else None
     sql = """
-        INSERT INTO telephony_phone_numbers (telephony_configuration_id, address, address_type, country_code, label, is_active, is_default_caller_id, inbound_agent_id, lk_sip_trunk_id, lk_sip_dispatch_rule_id)
-        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::uuid, $9, $10)
-        RETURNING id, telephony_configuration_id, address, address_type, country_code, label, is_active, is_default_caller_id, inbound_agent_id, lk_sip_trunk_id, lk_sip_dispatch_rule_id, created_at, updated_at
+        INSERT INTO telephony_phone_numbers (telephony_configuration_id, address, address_type, country_code, label, is_active, is_default_caller_id, inbound_agent_id, lk_sip_trunk_id, lk_outbound_sip_trunk_id, lk_sip_dispatch_rule_id)
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::uuid, $9, $10, $11)
+        RETURNING id, telephony_configuration_id, address, address_type, country_code, label, is_active, is_default_caller_id, inbound_agent_id, lk_sip_trunk_id, lk_outbound_sip_trunk_id, lk_sip_dispatch_rule_id, created_at, updated_at
     """
-    rows = await database.query(sql, [config_id, address, address_type, country_code, label, is_active, is_default_caller_id, agent_uuid, lk_sip_trunk_id, lk_sip_dispatch_rule_id])
+    rows = await database.query(sql, [config_id, address, address_type, country_code, label, is_active, is_default_caller_id, agent_uuid, lk_sip_trunk_id, lk_outbound_sip_trunk_id, lk_sip_dispatch_rule_id])
     r = rows[0]
     return {
         "id": str(r["id"]),
@@ -282,6 +284,7 @@ async def add_phone_number(
         "is_default_caller_id": r["is_default_caller_id"],
         "inbound_agent_id": str(r["inbound_agent_id"]) if r["inbound_agent_id"] else None,
         "lk_sip_trunk_id": r.get("lk_sip_trunk_id"),
+        "lk_outbound_sip_trunk_id": r.get("lk_outbound_sip_trunk_id"),
         "lk_sip_dispatch_rule_id": r.get("lk_sip_dispatch_rule_id"),
         "created_at": r["created_at"].isoformat() if r["created_at"] else "",
         "updated_at": r["updated_at"].isoformat() if r["updated_at"] else ""
@@ -298,6 +301,7 @@ async def update_phone_number(
     is_active: Optional[bool] = None,
     inbound_agent_id: Optional[str] = None,
     lk_sip_trunk_id: Optional[str] = None,
+    lk_outbound_sip_trunk_id: Optional[str] = None,
     lk_sip_dispatch_rule_id: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     if not is_valid_uuid(phone_number_id) or not is_valid_uuid(config_id):
@@ -314,6 +318,7 @@ async def update_phone_number(
     new_label = label if label is not None else r["label"]
     new_active = is_active if is_active is not None else r["is_active"]
     new_trunk = lk_sip_trunk_id if lk_sip_trunk_id is not None else r.get("lk_sip_trunk_id")
+    new_outbound_trunk = lk_outbound_sip_trunk_id if lk_outbound_sip_trunk_id is not None else r.get("lk_outbound_sip_trunk_id")
     new_rule = lk_sip_dispatch_rule_id if lk_sip_dispatch_rule_id is not None else r.get("lk_sip_dispatch_rule_id")
 
     if inbound_agent_id is not None:
@@ -323,11 +328,11 @@ async def update_phone_number(
 
     update_sql = """
         UPDATE telephony_phone_numbers
-        SET address = $1, address_type = $2, country_code = $3, label = $4, is_active = $5, inbound_agent_id = $6::uuid, lk_sip_trunk_id = $7, lk_sip_dispatch_rule_id = $8, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $9::uuid
-        RETURNING id, telephony_configuration_id, address, address_type, country_code, label, is_active, is_default_caller_id, inbound_agent_id, lk_sip_trunk_id, lk_sip_dispatch_rule_id, created_at, updated_at
+        SET address = $1, address_type = $2, country_code = $3, label = $4, is_active = $5, inbound_agent_id = $6::uuid, lk_sip_trunk_id = $7, lk_outbound_sip_trunk_id = $8, lk_sip_dispatch_rule_id = $9, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $10::uuid
+        RETURNING id, telephony_configuration_id, address, address_type, country_code, label, is_active, is_default_caller_id, inbound_agent_id, lk_sip_trunk_id, lk_outbound_sip_trunk_id, lk_sip_dispatch_rule_id, created_at, updated_at
     """
-    res = await database.query(update_sql, [new_addr, new_type, new_cc, new_label, new_active, new_agent, new_trunk, new_rule, phone_number_id])
+    res = await database.query(update_sql, [new_addr, new_type, new_cc, new_label, new_active, new_agent, new_trunk, new_outbound_trunk, new_rule, phone_number_id])
     if not res:
         return None
     updated = res[0]
@@ -342,6 +347,7 @@ async def update_phone_number(
         "is_default_caller_id": updated["is_default_caller_id"],
         "inbound_agent_id": str(updated["inbound_agent_id"]) if updated["inbound_agent_id"] else None,
         "lk_sip_trunk_id": updated.get("lk_sip_trunk_id"),
+        "lk_outbound_sip_trunk_id": updated.get("lk_outbound_sip_trunk_id"),
         "lk_sip_dispatch_rule_id": updated.get("lk_sip_dispatch_rule_id"),
         "created_at": updated["created_at"].isoformat() if updated["created_at"] else "",
         "updated_at": updated["updated_at"].isoformat() if updated["updated_at"] else ""

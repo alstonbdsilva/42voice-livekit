@@ -167,6 +167,7 @@ async def init_pool() -> None:
                     ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS is_default_caller_id BOOLEAN DEFAULT false;
                     ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS inbound_agent_id UUID REFERENCES agents(id) ON DELETE SET NULL;
                     ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS lk_sip_trunk_id VARCHAR(255);
+                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS lk_outbound_sip_trunk_id VARCHAR(255);
                     ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS lk_sip_dispatch_rule_id VARCHAR(255);
                     CREATE INDEX IF NOT EXISTS idx_telephony_phone_numbers_config ON telephony_phone_numbers(telephony_configuration_id);
                     """)

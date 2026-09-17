@@ -365,6 +365,7 @@ CREATE TABLE IF NOT EXISTS phone_numbers (
     agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
     sip_config JSONB,
     lk_sip_trunk_id VARCHAR(255),
+    lk_outbound_sip_trunk_id VARCHAR(255),
     lk_sip_dispatch_rule_id VARCHAR(255),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
