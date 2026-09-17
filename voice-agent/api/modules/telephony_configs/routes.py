@@ -362,9 +362,19 @@ async def initiate_call(
     } if req.agent_id else {}
     metadata_payload = json.dumps(metadata_dict) if metadata_dict else ""
 
-    # 5. Initiate via LiveKit SIP API if configured
+    # 5. Initiate via LiveKit SIP API if outbound trunk is configured
     settings = get_settings()
-    if settings.livekit_url and settings.livekit_api_key and settings.livekit_api_secret:
+    raw_creds = config.get("raw_credentials") or {} if config else {}
+    sip_trunk_id = (
+        (phone_obj.get("lk_outbound_sip_trunk_id") if phone_obj else None)
+        or raw_creds.get("outbound_sip_trunk_id")
+        or raw_creds.get("sip_trunk_id")
+        or raw_creds.get("twilio_sip_trunk_id")
+        or settings.twilio_sip_trunk_id
+    )
+
+    if sip_trunk_id and settings.livekit_url and settings.livekit_api_key and settings.livekit_api_secret:
+        lk = None
         try:
             from livekit import api as lk_api
             lk = lk_api.LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret)
@@ -385,49 +395,43 @@ async def initiate_call(
                     logger.warning(f"Could not dispatch agent to room {room_name}: {dispatch_err}")
 
             # Initiate SIP Participant Outbound Call
-            raw_creds = config.get("raw_credentials") or {} if config else {}
-            sip_trunk_id = (
-                (phone_obj.get("lk_sip_trunk_id") if phone_obj else None)
-                or raw_creds.get("sip_trunk_id")
-                or raw_creds.get("twilio_sip_trunk_id")
-                or settings.twilio_sip_trunk_id
+            sip_req = lk_api.CreateSIPParticipantRequest(
+                sip_trunk_id=sip_trunk_id,
+                sip_call_to=dest_number,
+                room_name=room_name,
+                participant_identity=f"sip-{dest_number}",
+                participant_name=dest_number,
+                participant_metadata=metadata_payload,
+                play_ringtone=True,
             )
-            
-            if sip_trunk_id:
-                sip_req = lk_api.CreateSIPParticipantRequest(
-                    sip_trunk_id=sip_trunk_id,
-                    sip_call_to=dest_number,
-                    room_name=room_name,
-                    participant_identity=f"sip-{dest_number}",
-                    participant_name=dest_number,
-                    participant_metadata=metadata_payload,
-                    play_ringtone=True,
-                )
-                res = await lk.sip.create_sip_participant(sip_req)
-                await lk.aclose()
-                return ApiResponse.success(message=f"Call initiated to {dest_number} with agent '{agent_name}' via LiveKit SIP (Participant ID: {res.participant_id})")
-            else:
-                logger.info("No outbound LiveKit SIP Trunk ID configured (TWILIO_SIP_TRUNK_ID or lk_sip_trunk_id). Attempting provider fallback...")
-                await lk.aclose()
+            res = await lk.sip.create_sip_participant(sip_req)
+            await lk.aclose()
+            return ApiResponse.success(message=f"Call initiated to {dest_number} with agent '{agent_name}' via LiveKit SIP (Participant ID: {res.participant_id})")
         except Exception as lk_err:
             logger.warning(f"LiveKit SIP participant dispatch warning: {lk_err}")
+            if lk:
+                try:
+                    await lk.aclose()
+                except Exception:
+                    pass
 
-    # 6. Fallback to Twilio REST API if Twilio configuration provided
-    if config and config.get("provider") == "twilio":
-        raw_creds = config.get("raw_credentials") or {}
-        account_sid = raw_creds.get("account_sid") or settings.twilio_account_sid
-        auth_token = raw_creds.get("auth_token") or settings.twilio_auth_token
+    # 6. Fallback to Twilio REST API if Twilio configuration or settings provided
+    account_sid = raw_creds.get("account_sid") or settings.twilio_account_sid
+    auth_token = raw_creds.get("auth_token") or settings.twilio_auth_token
+    provider = (config.get("provider") if config else None) or ("twilio" if (account_sid and auth_token) else None)
 
+    if provider == "twilio":
         if not account_sid or not auth_token:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Selected Twilio configuration is missing Account SID or Auth Token."
             )
 
-        if not from_number:
+        caller_id = from_number or settings.twilio_phone_number
+        if not caller_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No caller ID phone number configured for this Twilio integration. Please add a phone number in Telephony Configurations."
+                detail="No caller ID phone number configured for this Twilio integration. Please add a phone number in Telephony Configurations or set TWILIO_PHONE_NUMBER."
             )
 
         url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Calls.json"
@@ -437,7 +441,7 @@ async def initiate_call(
         twiml = f"<Response><Dial><Sip>sip:{dest_number}@{sip_domain}</Sip></Dial></Response>"
         data = {
             "To": dest_number,
-            "From": from_number,
+            "From": caller_id,
             "Twiml": twiml
         }
 
