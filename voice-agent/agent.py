@@ -50,12 +50,13 @@ logger = logging.getLogger("voice-agent")
 
 
 # ElevenLabs validation disabled - using OpenAI TTS only
+from name_service import build_stt_keywords, parse_caller_name, NameCaptureState
 
 
 class VoiceAgent(Agent):
     """Voice agent with orchestrator tools."""
     
-    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, ctx: JobContext, vad=None, out_of_credits: bool = False, custom_prompt: Optional[str] = None, agent_name: Optional[str] = None, unassigned_number: bool = False, client_id: Optional[str] = None, tools: Optional[list] = None):
+    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, ctx: JobContext, vad=None, out_of_credits: bool = False, custom_prompt: Optional[str] = None, agent_name: Optional[str] = None, unassigned_number: bool = False, client_id: Optional[str] = None, tools: Optional[list] = None, agent_data: Optional[Dict[str, Any]] = None):
         self.session_manager = session_manager
         self.booking_agent = booking_agent
         self.sales_agent = sales_agent
@@ -83,7 +84,10 @@ class VoiceAgent(Agent):
         self.recording_filename = None
         self._recording_task: Optional[asyncio.Task[Any]] = None
         
-        logger.info("STT initialized")
+        # Build dynamic STT keyword hints from current agent configuration (known system entities only)
+        stt_keywords = build_stt_keywords(agent_data)
+        stt_lang = (agent_data.get("language") if agent_data and isinstance(agent_data, dict) and agent_data.get("language") else "en-US")
+        logger.info(f"[STT] Initializing Deepgram STT for agent '{self.agent_name}' (lang={stt_lang}) with {len(stt_keywords)} dynamic entity keywords: {stt_keywords}")
         
         # Use VAD from prewarm if provided, otherwise load it
         vad_instance = vad if vad else silero.VAD.load()
@@ -94,13 +98,24 @@ class VoiceAgent(Agent):
             else (custom_prompt if custom_prompt else "You are the orchestrator agent. Start by asking how you can help the user today. Use your tools to route requests, handle booking, sales, and support, or end the call when the conversation is finished.")
         )
         
-        # Append strict instructions for automatic call disconnection upon completion
+        # Append strict instructions for automatic call disconnection upon completion and name capture
         if not out_of_credits:
             instructions += (
                 "\n\nCRITICAL CONVERSATION TERMINATION RULE:\n"
                 "When the user indicates that the conversation is finished (e.g. saying 'thank you', 'goodbye', 'that's all', 'thanks a lot'), "
                 "or immediately after you confirm/recap all details requested by the user, "
-                "you MUST invoke the end_call tool to disconnect the call. Do NOT linger or ask repetitive questions once the user's request is resolved."
+                "you MUST invoke the end_call tool to disconnect the call. Do NOT linger or ask repetitive questions once the user's request is resolved.\n\n"
+                "### CALLER NAME CAPTURE RULES:\n"
+                "- Capture the caller's name exactly as provided by the speech transcription.\n"
+                "- Do not change, autocorrect, anglicize, or substitute a caller's name.\n"
+                "- An unfamiliar name is NOT automatically an unclear name.\n"
+                "- If the transcription clearly contains a name, accept it directly and continue.\n"
+                "- Ask for spelling ONLY when the speech/transcription is genuinely ambiguous or incomplete.\n"
+                "- When asking for spelling, request letters one at a time.\n"
+                "- Retry spelling no more than twice. Never create an infinite spelling loop.\n"
+                "- If spelling cannot be captured after the allowed retries, continue gracefully using the clearest available caller-provided name or omit it.\n"
+                "- Never invent a spelling.\n"
+                "- If the caller asks for a person whose name is unclear or differs from the configured recipient or team, ask a polite, neutral clarification question using the configured name. Do NOT assert or rewrite what the caller said."
             )
 
         # Filter dynamic tools to avoid duplicate function names with built-in @function_tool methods
@@ -128,13 +143,18 @@ class VoiceAgent(Agent):
                     seen_names.add(t_name)
                     filtered_tools.append(t)
 
+        stt_kwargs: Dict[str, Any] = {
+            "model": "nova-2-phonecall",
+            "language": stt_lang,
+            "smart_format": True,
+            "interim_results": True,
+        }
+        if stt_keywords:
+            stt_kwargs["keywords"] = stt_keywords
+
         super().__init__(
             vad=vad_instance,
-            stt=deepgram.STT(
-                language="en-US",
-                model="nova-2",
-                interim_results=True
-            ),
+            stt=deepgram.STT(**stt_kwargs),
             llm=openai.LLM(model="gpt-4o-mini"),
             tts=deepgram.TTS(),
             instructions=instructions,
@@ -239,17 +259,9 @@ class VoiceAgent(Agent):
 
         if not self._greeting_sent:
             try:
-                logger.info("Sending greeting")
+                logger.info("[Greeting] Sending greeting")
                 greeting = f"Hello! I am {self.agent_name}. How can I assist you today?" if self.agent_name and self.agent_name != "unknown" else "Hello, how can I help you today?"
                 self.session.say(greeting)
-                
-                # Add greeting to transcript
-                if self.settings.enable_transcripts and self.transcript_session_id:
-                    transcript_service.add_transcript_entry(
-                        self.transcript_session_id, 
-                        speaker="agent", 
-                        text=greeting
-                    )
                 
                 # Broadcast greeting to live web client
                 try:
@@ -262,7 +274,7 @@ class VoiceAgent(Agent):
                     logger.warning(f"Could not publish greeting transcript packet: {pub_err}")
 
                 self._greeting_sent = True
-                logger.info(f"Greeting sent: {greeting}")
+                logger.info(f"[Greeting] Greeting sent cleanly: {greeting}")
             except Exception as e:
                 logger.error(f"Error in on_enter: {e}")
 
@@ -1165,6 +1177,21 @@ async def entrypoint(ctx: JobContext):
         ),
     )
     
+    # Fetch detailed agent config data for dynamic STT entity hints
+    agent_config_data = {}
+    if agent_id:
+        try:
+            ag_rows = await database.query("SELECT * FROM agents WHERE id = $1::uuid", [agent_id])
+            if ag_rows:
+                agent_config_data = dict(ag_rows[0])
+                c_id = agent_config_data.get("client_id")
+                if c_id:
+                    c_rows = await database.query("SELECT name FROM clients WHERE id = $1::uuid", [c_id])
+                    if c_rows:
+                        agent_config_data["client_name"] = c_rows[0].get("name")
+        except Exception as ag_err:
+            logger.warning(f"[AgentConfig] Warning loading agent_config_data for STT keywords: {ag_err}")
+
     # Create and start the agent
     logger.info("Creating VoiceAgent")
     agent = VoiceAgent(
@@ -1182,7 +1209,8 @@ async def entrypoint(ctx: JobContext):
         agent_name=agent_name,
         unassigned_number=unassigned_number,
         client_id=client_id,
-        tools=dynamic_tools
+        tools=dynamic_tools,
+        agent_data=agent_config_data
     )
     
     # Initialize recording state
@@ -1194,6 +1222,10 @@ async def entrypoint(ctx: JobContext):
     @session.on("user_input_transcribed")
     def on_user_input_transcribed(event):
         if event.is_final and event.transcript.strip():
+            logger.info(
+                f"[STT_DEBUG] final_text=\"{event.transcript}\" is_final={event.is_final} "
+                f"language={getattr(event, 'language', None)} speaker_id={getattr(event, 'speaker_id', None)}"
+            )
             logger.info(f"User speech transcribed: {event.transcript}")
             if agent.settings.enable_transcripts and agent.transcript_session_id:
                 transcript_service.add_transcript_entry(
