@@ -44,12 +44,23 @@ class ConversationsService:
         This maintains data integrity and ensures proper agent configuration.
         """
         async def trans_cb(conn):
-            # 1. Resolve agent by name (case-insensitive)
-            agent_name = (dto.get("agentName") or "Voice Agent").strip()
-            agent = await self.agent_repository.find_by_name(agent_name, client=conn)
-            
+            # 1. Resolve agent by explicit agentId/agent_id first, then by name
+            agent_id = dto.get("agentId") or dto.get("agent_id")
+            agent = None
+            if agent_id:
+                agent = await self.agent_repository.find_by_id(agent_id, client=conn)
             if not agent:
-                logger.error(f"Agent '{agent_name}' not found in database. Cannot register call without explicit agent. "
+                agent_name = (dto.get("agentName") or "Voice Agent").strip()
+                agent = await self.agent_repository.find_by_name(agent_name, client=conn)
+            if not agent and (dto.get("clientId") or dto.get("client_id")):
+                c_id = dto.get("clientId") or dto.get("client_id")
+                c_rows = await database.query("SELECT * FROM agents WHERE client_id = $1::uuid LIMIT 1", [c_id], client=conn)
+                if c_rows:
+                    agent = c_rows[0]
+
+            if not agent:
+                agent_name = (dto.get("agentName") or "Voice Agent").strip()
+                logger.error(f"Agent '{agent_name}' (ID: {agent_id}) not found in database. Cannot register call without explicit agent. "
                            f"Client: {dto.get('clientId')}, User: {dto.get('userId')}")
                 raise ValueError(f"Agent '{agent_name}' does not exist. Agents must be created explicitly before calls can be registered.")
                 
@@ -99,7 +110,7 @@ class ConversationsService:
             duration_minutes = math.ceil(dto["duration"] / 60)
             message_count = len(dto["transcript"]["lines"]) if dto.get("transcript") else 0
             
-            outcome = dto["outcome"]
+            outcome = dto.get("outcome", "resolved")
             is_success = outcome in ["resolved", "lead_captured", "booked_appointment"]
             is_escalated = dto.get("humanHandoff", False) or outcome == "escalated_to_human"
             
@@ -109,7 +120,7 @@ class ConversationsService:
                     "callCount": 1,
                     "messageCount": message_count,
                     "durationMinutes": duration_minutes,
-                    "cost": float(dto["cost"]),
+                    "cost": float(dto.get("cost", 0.0)),
                     "is_success": is_success,
                     "is_escalated": is_escalated
                 },
@@ -138,29 +149,30 @@ class ConversationsService:
             
             # Retrieve complete conversation for payload formatting
             full_conv = await self.conversation_repository.find_by_id(conv["id"], client=conn)
-            return full_conv
+            return full_conv or conv
             
         result = await database.transaction(trans_cb)
         return self.map_to_response(result)
 
     def map_to_response(self, c: Dict[str, Any]) -> Dict[str, Any]:
         """Convert snake_case column maps to camelCase payload properties."""
+        if not c:
+            return {}
+        created_at = c.get("created_at") or c.get("started_at")
+        created_at_str = created_at.isoformat() if (created_at is not None and hasattr(created_at, "isoformat")) else (str(created_at) if created_at else "")
         return {
-            "id": str(c["id"]),
-            "agentId": str(c["agent_id"]),
+            "id": str(c.get("id", "")),
+            "agentId": str(c.get("agent_id", "")),
             "agentName": c.get("agent_name") or "AI Orchestrator",
-            "customerName": c["customer_name"],
-            "customerContact": c["customer_contact"] or "",
-            "summary": c["summary"] or "",
-            "channel": c["channel"],
-            "outcome": c["outcome"],
-            "startedAt": c["started_at"].isoformat() if hasattr(c["started_at"], "isoformat") else c["started_at"],
-            "cost": float(c["cost"]),
-            "sentiment": c["sentiment"],
-            "duration": c["duration"],
-            "intent": c["intent"] or "",
-            "leadScore": c["lead_score"],
-            "sentimentScore": float(c["sentiment_score"]),
-            "humanHandoff": c["human_handoff"],
-            "escalationReason": c["escalation_reason"] or ""
+            "customerName": c.get("customer_name") or c.get("customer_contact") or "Unknown Customer",
+            "customerContact": c.get("customer_contact") or "",
+            "summary": c.get("summary") or "",
+            "transcript": c.get("transcript") or [],
+            "metrics": {
+                "durationSeconds": c.get("duration_seconds") or c.get("duration") or 0,
+                "sentimentScore": float(c.get("sentiment_score") or 0.0),
+                "cost": float(c.get("cost") or 0.0),
+            },
+            "status": c.get("status") or "completed",
+            "createdAt": created_at_str,
         }

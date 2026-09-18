@@ -567,10 +567,20 @@ async def lookup_number(number: str):
             logger.info(f"Cache HIT for {canonical_number}")
             return cached_lookup
 
-        # Query database matching the number (exclude soft-deleted ones)
+        # Query active telephony_phone_numbers joined with telephony_configurations
+        # Legacy phone_numbers table is deprecated and MUST NOT be queried.
         rows = await database.query(
-            """SELECT * FROM phone_numbers
-               WHERE number = ANY($1::text[]) AND status != 'deleted'""",
+            """SELECT 
+                   p.id AS phone_number_id,
+                   p.address,
+                   p.is_active,
+                   p.inbound_agent_id AS agent_id,
+                   c.id AS telephony_configuration_id,
+                   c.client_id,
+                   c.provider
+               FROM telephony_phone_numbers p
+               JOIN telephony_configurations c ON p.telephony_configuration_id = c.id
+               WHERE p.address = ANY($1::text[]) AND p.is_active = true""",
             [number_candidates]
         )
 
@@ -583,8 +593,9 @@ async def lookup_number(number: str):
 
         num_record = rows[0]
         client_uuid = num_record["client_id"]
-        reseller_uuid = num_record["reseller_id"]
         agent_uuid = num_record["agent_id"]
+        telephony_config_uuid = num_record["telephony_configuration_id"]
+        provider = num_record["provider"]
 
         # CRITICAL: Verify agent is assigned. Unassigned phone numbers cannot accept calls.
         if not agent_uuid:
@@ -598,7 +609,7 @@ async def lookup_number(number: str):
                 }
             )
 
-        # Check Credits Status
+        # Check Credits Status from tenant (client)
         has_credits = True
         minutes_balance = 0
 
@@ -606,11 +617,6 @@ async def lookup_number(number: str):
             cl_rows = await database.query("SELECT minutes_balance FROM clients WHERE id = $1", [client_uuid])
             if cl_rows:
                 minutes_balance = cl_rows[0]["minutes_balance"]
-                has_credits = minutes_balance > 0
-        elif reseller_uuid:
-            res_rows = await database.query("SELECT minutes_balance FROM resellers WHERE id = $1", [reseller_uuid])
-            if res_rows:
-                minutes_balance = res_rows[0]["minutes_balance"]
                 has_credits = minutes_balance > 0
 
         if not has_credits:
@@ -652,7 +658,10 @@ async def lookup_number(number: str):
             "agent_name": agent_name,
             "agent_status": agent_status,
             "agent_type": agent_type,
-            "prompt": prompt
+            "prompt": prompt,
+            "telephony_configuration_id": str(telephony_config_uuid) if telephony_config_uuid else None,
+            "phone_number": canonical_number,
+            "provider": provider
         }
 
         # Cache the successful routing lookup

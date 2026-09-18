@@ -306,19 +306,20 @@ class AgentRepository:
         if not agent:
             return
             
-        new_calls = agent["total_calls"] + stats["callCount"]
-        new_messages = agent["total_messages"] + stats["messageCount"]
-        new_minutes = agent["total_minutes"] + stats["durationMinutes"]
-        new_cost = float(agent["total_cost"]) + stats["cost"]
+        new_calls = agent.get("total_calls", 0) + stats.get("callCount", 0)
+        new_messages = agent.get("total_messages", 0) + stats.get("messageCount", 0)
+        new_minutes = agent.get("total_minutes", 0) + stats.get("durationMinutes", 0)
+        new_cost = float(agent.get("total_cost", 0.0)) + stats.get("cost", 0.0)
         
         # Calculate rates
-        success_count = round((float(agent["success_rate"]) / 100.0) * agent["total_calls"])
-        escalation_count = round((float(agent["escalation_rate"]) / 100.0) * agent["total_calls"])
+        old_calls = agent.get("total_calls", 0)
+        success_count = round((float(agent.get("success_rate", 0.0)) / 100.0) * old_calls)
+        escalation_count = round((float(agent.get("escalation_rate", 0.0)) / 100.0) * old_calls)
         
-        if stats["callCount"] > 0:
-            if stats["is_success"]:
+        if stats.get("callCount", 0) > 0:
+            if stats.get("is_success"):
                 success_count += 1
-            if stats["is_escalated"]:
+            if stats.get("is_escalated"):
                 escalation_count += 1
                 
         new_success_rate = round((success_count / new_calls) * 100.0, 2) if new_calls > 0 else 0.00

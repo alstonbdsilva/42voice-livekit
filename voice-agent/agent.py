@@ -690,6 +690,8 @@ async def register_call_with_backend(agent, started_at, ended_at):
             }
 
         payload = {
+            "agentId": getattr(agent, 'agent_id', None),
+            "clientId": getattr(agent, 'client_id', None),
             "agentName": agent_name,
             "customerName": "Customer",
             "customerContact": getattr(agent, 'participant_id', 'Unknown'),
@@ -887,15 +889,17 @@ async def entrypoint(ctx: JobContext):
         try:
             async with httpx.AsyncClient() as http_client:
                 lookup_resp = await http_client.get(
-                    f"{backend_url}/phone-numbers/lookup?number={called_number}",
+                    f"{backend_url}/phone-numbers/lookup",
+                    params={"number": called_number},
                     timeout=10.0
                 )
-                logger.info(f"[Backend] Lookup response status: {lookup_resp.status_code}")
+                logger.info(f"[INBOUND_DEBUG] lookup_status={lookup_resp.status_code} called_number={called_number}")
                 
                 if lookup_resp.status_code == 200:
                     lookup_data = lookup_resp.json()
-                    logger.info(f"[Backend] Lookup success: {lookup_data}")
+                    logger.info(f"[INBOUND_DEBUG] lookup_success: {lookup_data}")
                     client_id = lookup_data.get("client_id")
+                    target_agent_id = lookup_data.get("agent_id")
                     
                     if not lookup_data.get("has_credits", True):
                         logger.warning(f"[Credits] Insufficient credits for {called_number}")
@@ -904,7 +908,7 @@ async def entrypoint(ctx: JobContext):
                         logger.warning(f"[Agent] Assigned agent is not active (status={lookup_data.get('agent_status')})")
                         unassigned_number = True
                         custom_prompt = "The assigned agent is currently unavailable. Please try again later."
-                    elif not lookup_data.get("agent_id"):
+                    elif not target_agent_id:
                         logger.warning(f"[Agent] No agent_id returned for {called_number}")
                         unassigned_number = True
                         custom_prompt = "This phone number is not fully configured. Please contact support."
@@ -915,10 +919,10 @@ async def entrypoint(ctx: JobContext):
                     else:
                         custom_prompt = lookup_data.get("prompt")
                         agent_name = lookup_data.get("agent_name")
-                        agent_id = lookup_data.get("agent_id")
-                        logger.info(f"[Agent] Loaded agent '{agent_name}' for {called_number} (ID={agent_id})")
+                        agent_id = target_agent_id
+                        logger.info(f"[INBOUND_DEBUG] Loaded agent '{agent_name}' for {called_number} (ID={agent_id})")
                 elif lookup_resp.status_code == 404:
-                    logger.warning(f"[Backend] PHONE_NUMBER_NOT_FOUND: {called_number}")
+                    logger.warning(f"[INBOUND_DEBUG] PHONE_NUMBER_NOT_FOUND: {called_number}")
                     unassigned_number = True
                     try:
                         detail = lookup_resp.json().get("detail", {})
@@ -926,7 +930,7 @@ async def entrypoint(ctx: JobContext):
                     except Exception:
                         custom_prompt = "This phone number is not configured in the system."
                 elif lookup_resp.status_code == 409:
-                    logger.warning(f"[Backend] PHONE_NOT_ASSIGNED: {called_number}")
+                    logger.warning(f"[INBOUND_DEBUG] PHONE_NOT_ASSIGNED: {called_number}")
                     unassigned_number = True
                     try:
                         detail = lookup_resp.json().get("detail", {})
@@ -934,14 +938,14 @@ async def entrypoint(ctx: JobContext):
                     except Exception:
                         custom_prompt = "Welcome to 42 voice and we will get back to you."
                 elif lookup_resp.status_code == 403:
-                    logger.warning(f"[Backend] INSUFFICIENT_CREDITS: {called_number}")
+                    logger.warning(f"[INBOUND_DEBUG] INSUFFICIENT_CREDITS: {called_number}")
                     out_of_credits = True
                 else:
-                    logger.error(f"[Backend] Lookup failed: status={lookup_resp.status_code}, body={lookup_resp.text}")
+                    logger.error(f"[INBOUND_DEBUG] Lookup failed: status={lookup_resp.status_code}, body={lookup_resp.text}")
                     unassigned_number = True
                     custom_prompt = "An error occurred while processing your call. Please try again later."
         except Exception as e:
-            logger.exception(f"[Backend] Exception during phone number lookup for {called_number}: {e}")
+            logger.exception(f"[INBOUND_DEBUG] Exception during phone number lookup for {called_number}: {e}")
             unassigned_number = True
             custom_prompt = "An error occurred while processing your call. Please try again later."
     else:
