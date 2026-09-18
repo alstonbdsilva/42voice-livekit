@@ -20,6 +20,9 @@ load_dotenv()
 import json
 import httpx
 import redis
+from uuid import UUID
+from enum import Enum
+from datetime import datetime, date, timezone
 from api.modules.phone_numbers.livekit_sip import livekit_sip_service
 from api import database
 from custom_tools import (
@@ -52,6 +55,38 @@ logger = logging.getLogger("voice-agent")
 
 # ElevenLabs validation disabled - using OpenAI TTS only
 from name_service import build_stt_keywords, parse_caller_name, NameCaptureState
+
+
+def make_json_safe(obj: Any, parent_key: str = "") -> Any:
+    """
+    Recursively converts non-JSON-serializable types into JSON-safe primitives:
+    - UUID -> str
+    - datetime / date -> ISO 8601 string
+    - Enum -> value
+    - dict -> recursively convert values
+    - list / tuple / set -> recursively convert entries
+    - Primitive types (str, int, float, bool, None) -> returned as-is.
+    """
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, UUID):
+        if parent_key:
+            logger.debug(f"[JSON_SAFE] field={parent_key} python_type=UUID")
+        return str(obj)
+    if isinstance(obj, (datetime, date)):
+        if parent_key:
+            logger.debug(f"[JSON_SAFE] field={parent_key} python_type={type(obj).__name__}")
+        return obj.isoformat()
+    if isinstance(obj, Enum):
+        if parent_key:
+            logger.debug(f"[JSON_SAFE] field={parent_key} python_type=Enum")
+        return make_json_safe(obj.value, parent_key)
+    if isinstance(obj, dict):
+        return {str(k): make_json_safe(v, str(k)) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [make_json_safe(x, parent_key) for x in obj]
+    
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable by make_json_safe")
 
 
 def sanitize_agent_prompt(prompt_text: Optional[str]) -> str:
@@ -117,6 +152,9 @@ class VoiceAgent(Agent):
         self.settings = get_settings()
         self.call_start = None
         self.agent_id = agent_data.get("id") if (agent_data and isinstance(agent_data, dict)) else None
+        self._cleanup_lock = asyncio.Lock()
+        self._cleanup_completed = False
+        self._cleanup_in_progress = False
         self._call_registered = False
         self._call_registering = False
         self.egress_id = None
@@ -197,11 +235,23 @@ class VoiceAgent(Agent):
         if stt_keywords:
             stt_kwargs["keywords"] = stt_keywords
 
+        # Resolve voice for OpenAI TTS if provided in agent_data, default to "alloy" (or "nova")
+        tts_voice = "alloy"
+        valid_openai_voices = {"alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"}
+        if agent_data and isinstance(agent_data, dict):
+            cand_voice = agent_data.get("voice_id") or agent_data.get("voice") or agent_data.get("tts_voice")
+            if cand_voice and isinstance(cand_voice, str) and cand_voice.lower() in valid_openai_voices:
+                tts_voice = cand_voice.lower()
+
         super().__init__(
             vad=vad_instance,
             stt=deepgram.STT(**stt_kwargs),
             llm=openai.LLM(model="gpt-4o-mini"),
-            tts=deepgram.TTS(),
+            tts=openai.TTS(
+                model="tts-1",  # OpenAI's lowest latency TTS model
+                voice=tts_voice,
+                speed=1.05      # Slight speed bump reduces turnaround latency
+            ),
             instructions=instructions,
             tools=filtered_tools
         )
@@ -327,89 +377,101 @@ class VoiceAgent(Agent):
             logger.info("Greeting already sent, skipping")
     
     async def on_exit(self):
-        """Clean up when the agent exits."""
-        logger.info("on_exit called - cleaning up session")
-        self._greeting_sent = False
+        """Clean up when the agent exits. Idempotent single execution per call."""
+        room_name = getattr(self, 'room_name', 'unknown')
         
-        # Wait for recording startup task to complete before stopping
-        # This ensures egress_id is set if recording was successful
-        recording_task = getattr(self, '_recording_task', None)
-        if recording_task and not recording_task.done():
-            try:
-                logger.debug("Waiting for recording startup task to complete")
-                await asyncio.wait_for(recording_task, timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("Recording startup task did not complete within timeout")
-            except Exception as e:
-                logger.warning(f"Error waiting for recording startup task: {e}")
-        
-        # Stop recording if active
-        try:
-            from recording_service import recording_service
-            egress_id = getattr(self, 'egress_id', None)
-            
-            if egress_id:
-                success = await recording_service.stop_recording(egress_id)
-                if success:
-                    logger.info(f"Recording stopped: egress_id={egress_id}")
-                else:
-                    logger.warning(f"Recording stop failed: egress_id={egress_id}")
-            else:
-                logger.warning("Recording was never started (egress_id is None)")
-        except Exception as e:
-            logger.error(f"Recording stop error: {e}", exc_info=True)
-        
-        # Finalize and save transcript
-        if self.settings.enable_transcripts and self.transcript_session_id:
-            try:
-                # Create final transcript data
-                transcript_data = transcript_service.finalize_transcript(
-                    self.transcript_session_id,
-                    summary="Voice agent conversation completed"
-                )
-                
-                # Add session metadata
-                transcript_data.update({
-                    "room_name": getattr(self.session, 'room_name', 'unknown'),
-                    "participant_id": getattr(self.session, 'participant_id', 'unknown'),
-                    "agent_type": self.agent_name
-                })
-                
-                # Save to S3
-                success = await transcript_service.save_transcript_to_s3(
-                    self.transcript_session_id,
-                    transcript_data
-                )
-                
-                if success:
-                    logger.info(f"Transcript saved: {self.transcript_session_id}")
-                else:
-                    logger.error(f"Failed to save transcript: {self.transcript_session_id}")
-                    
-            except Exception as e:
-                logger.error(f"Error saving transcript: {e}")
-        
-        # Dynamically register call details in database (bounded await before cleanup)
-        if self.call_start:
-            from datetime import datetime, timezone
-            call_end = datetime.now(timezone.utc)
-            try:
-                await asyncio.wait_for(
-                    register_call_with_backend(self, self.call_start, call_end),
-                    timeout=15.0
-                )
-            except asyncio.TimeoutError:
-                logger.error(f"[CALL_PERSIST] failed room={getattr(self, 'room_name', 'unknown')} error=timeout_during_shutdown")
-            except Exception as e:
-                logger.error(f"[CALL_PERSIST] failed room={getattr(self, 'room_name', 'unknown')} error={e}")
+        async with self._cleanup_lock:
+            if self._cleanup_completed or self._cleanup_in_progress:
+                logger.info(f"[CALL_CLEANUP] skipped_duplicate room={room_name}")
+                return
+            self._cleanup_in_progress = True
 
-        # Clear session manager state for this call (safely)
-        if hasattr(self, 'session_manager'):
+        try:
+            logger.info(f"[CALL_CLEANUP] starting room={room_name}")
+            self._greeting_sent = False
+            
+            # Wait for recording startup task to complete before stopping
+            # This ensures egress_id is set if recording was successful
+            recording_task = getattr(self, '_recording_task', None)
+            if recording_task and not recording_task.done():
+                try:
+                    logger.debug("Waiting for recording startup task to complete")
+                    await asyncio.wait_for(recording_task, timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning("Recording startup task did not complete within timeout")
+                except Exception as e:
+                    logger.warning(f"Error waiting for recording startup task: {e}")
+            
+            # Stop recording if active
             try:
-                self.session_manager.clear_all_sessions()
+                from recording_service import recording_service
+                egress_id = getattr(self, 'egress_id', None)
+                
+                if egress_id:
+                    success = await recording_service.stop_recording(egress_id)
+                    if success:
+                        logger.info(f"Recording stopped: egress_id={egress_id}")
+                    else:
+                        logger.warning(f"Recording stop failed: egress_id={egress_id}")
+                else:
+                    logger.warning("Recording was never started (egress_id is None)")
             except Exception as e:
-                logger.warning(f"Redis cleanup failed (may not be running): {e}")
-        logger.info("SESSION CLEANED")
+                logger.error(f"Recording stop error: {e}", exc_info=True)
+            
+            # Finalize and save transcript
+            if self.settings.enable_transcripts and self.transcript_session_id:
+                try:
+                    # Create final transcript data
+                    transcript_data = transcript_service.finalize_transcript(
+                        self.transcript_session_id,
+                        summary="Voice agent conversation completed"
+                    )
+                    
+                    # Add session metadata
+                    transcript_data.update({
+                        "room_name": getattr(self.session, 'room_name', room_name),
+                        "participant_id": getattr(self.session, 'participant_id', getattr(self, 'participant_id', 'unknown')),
+                        "agent_type": self.agent_name
+                    })
+                    
+                    # Save to S3
+                    success = await transcript_service.save_transcript_to_s3(
+                        self.transcript_session_id,
+                        transcript_data
+                    )
+                    
+                    if success:
+                        logger.info(f"Transcript saved: {self.transcript_session_id}")
+                    else:
+                        logger.error(f"Failed to save transcript: {self.transcript_session_id}")
+                        
+                except Exception as e:
+                    logger.error(f"Error saving transcript: {e}")
+            
+            # Dynamically register call details in database (bounded await before cleanup)
+            if self.call_start:
+                from datetime import datetime, timezone
+                call_end = datetime.now(timezone.utc)
+                try:
+                    await asyncio.wait_for(
+                        register_call_with_backend(self, self.call_start, call_end),
+                        timeout=15.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(f"[CALL_PERSIST] failed room={room_name} error=timeout_during_shutdown")
+                except Exception as e:
+                    logger.error(f"[CALL_PERSIST] failed room={room_name} error={e}")
+
+            # Clear session manager state for this call (safely)
+            if hasattr(self, 'session_manager'):
+                try:
+                    self.session_manager.clear_all_sessions()
+                except Exception as e:
+                    logger.warning(f"Redis cleanup failed (may not be running): {e}")
+            logger.info("SESSION CLEANED")
+        finally:
+            self._cleanup_completed = True
+            self._cleanup_in_progress = False
     
     @function_tool()
     async def request_agent_handoff(
@@ -804,11 +866,12 @@ async def register_call_with_backend(agent, started_at, ended_at):
             }
         }
         
+        safe_payload = make_json_safe(payload)
         backend_url = agent.settings.backend_url
         registered_success = False
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(f"{backend_url}/conversations/register", json=payload, timeout=10.0)
+                response = await client.post(f"{backend_url}/conversations/register", json=safe_payload, timeout=10.0)
                 if response.status_code in [200, 201]:
                     registered_success = True
                     agent._call_registered = True
@@ -823,7 +886,7 @@ async def register_call_with_backend(agent, started_at, ended_at):
                     import urllib.request
                     req = urllib.request.Request(
                         f"{backend_url}/conversations/register",
-                        data=json.dumps(payload).encode("utf-8"),
+                        data=json.dumps(safe_payload).encode("utf-8"),
                         headers={"Content-Type": "application/json"},
                         method="POST"
                     )

@@ -230,10 +230,10 @@ class RecordingService:
                     logger.debug(f"Error closing LiveKit client: {close_err}")
             
         except Exception as e:
-            # Idempotent: if egress already stopped or doesn't exist, still return success
+            # Idempotent: if egress already stopped, completed, or doesn't exist, still return success
             error_str = str(e).lower()
-            if any(x in error_str for x in ['not found', 'does not exist', 'no egress']):
-                logger.info(f"Egress already stopped or not found: egress_id={egress_id}")
+            if any(x in error_str for x in ['not found', 'does not exist', 'no egress', 'egress_complete', 'cannot be stopped', '412', 'already completed', 'already stopped']):
+                logger.info(f"Egress already stopped or completed: egress_id={egress_id}")
                 return True
             
             logger.error(f"Failed to stop recording: egress_id={egress_id}, error={e}", exc_info=True)
@@ -325,15 +325,15 @@ class RecordingService:
             logger.error(f"Failed to cleanup orphaned egress for room {room_name}: {e}")
             return 0
     
-    async def verify_s3_upload(self, s3_key: str, max_retries: int = 5, retry_delay: float = 2.0) -> bool:
+    async def verify_s3_upload(self, s3_key: str, max_retries: int = 3, retry_delay: float = 1.0) -> bool:
         """
         Verify that a recording has been uploaded to S3.
-        Retries with exponential backoff to account for egress upload delay.
+        Retries with bounded backoff to account for egress upload delay and S3 eventual consistency.
         
         Args:
             s3_key: S3 key of the recording file
-            max_retries: Maximum number of verification attempts
-            retry_delay: Initial delay between retries in seconds
+            max_retries: Maximum number of verification attempts (default 3)
+            retry_delay: Initial delay between retries in seconds (default 1.0s)
             
         Returns:
             True if file exists in S3, False otherwise
@@ -353,30 +353,32 @@ class RecordingService:
             for attempt in range(max_retries):
                 try:
                     # Use asyncio.to_thread to avoid blocking event loop
-                    exists = await asyncio.to_thread(
-                        lambda: s3_client.head_object(
-                            Bucket=self.settings.s3_bucket_name,
-                            Key=s3_key
-                        )
+                    await asyncio.to_thread(
+                        s3_client.head_object,
+                        Bucket=self.settings.s3_bucket_name,
+                        Key=s3_key
                     )
-                    logger.info(f"S3 upload verified: {s3_key}")
+                    logger.info(f"[S3_VERIFY] verified {s3_key} (attempt {attempt + 1}/{max_retries})")
                     return True
-                except s3_client.exceptions.NoSuchKey:
+                except Exception as e:
+                    # Distinguish pending verification from definitely failed
                     if attempt < max_retries - 1:
-                        wait_time = retry_delay * (2 ** attempt)
-                        logger.info(f"S3 file not yet available, retrying in {wait_time}s: {s3_key}")
+                        wait_time = retry_delay * (2 ** attempt)  # 1.0s, 2.0s
+                        logger.info(
+                            f"[S3_VERIFY] recording upload pending verification for {s3_key} "
+                            f"(attempt {attempt + 1}/{max_retries}, error: {e}), retrying in {wait_time:.1f}s"
+                        )
                         await asyncio.sleep(wait_time)
                     else:
-                        logger.error(f"S3 upload verification failed after {max_retries} attempts: {s3_key}")
+                        logger.warning(
+                            f"[S3_VERIFY] recording upload definitely failed after {max_retries} attempts for {s3_key}: {e}"
+                        )
                         return False
-                except Exception as e:
-                    logger.error(f"S3 verification error: {e}")
-                    return False
             
             return False
             
         except Exception as e:
-            logger.error(f"Failed to verify S3 upload: {e}", exc_info=True)
+            logger.error(f"[S3_VERIFY] Failed to initialize S3 client or verify upload: {e}", exc_info=True)
             return False
     
     async def close(self):
