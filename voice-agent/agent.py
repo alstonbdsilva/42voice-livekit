@@ -116,6 +116,9 @@ class VoiceAgent(Agent):
         self.transcript_session_id = None
         self.settings = get_settings()
         self.call_start = None
+        self.agent_id = agent_data.get("id") if (agent_data and isinstance(agent_data, dict)) else None
+        self._call_registered = False
+        self._call_registering = False
         self.egress_id = None
         self.recording_filename = None
         self._recording_task: Optional[asyncio.Task[Any]] = None
@@ -386,6 +389,20 @@ class VoiceAgent(Agent):
             except Exception as e:
                 logger.error(f"Error saving transcript: {e}")
         
+        # Dynamically register call details in database (bounded await before cleanup)
+        if self.call_start:
+            from datetime import datetime, timezone
+            call_end = datetime.now(timezone.utc)
+            try:
+                await asyncio.wait_for(
+                    register_call_with_backend(self, self.call_start, call_end),
+                    timeout=15.0
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"[CALL_PERSIST] failed room={getattr(self, 'room_name', 'unknown')} error=timeout_during_shutdown")
+            except Exception as e:
+                logger.error(f"[CALL_PERSIST] failed room={getattr(self, 'room_name', 'unknown')} error={e}")
+
         # Clear session manager state for this call (safely)
         if hasattr(self, 'session_manager'):
             try:
@@ -393,12 +410,6 @@ class VoiceAgent(Agent):
             except Exception as e:
                 logger.warning(f"Redis cleanup failed (may not be running): {e}")
         logger.info("SESSION CLEANED")
-
-        # Dynamically register call details in database
-        if self.call_start:
-            from datetime import datetime, timezone
-            call_end = datetime.now(timezone.utc)
-            asyncio.create_task(register_call_with_backend(self, self.call_start, call_end))
     
     @function_tool()
     async def request_agent_handoff(
@@ -669,13 +680,25 @@ async def analyze_transcript_with_llm(full_text: str, settings) -> dict:
 
 
 async def register_call_with_backend(agent, started_at, ended_at):
+    room_name = getattr(agent, 'room_name', 'unknown')
+    
+    if not started_at:
+        logger.warning(f"[CALL_PERSIST] skipped_no_start room={room_name}")
+        return
+
+    # Check idempotency
+    if getattr(agent, '_call_registered', False) or getattr(agent, '_call_registering', False):
+        logger.info(f"[CALL_PERSIST] skipped_duplicate room={room_name}")
+        return
+    
+    agent._call_registering = True
+    logger.info(f"[CALL_PERSIST] starting room={room_name}")
+    
     try:
         import httpx
         from datetime import datetime
         
-        duration = int((ended_at - started_at).total_seconds())
-        room_name = getattr(agent, 'room_name', 'unknown')
-        
+        duration = max(0, int((ended_at - started_at).total_seconds()))
         agent_name = getattr(agent, 'agent_name', 'Voice Agent')
         
         lines = []
@@ -760,7 +783,7 @@ async def register_call_with_backend(agent, started_at, ended_at):
             "agentId": getattr(agent, 'agent_id', None),
             "clientId": getattr(agent, 'client_id', None),
             "agentName": agent_name,
-            "customerName": "Customer",
+            "customerName": getattr(agent, 'captured_caller_name', None) or "Customer",
             "customerContact": getattr(agent, 'participant_id', 'Unknown'),
             "channel": "voice",
             "duration": duration,
@@ -782,41 +805,48 @@ async def register_call_with_backend(agent, started_at, ended_at):
         }
         
         backend_url = agent.settings.backend_url
+        registered_success = False
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(f"{backend_url}/conversations/register", json=payload, timeout=10.0)
-                if response.status_code == 201:
-                    logger.info(f"Registered call details for room {room_name} with agent {agent_name}")
+                if response.status_code in [200, 201]:
+                    registered_success = True
+                    agent._call_registered = True
+                    logger.info(f"[CALL_PERSIST] success room={room_name} status={response.status_code}")
                 else:
-                    logger.error(f"Failed to register call details for room {room_name}: {response.status_code} {response.text}")
-        except RuntimeError as exec_err:
-            if "Executor shutdown" in str(exec_err):
-                logger.warning(f"Executor shut down during call registration; sending via fallback thread HTTP request...")
-                try:
-                    def _sync_post():
-                        import urllib.request
-                        req = urllib.request.Request(
-                            f"{backend_url}/conversations/register",
-                            data=json.dumps(payload).encode("utf-8"),
-                            headers={"Content-Type": "application/json"},
-                            method="POST"
-                        )
-                        with urllib.request.urlopen(req, timeout=3.0) as resp:
-                            return resp.status
+                    logger.error(f"[CALL_PERSIST] failed room={room_name} error=status_{response.status_code}_{response.text}")
+        except Exception as exec_err:
+            logger.error(f"[CALL_PERSIST] failed room={room_name} error={exec_err}")
+            # Try fallback synchronous request if loop / executor has issues
+            try:
+                def _sync_post():
+                    import urllib.request
+                    req = urllib.request.Request(
+                        f"{backend_url}/conversations/register",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req, timeout=4.0) as resp:
+                        return resp.status
 
-                    status = await asyncio.to_thread(_sync_post)
-                    if status in [200, 201]:
-                        logger.info(f"Registered call details via fallback thread for room {room_name}")
-                except Exception as fb_err:
-                    logger.error(f"Fallback call registration failed: {fb_err}")
-            else:
-                logger.error(f"Error registering call with backend: {exec_err}")
+                status = await asyncio.to_thread(_sync_post)
+                if status in [200, 201]:
+                    registered_success = True
+                    agent._call_registered = True
+                    logger.info(f"[CALL_PERSIST] success room={room_name} status={status}")
+                else:
+                    logger.error(f"[CALL_PERSIST] failed room={room_name} error=fallback_status_{status}")
+            except Exception as fb_err:
+                logger.error(f"[CALL_PERSIST] failed room={room_name} error={fb_err}")
         
         if agent.transcript_session_id:
             transcript_service.clear_session(agent.transcript_session_id)
                 
     except Exception as e:
-        logger.error(f"Error registering call with backend: {e}", exc_info=True)
+        logger.error(f"[CALL_PERSIST] failed room={room_name} error={e}", exc_info=True)
+    finally:
+        agent._call_registering = False
 
 
 
@@ -1368,20 +1398,28 @@ async def entrypoint(ctx: JobContext):
         await shutdown_event.wait()
     finally:
         shutdown_event.set()
-        await cleanup_on_disconnect(session, session_manager)
+        await cleanup_on_disconnect(session, session_manager, agent=agent)
         logger.info("Entrypoint exiting")
 
 
-async def cleanup_on_disconnect(session, session_manager):
+async def cleanup_on_disconnect(session, session_manager, agent=None):
     """Async cleanup function called when participant disconnects."""
     try:
         if session:
             await session.aclose()
     except Exception as e:
         logger.warning(f"Error closing agent session: {e}")
+
+    # Fallback to ensure agent.on_exit executed if not invoked by session
+    if agent and hasattr(agent, 'on_exit'):
+        try:
+            await agent.on_exit()
+        except Exception as e:
+            logger.warning(f"Error executing agent on_exit fallback: {e}")
         
     try:
-        session_manager.clear_all_sessions()
+        if session_manager:
+            session_manager.clear_all_sessions()
     except Exception as e:
         logger.warning(f"Redis cleanup failed (may not be running): {e}")
     
