@@ -576,10 +576,12 @@ async def lookup_number(number: str):
                    p.is_active,
                    p.inbound_agent_id AS agent_id,
                    c.id AS telephony_configuration_id,
-                   c.client_id,
+                   COALESCE(c.client_id, a.client_id, u.client_id) AS client_id,
                    c.provider
                FROM telephony_phone_numbers p
                JOIN telephony_configurations c ON p.telephony_configuration_id = c.id
+               LEFT JOIN agents a ON a.id = p.inbound_agent_id
+               LEFT JOIN users u ON u.id = a.user_id
                WHERE p.address = ANY($1::text[]) AND p.is_active = true""",
             [number_candidates]
         )

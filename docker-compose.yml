@@ -37,6 +37,8 @@ services:
   egress:
     image: livekit/egress:v1.8.4
     restart: unless-stopped
+    init: true
+    shm_size: "1gb"
     cap_add:
       - SYS_ADMIN
     environment:

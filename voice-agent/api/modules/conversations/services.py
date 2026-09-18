@@ -155,11 +155,15 @@ class ConversationsService:
         return self.map_to_response(result)
 
     def map_to_response(self, c: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert snake_case column maps to camelCase payload properties."""
+        """Convert snake_case column maps to camelCase payload properties for React DataTable bindings."""
         if not c:
             return {}
-        created_at = c.get("created_at") or c.get("started_at")
-        created_at_str = created_at.isoformat() if (created_at is not None and hasattr(created_at, "isoformat")) else (str(created_at) if created_at else "")
+        started_at = c.get("started_at") or c.get("created_at")
+        started_at_str = (
+            started_at.isoformat()
+            if (started_at is not None and hasattr(started_at, "isoformat"))
+            else (str(started_at) if started_at else "")
+        )
         return {
             "id": str(c.get("id", "")),
             "agentId": str(c.get("agent_id", "")),
@@ -167,12 +171,23 @@ class ConversationsService:
             "customerName": c.get("customer_name") or c.get("customer_contact") or "Unknown Customer",
             "customerContact": c.get("customer_contact") or "",
             "summary": c.get("summary") or "",
+            "channel": c.get("channel") or "voice",
+            "outcome": c.get("outcome") or "resolved",
+            "startedAt": started_at_str,
+            "cost": float(c.get("cost") or 0.0),
+            "sentiment": c.get("sentiment") or "neutral",
+            "duration": int(c.get("duration") or c.get("duration_seconds") or 0),
+            "intent": c.get("intent") or "",
+            "leadScore": int(c.get("lead_score") or 0),
+            "sentimentScore": float(c.get("sentiment_score") or 0.0),
+            "humanHandoff": bool(c.get("human_handoff", False)),
+            "escalationReason": c.get("escalation_reason") or "",
             "transcript": c.get("transcript") or [],
+            "status": c.get("status") or "completed",
             "metrics": {
                 "durationSeconds": c.get("duration_seconds") or c.get("duration") or 0,
                 "sentimentScore": float(c.get("sentiment_score") or 0.0),
                 "cost": float(c.get("cost") or 0.0),
             },
-            "status": c.get("status") or "completed",
-            "createdAt": created_at_str,
+            "createdAt": started_at_str,
         }

@@ -482,15 +482,28 @@ class VoiceAgent(Agent):
             try:
                 if hasattr(self.session, "interrupt"):
                     self.session.interrupt(force=True)
-                self.session.say(goodbye_msg)
+                speech_handle = self.session.say(goodbye_msg)
             except Exception as e:
                 logger.error(f"Error saying goodbye message: {e}")
+                speech_handle = None
+        else:
+            speech_handle = None
                 
         async def delayed_disconnect():
-            await asyncio.sleep(2.0 if goodbye_msg else 0.5)
-            logger.info("Disconnecting room via end_call tool")
+            if speech_handle and hasattr(speech_handle, "wait_for_playout"):
+                try:
+                    logger.info("Waiting for farewell speech playout to complete...")
+                    await asyncio.wait_for(speech_handle.wait_for_playout(), timeout=8.0)
+                    logger.info("Farewell speech playout completed.")
+                except Exception as wait_err:
+                    logger.warning(f"Timeout or error waiting for farewell playout: {wait_err}")
+            else:
+                await asyncio.sleep(0.5)
+
+            logger.info("Disconnecting room via end_call tool after farewell playout")
             if self.ctx and self.ctx.room:
                 await self.ctx.room.disconnect()
+
         asyncio.create_task(delayed_disconnect())
         return "Call is ending."
 
@@ -724,18 +737,22 @@ async def register_call_with_backend(agent, started_at, ended_at):
                     logger.error(f"Failed to register call details for room {room_name}: {response.status_code} {response.text}")
         except RuntimeError as exec_err:
             if "Executor shutdown" in str(exec_err):
-                logger.warning(f"Executor shut down during call registration; sending via fallback HTTP request...")
+                logger.warning(f"Executor shut down during call registration; sending via fallback thread HTTP request...")
                 try:
-                    import urllib.request
-                    req = urllib.request.Request(
-                        f"{backend_url}/conversations/register",
-                        data=json.dumps(payload).encode("utf-8"),
-                        headers={"Content-Type": "application/json"},
-                        method="POST"
-                    )
-                    with urllib.request.urlopen(req, timeout=10.0) as resp:
-                        if resp.status in [200, 201]:
-                            logger.info(f"Registered call details via fallback for room {room_name}")
+                    def _sync_post():
+                        import urllib.request
+                        req = urllib.request.Request(
+                            f"{backend_url}/conversations/register",
+                            data=json.dumps(payload).encode("utf-8"),
+                            headers={"Content-Type": "application/json"},
+                            method="POST"
+                        )
+                        with urllib.request.urlopen(req, timeout=3.0) as resp:
+                            return resp.status
+
+                    status = await asyncio.to_thread(_sync_post)
+                    if status in [200, 201]:
+                        logger.info(f"Registered call details via fallback thread for room {room_name}")
                 except Exception as fb_err:
                     logger.error(f"Fallback call registration failed: {fb_err}")
             else:
