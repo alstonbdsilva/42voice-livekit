@@ -1,9 +1,11 @@
 """
-Unit tests for Dynamic STT Keyword Generation, Tenant Isolation, KB Exclusion, Caller Name Extraction, Caller Corrections, Spelling Normalization, and Retry Safeguards.
+Unit tests for Dynamic STT Keyword Generation, Tenant Isolation, KB Exclusion, Prompt Sanitization, Caller Name Extraction, Caller Corrections, Spelling Normalization, and Retry Safeguards.
 """
 
 import unittest
+from unittest.mock import MagicMock
 from name_service import build_stt_keywords, parse_caller_name, normalize_spelled_name, NameCaptureState
+from agent import sanitize_agent_prompt
 
 
 class TestNameCaptureAndSTT(unittest.TestCase):
@@ -40,8 +42,27 @@ class TestNameCaptureAndSTT(unittest.TestCase):
         keywords_A.append(("Mutated Entity", 3.0))
         self.assertNotIn("Mutated Entity", [kw[0] for kw in build_stt_keywords(agent_B)])
 
+    def test_delimiter_subphrase_extraction(self):
+        """Test 2 - Verify agent display names with delimiters (e.g. 'Digital AI Assistant — Jaya') extract sub-phrases."""
+        agent_data = {"name": "Digital AI Assistant — Jaya"}
+        keywords = [kw[0] for kw in build_stt_keywords(agent_data)]
+        self.assertIn("Jaya", keywords)
+
+    def test_sanitize_agent_prompt(self):
+        """Test 3 - Verify stale VAPI instructions and aggressive spelling rules are stripped from prompts."""
+        dirty_prompt = (
+            "You are Jaya, an AI assistant. "
+            "If a name sounds unfamiliar or unclear — ask for spelling before storing. "
+            "Use the VAPI end_call tool when finished."
+        )
+        cleaned = sanitize_agent_prompt(dirty_prompt)
+
+        self.assertNotIn("VAPI", cleaned)
+        self.assertNotIn("unfamiliar or unclear", cleaned)
+        self.assertIn("You are Jaya, an AI assistant.", cleaned)
+
     def test_knowledge_items_excluded_from_stt_hints(self):
-        """Test 2 - Verify arbitrary KB items (URLs, policies, addresses) are excluded from STT hints."""
+        """Test 4 - Verify arbitrary KB items (URLs, policies, addresses) are excluded from STT hints."""
         agent_data = {
             "name": "Support Bot",
             "client_name": "Tech Corp",
@@ -64,7 +85,7 @@ class TestNameCaptureAndSTT(unittest.TestCase):
         self.assertNotIn("Office Address", keywords)
 
     def test_parse_caller_name_false_positive_protections(self):
-        """Test 3 - Verify sentence fragments like 'I am calling about billing' are NOT mistaken for caller names."""
+        """Test 5 - Verify sentence fragments like 'I am calling about billing' are NOT mistaken for caller names."""
         self.assertIsNone(parse_caller_name("I am calling about billing"))
         self.assertIsNone(parse_caller_name("I'm trying to book an appointment"))
         self.assertIsNone(parse_caller_name("I am looking for help"))
@@ -76,7 +97,7 @@ class TestNameCaptureAndSTT(unittest.TestCase):
         self.assertEqual(parse_caller_name("I am John"), "John")
 
     def test_unlisted_caller_names_accepted(self):
-        """Test 4 - Verify arbitrary caller names are accepted directly even when not in STT keywords."""
+        """Test 6 - Verify arbitrary caller names are accepted directly even when not in STT keywords."""
         agent_data = {"name": "Bot", "client_name": "Acme"}
         keywords = [kw[0] for kw in build_stt_keywords(agent_data)]
 
@@ -87,7 +108,7 @@ class TestNameCaptureAndSTT(unittest.TestCase):
             self.assertEqual(extracted, name)
 
     def test_caller_name_correction(self):
-        """Test 5 - Verify caller correction ('No, Lokesh.') replaces previous captured name ('Lopez')."""
+        """Test 7 - Verify caller correction ('No, Lokesh.') replaces previous captured name ('Lopez')."""
         state = NameCaptureState()
         # Initial STT misheard name as Lopez
         res1 = state.process_utterance("My name is Lopez.")
@@ -101,7 +122,7 @@ class TestNameCaptureAndSTT(unittest.TestCase):
         self.assertEqual(state.captured_name, "Lokesh")
 
     def test_letter_spelling_normalization(self):
-        """Test 6 - Verify letter-by-letter spelled names normalize to proper capitalized names."""
+        """Test 8 - Verify letter-by-letter spelled names normalize to proper capitalized names."""
         test_cases = [
             ("L O K E S H", "Lokesh"),
             ("J O H N", "John"),
@@ -115,7 +136,7 @@ class TestNameCaptureAndSTT(unittest.TestCase):
             self.assertEqual(name, expected)
 
     def test_numeric_spelling_rejection(self):
-        """Test 7 - Verify spoken numbers/digits are rejected when spelling is requested."""
+        """Test 9 - Verify spoken numbers/digits are rejected when spelling is requested."""
         name1, valid1 = normalize_spelled_name("Seven four eight eight eight")
         self.assertFalse(valid1)
         self.assertIsNone(name1)
@@ -125,7 +146,7 @@ class TestNameCaptureAndSTT(unittest.TestCase):
         self.assertIsNone(name2)
 
     def test_spelling_retry_limit_no_infinite_loop(self):
-        """Test 8 - Verify spelling retries are capped at maximum 2 attempts without infinite loops."""
+        """Test 10 - Verify spelling retries are capped at maximum 2 attempts without infinite loops."""
         state = NameCaptureState(max_spelling_retries=2)
         state.state = "WAITING_FOR_NAME_SPELLING"
 
@@ -140,7 +161,7 @@ class TestNameCaptureAndSTT(unittest.TestCase):
         self.assertEqual(state.state, "NAME_ACCEPTED")
 
     def test_direct_name_acceptance_state_flow(self):
-        """Test 9 - Verify clear names transition state machine directly to NAME_ACCEPTED."""
+        """Test 11 - Verify clear names transition state machine directly to NAME_ACCEPTED."""
         state = NameCaptureState(max_spelling_retries=2)
         res = state.process_utterance("My name is Lokesh.")
 
@@ -151,5 +172,6 @@ class TestNameCaptureAndSTT(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

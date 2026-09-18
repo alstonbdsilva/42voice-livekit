@@ -3,6 +3,7 @@ LiveKit Voice AI Agent Worker.
 Listens for SIP room creation and manages the AI audio pipeline.
 """
 import asyncio
+import re
 import logging
 import sys
 import time
@@ -53,6 +54,37 @@ logger = logging.getLogger("voice-agent")
 from name_service import build_stt_keywords, parse_caller_name, NameCaptureState
 
 
+def sanitize_agent_prompt(prompt_text: Optional[str]) -> str:
+    """
+    Sanitize agent system prompt by removing stale VAPI instructions
+    and aggressive spelling rules.
+    """
+    if not prompt_text:
+        return ""
+        
+    cleaned = prompt_text
+    # 1. Remove stale VAPI tool references
+    vapi_patterns = [
+        r"use\s+the\s+vapi[^\.\n]*[\.\n]?",
+        r"vapi\.end_call[^\.\n]*[\.\n]?",
+        r"endCall\s+function[^\.\n]*[\.\n]?",
+        r"VAPI[^\.\n]*[\.\n]?"
+    ]
+    for pat in vapi_patterns:
+        cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE)
+        
+    # 2. Remove aggressive spelling instructions
+    spelling_patterns = [
+        r"if\s+a\s+name\s+sounds\s+unfamiliar[^\.\n]*[\.\n]?",
+        r"ask\s+for\s+spelling\s+on\s+any\s+name[^\.\n]*[\.\n]?",
+        r"ask\s+for\s+spelling\s+before\s+storing[^\.\n]*[\.\n]?"
+    ]
+    for pat in spelling_patterns:
+        cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE)
+        
+    return cleaned.strip()
+
+
 class VoiceAgent(Agent):
     """Voice agent with orchestrator tools."""
     
@@ -76,6 +108,10 @@ class VoiceAgent(Agent):
             "general": self.agent_name
         }
         
+        # Instantiate per-call NameCaptureState machine
+        self.name_state = NameCaptureState(max_spelling_retries=2)
+        self.captured_caller_name: Optional[str] = None
+
         # Transcript tracking
         self.transcript_session_id = None
         self.settings = get_settings()
@@ -87,15 +123,21 @@ class VoiceAgent(Agent):
         # Build dynamic STT keyword hints from current agent configuration (known system entities only)
         stt_keywords = build_stt_keywords(agent_data)
         stt_lang = (agent_data.get("language") if agent_data and isinstance(agent_data, dict) and agent_data.get("language") else "en-US")
+
+        logger.info(f"[STT_CONFIG_DEBUG] agent_data_keys={list(agent_data.keys()) if agent_data else []}")
+        logger.info(f"[STT_CONFIG_DEBUG] resolved_agent_name={agent_data.get('name') or agent_data.get('agent_name') if agent_data else None}")
+        logger.info(f"[STT_CONFIG_DEBUG] resolved_client_name={agent_data.get('client_name') if agent_data else None}")
+        logger.info(f"[STT_CONFIG_DEBUG] generated_keywords={stt_keywords}")
         logger.info(f"[STT] Initializing Deepgram STT for agent '{self.agent_name}' (lang={stt_lang}) with {len(stt_keywords)} dynamic entity keywords: {stt_keywords}")
         
         # Use VAD from prewarm if provided, otherwise load it
         vad_instance = vad if vad else silero.VAD.load()
         
+        clean_custom_prompt = sanitize_agent_prompt(custom_prompt)
         instructions = (
             "You are a billing notice voice. State that the account is out of credits and goodbye."
             if out_of_credits
-            else (custom_prompt if custom_prompt else "You are the orchestrator agent. Start by asking how you can help the user today. Use your tools to route requests, handle booking, sales, and support, or end the call when the conversation is finished.")
+            else (clean_custom_prompt if clean_custom_prompt else "You are the orchestrator agent. Start by asking how you can help the user today. Use your tools to route requests, handle booking, sales, and support, or end the call when the conversation is finished.")
         )
         
         # Append strict instructions for automatic call disconnection upon completion and name capture
@@ -1192,6 +1234,12 @@ async def entrypoint(ctx: JobContext):
         except Exception as ag_err:
             logger.warning(f"[AgentConfig] Warning loading agent_config_data for STT keywords: {ag_err}")
 
+    # Fallback to lookup data fields if agent_config_data keys are missing
+    if agent_name and "name" not in agent_config_data and "agent_name" not in agent_config_data:
+        agent_config_data["agent_name"] = agent_name
+    if client_id and "client_id" not in agent_config_data:
+        agent_config_data["client_id"] = client_id
+
     # Create and start the agent
     logger.info("Creating VoiceAgent")
     agent = VoiceAgent(
@@ -1222,9 +1270,28 @@ async def entrypoint(ctx: JobContext):
     @session.on("user_input_transcribed")
     def on_user_input_transcribed(event):
         if event.is_final and event.transcript.strip():
+            # Process caller name capture state machine
+            before_state = agent.name_state.state
+            result = agent.name_state.process_utterance(event.transcript)
+            logger.info(
+                f"[NAME_STATE] before={before_state} input=\"{event.transcript}\" "
+                f"action={result.get('action')} captured_name={agent.name_state.captured_name} "
+                f"retry_count={agent.name_state.spelling_retries}"
+            )
+            if result.get("name"):
+                agent.captured_caller_name = result["name"]
+
+            # Format rich STT diagnostics if available
+            conf = getattr(event, 'confidence', None)
+            words = getattr(event, 'words', None)
+            words_info = ""
+            if words and isinstance(words, list):
+                words_info = f" words={[{'w': getattr(w, 'word', str(w)), 'c': getattr(w, 'confidence', None)} for w in words[:5]]}"
+
             logger.info(
                 f"[STT_DEBUG] final_text=\"{event.transcript}\" is_final={event.is_final} "
-                f"language={getattr(event, 'language', None)} speaker_id={getattr(event, 'speaker_id', None)}"
+                f"confidence={conf} language={getattr(event, 'language', None)} "
+                f"speaker_id={getattr(event, 'speaker_id', None)}{words_info}"
             )
             logger.info(f"User speech transcribed: {event.transcript}")
             if agent.settings.enable_transcripts and agent.transcript_session_id:

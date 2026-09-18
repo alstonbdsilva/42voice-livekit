@@ -222,6 +222,56 @@ class LiveKitSipService:
                 pass
             return f"err-outbound-trunk-{clean_number.replace(' ', '')}", f"LiveKit SIP outbound trunk provisioning failed: {str(e)}"
 
+    async def find_matching_outbound_trunk(self, number: str, sip_config: Dict[str, Any]) -> Optional[str]:
+        """
+        Search existing LiveKit outbound trunks to find an existing trunk matching
+        the phone number and SIP domain.
+        """
+        lk = self._get_client()
+        if not lk:
+            return None
+        try:
+            clean_number = normalize_phone_number(number)
+            address = sip_config.get("sip_domain") or sip_config.get("domain") or ""
+            out_trunks = await lk.sip.list_outbound_trunk(lk_api.ListSIPOutboundTrunkRequest())
+            for ot in out_trunks.items:
+                # Check address match and number match
+                if address and ot.address and address.lower() in ot.address.lower():
+                    if clean_number in list(ot.numbers) or clean_number.replace("+", "") in [n.replace("+", "") for n in ot.numbers]:
+                        await lk.aclose()
+                        return ot.sip_trunk_id
+                # Check exact number match
+                if clean_number in list(ot.numbers):
+                    await lk.aclose()
+                    return ot.sip_trunk_id
+            await lk.aclose()
+            return None
+        except Exception as e:
+            logger.warning(f"Error checking existing outbound trunks: {e}")
+            try:
+                await lk.aclose()
+            except Exception:
+                pass
+            return None
+
+    async def reconcile_outbound_trunk(
+        self,
+        number: str,
+        name: str,
+        sip_config: Dict[str, Any]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Reconcile an outbound trunk without touching inbound trunks or dispatch rules:
+        1. Look for an existing matching outbound trunk on LiveKit.
+        2. If not found, provision a new outbound trunk.
+        """
+        existing_id = await self.find_matching_outbound_trunk(number, sip_config)
+        if existing_id:
+            logger.info(f"Reconciled existing LiveKit Outbound Trunk: {existing_id} for number {number}")
+            return existing_id, None
+        
+        return await self.provision_outbound_trunk(number, name, sip_config)
+
     async def deprovision_inbound_trunk(
         self, 
         trunk_id: Optional[str] = None, 

@@ -65,10 +65,16 @@ def build_stt_keywords(agent_data: Optional[Dict[str, Any]] = None, max_hints: i
 
     raw_candidates = []
 
-    # 1. Agent display name (e.g. "Agent Alpha")
+    # 1. Agent display name (e.g. "Digital AI Assistant — Jaya")
     agent_name = agent_data.get("name") or agent_data.get("agent_name")
     if agent_name and isinstance(agent_name, str):
         raw_candidates.append(agent_name)
+        # Extract sub-phrases split by delimiters (—, -, :, ,) e.g. "Digital AI Assistant — Jaya" -> "Jaya"
+        parts = re.split(r"[—\-\:\,]", agent_name)
+        for part in parts:
+            p_clean = part.strip()
+            if p_clean and len(p_clean) >= 2:
+                raw_candidates.append(p_clean)
 
     # 2. Client / Organization name (e.g. "Company Alpha")
     client_name = agent_data.get("client_name")

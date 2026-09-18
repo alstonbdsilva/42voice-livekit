@@ -15,6 +15,8 @@ from twilio.base.exceptions import TwilioRestException
 from api.middlewares.auth import get_current_user
 from api.utils.api_response import ApiResponse
 from api.utils.encryption import token_encryptor
+from config import get_settings
+from api import database
 from api.modules.telephony_configs.schemas import (
     TelephonyProviderMetadataResponse,
     TelephonyConfigurationCreateRequest,
@@ -950,10 +952,15 @@ async def initiate_call(
     client_id = get_scoped_client_id(current_user)
     dest_number = req.phone_number.strip()
 
-    # 1. Fetch telephony configuration
+    # 1. Fetch telephony configuration strictly scoped to user/client_id
     config = None
     if req.telephony_configuration_id:
         config = await db_service.get_telephony_configuration(req.telephony_configuration_id, client_id)
+        if not config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Selected telephony configuration not found."
+            )
 
     if not config:
         configs = await db_service.list_telephony_configurations(client_id)
@@ -961,17 +968,27 @@ async def initiate_call(
             default_item = next((c for c in configs if c.get("is_default_outbound")), configs[0])
             config = await db_service.get_telephony_configuration(default_item["id"], client_id)
 
-    # 2. Fetch caller ID phone number
+    if not config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No telephony configuration found for this account. Please configure a telephony provider first."
+        )
+
+    # 2. Fetch caller ID phone number from telephony_phone_numbers table
     from_number = None
     phone_obj = None
-    if config:
-        numbers = await db_service.list_phone_numbers(config["id"])
-        if req.from_phone_number_id:
-            phone_obj = next((n for n in numbers if n["id"] == req.from_phone_number_id), None)
+    numbers = await db_service.list_phone_numbers(config["id"])
+    if req.from_phone_number_id:
+        phone_obj = next((n for n in numbers if n["id"] == req.from_phone_number_id), None)
         if not phone_obj:
-            phone_obj = next((n for n in numbers if n.get("is_default_caller_id")), numbers[0] if numbers else None)
-        if phone_obj:
-            from_number = phone_obj.get("address")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Selected caller ID phone number not found in this configuration."
+            )
+    if not phone_obj:
+        phone_obj = next((n for n in numbers if n.get("is_default_caller_id")), numbers[0] if numbers else None)
+    if phone_obj:
+        from_number = phone_obj.get("address")
 
     # 3. Fetch agent info if provided
     agent_name = "Voice Agent"
@@ -980,7 +997,10 @@ async def initiate_call(
         if rows:
             agent_name = rows[0]["name"]
 
-    logger.info(f"Initiating call to {dest_number} (Agent: '{agent_name}', Config: {config.get('name') if config else 'None'}, CallerID: {from_number})")
+    logger.info(
+        f"Initiating call to {dest_number} (Agent: '{agent_name}', "
+        f"Config: {config.get('name')}, ConfigID: {config.get('id')}, CallerID: {from_number})"
+    )
 
     # 4. Prepare Metadata for LiveKit Dispatch & Worker
     metadata_dict = {
@@ -991,24 +1011,25 @@ async def initiate_call(
     } if req.agent_id else {}
     metadata_payload = json.dumps(metadata_dict) if metadata_dict else ""
 
-    # 5. Initiate via LiveKit SIP API if outbound trunk is configured
     settings = get_settings()
-    raw_creds = config.get("raw_credentials") or {} if config else {}
+    raw_creds = config.get("raw_credentials") or {}
+    provider = config.get("provider")
+
+    # Primary source for outbound SIP trunk ID: telephony_phone_numbers.lk_outbound_sip_trunk_id
     sip_trunk_id = (
         (phone_obj.get("lk_outbound_sip_trunk_id") if phone_obj else None)
         or raw_creds.get("outbound_sip_trunk_id")
         or raw_creds.get("sip_trunk_id")
         or raw_creds.get("twilio_sip_trunk_id")
-        or settings.twilio_sip_trunk_id
     )
 
-    if sip_trunk_id and settings.livekit_url and settings.livekit_api_key and settings.livekit_api_secret:
+    async def _dispatch_livekit_sip_participant(trunk_id_to_use: str) -> Optional[str]:
         lk = None
         try:
             from livekit import api as lk_api
             lk = lk_api.LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret)
             room_name = f"call-{uuid.uuid4().hex[:8]}"
-            
+
             # Dispatch agent worker to the room
             if settings.livekit_agent_name:
                 try:
@@ -1025,9 +1046,9 @@ async def initiate_call(
 
             # Initiate SIP Participant Outbound Call
             sip_req = lk_api.CreateSIPParticipantRequest(
-                sip_trunk_id=sip_trunk_id,
+                sip_trunk_id=trunk_id_to_use,
                 sip_call_to=dest_number,
-                sip_number=from_number or settings.twilio_phone_number,
+                sip_number=from_number or "",
                 room_name=room_name,
                 participant_identity=f"sip-{dest_number}",
                 participant_name=dest_number,
@@ -1037,19 +1058,83 @@ async def initiate_call(
             )
             res = await lk.sip.create_sip_participant(sip_req)
             await lk.aclose()
-            return ApiResponse.success(message=f"Call initiated to {dest_number} with agent '{agent_name}' via LiveKit SIP (Participant ID: {res.participant_id})")
-        except Exception as lk_err:
-            logger.warning(f"LiveKit SIP participant dispatch warning: {lk_err}")
+            return res.participant_id
+        except Exception as err:
             if lk:
                 try:
                     await lk.aclose()
                 except Exception:
                     pass
+            raise err
 
-    # 6. Fallback to Twilio REST API if Twilio configuration or settings provided
-    account_sid = raw_creds.get("account_sid") or settings.twilio_account_sid
-    auth_token = raw_creds.get("auth_token") or settings.twilio_auth_token
-    provider = (config.get("provider") if config else None) or ("twilio" if (account_sid and auth_token) else None)
+    # 5. Initiate via LiveKit SIP API if outbound trunk is configured
+    if settings.livekit_url and settings.livekit_api_key and settings.livekit_api_secret:
+        reconciled = False
+        current_trunk_id = sip_trunk_id
+
+        # If no trunk ID is present, try to reconcile/find it first
+        if not current_trunk_id and phone_obj and from_number:
+            sip_config_with_provider = {**raw_creds, "provider": provider}
+            reconciled_id, _ = await livekit_sip_service.reconcile_outbound_trunk(
+                number=from_number,
+                name=phone_obj.get("label") or f"{config.get('name', 'DID')} Line",
+                sip_config=sip_config_with_provider
+            )
+            if reconciled_id and not str(reconciled_id).startswith("err-") and not str(reconciled_id).startswith("mock-"):
+                current_trunk_id = reconciled_id
+                reconciled = True
+                phone_obj["lk_outbound_sip_trunk_id"] = reconciled_id
+                await database.query(
+                    "UPDATE telephony_phone_numbers SET lk_outbound_sip_trunk_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2::uuid",
+                    [reconciled_id, phone_obj["id"]]
+                )
+                logger.info(f"Reconciled and updated lk_outbound_sip_trunk_id={reconciled_id} for phone {phone_obj['id']}")
+
+        if current_trunk_id:
+            try:
+                participant_id = await _dispatch_livekit_sip_participant(current_trunk_id)
+                return ApiResponse.success(
+                    message=f"Call initiated to {dest_number} with agent '{agent_name}' via LiveKit SIP (Participant ID: {participant_id})"
+                )
+            except Exception as lk_err:
+                err_str = str(lk_err).lower()
+                is_trunk_not_found = (
+                    "does not exist" in err_str or
+                    "not found" in err_str or
+                    "404" in err_str or
+                    "sip trunk" in err_str
+                )
+                logger.warning(f"LiveKit SIP participant dispatch warning: {lk_err}")
+
+                # Retry ONLY ONCE if trunk is not found and we haven't reconciled yet
+                if is_trunk_not_found and not reconciled and phone_obj and from_number:
+                    logger.info(f"Attempting one-time reconciliation for outbound trunk: {current_trunk_id}")
+                    sip_config_with_provider = {**raw_creds, "provider": provider}
+                    new_outbound_id, _ = await livekit_sip_service.reconcile_outbound_trunk(
+                        number=from_number,
+                        name=phone_obj.get("label") or f"{config.get('name', 'DID')} Line",
+                        sip_config=sip_config_with_provider
+                    )
+                    if new_outbound_id and not str(new_outbound_id).startswith("err-") and not str(new_outbound_id).startswith("mock-"):
+                        # Update ONLY lk_outbound_sip_trunk_id in database
+                        await database.query(
+                            "UPDATE telephony_phone_numbers SET lk_outbound_sip_trunk_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2::uuid",
+                            [new_outbound_id, phone_obj["id"]]
+                        )
+                        logger.info(f"Updated lk_outbound_sip_trunk_id to {new_outbound_id} in DB. Retrying LiveKit SIP dispatch (1 retry only)...")
+                        try:
+                            participant_id = await _dispatch_livekit_sip_participant(new_outbound_id)
+                            return ApiResponse.success(
+                                message=f"Call initiated to {dest_number} with agent '{agent_name}' via LiveKit SIP (Participant ID: {participant_id})"
+                            )
+                        except Exception as retry_err:
+                            logger.error(f"Retry after outbound trunk reconciliation failed: {retry_err}")
+
+    # 6. Fallback to Twilio REST API if provider is Twilio
+    # Use credentials strictly from selected telephony configuration
+    account_sid = raw_creds.get("account_sid")
+    raw_auth_token = raw_creds.get("auth_token")
+    auth_token = safe_decrypt(raw_auth_token) if raw_auth_token else None
 
     if provider == "twilio":
         if not account_sid or not auth_token:
@@ -1058,17 +1143,17 @@ async def initiate_call(
                 detail="Selected Twilio configuration is missing Account SID or Auth Token."
             )
 
-        caller_id = from_number or settings.twilio_phone_number
+        caller_id = from_number
         if not caller_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No caller ID phone number configured for this Twilio integration. Please add a phone number in Telephony Configurations or set TWILIO_PHONE_NUMBER."
+                detail="No caller ID phone number configured for this Twilio integration. Please add a phone number in Telephony Configurations."
             )
 
         url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Calls.json"
         
-        # If Twilio SIP domain is set, bridge call to LiveKit SIP trunk
-        sip_domain = settings.twilio_sip_domain or "42voice.pstn.sydney.twilio.com"
+        # If Twilio SIP domain is set in credentials or defaults, bridge call
+        sip_domain = raw_creds.get("sip_domain") or settings.twilio_sip_domain or "42voice.pstn.sydney.twilio.com"
         twiml = f"<Response><Dial><Sip>sip:{dest_number}@{sip_domain}</Sip></Dial></Response>"
         data = {
             "To": dest_number,
@@ -1082,8 +1167,10 @@ async def initiate_call(
                 resp_json = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
                 if resp.status_code in (200, 201):
                     call_sid = resp_json.get("sid", "N/A")
-                    logger.info(f"Twilio call dispatched successfully. Call SID: {call_sid}")
-                    return ApiResponse.success(message=f"Outbound call successfully initiated to {dest_number} with agent '{agent_name}'! (Twilio Call SID: {call_sid})")
+                    logger.info(f"Twilio call dispatched successfully for Account '{account_sid}'. Call SID: {call_sid}")
+                    return ApiResponse.success(
+                        message=f"Outbound call successfully initiated to {dest_number} with agent '{agent_name}'! (Twilio Call SID: {call_sid})"
+                    )
                 else:
                     err_msg = resp_json.get("message") or resp_json.get("detail") or resp.text or "Twilio API error"
                     logger.error(f"Twilio call error ({resp.status_code}): {err_msg}")
@@ -1102,5 +1189,6 @@ async def initiate_call(
 
     # Fallback response
     return ApiResponse.success(message=f"Test call simulation initiated for {dest_number}. (Telephony configuration verified)")
+
 
 
