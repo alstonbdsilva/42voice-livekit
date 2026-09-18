@@ -411,8 +411,9 @@ async def init_db() -> None:
     logger.info("Initializing database...")
     settings = get_settings()
     
-    # Initialize database pool
+    # Initialize database pool and run schema verification during backend/migration startup
     await database.init_pool()
+    await database.verify_schema()
     
     try:
         # 1. Test database connection

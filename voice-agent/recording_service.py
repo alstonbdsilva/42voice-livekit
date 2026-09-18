@@ -117,7 +117,7 @@ class RecordingService:
                 logger.info(f"Starting recording (attempt {attempt + 1}/{max_retries}): {room_name}")
                 logger.debug(f"Recording request details: room_name={room_name}, s3_key={s3_key}, layout=grid")
                 logger.debug(f"S3 bucket={self.settings.s3_bucket_name}, region={self.settings.aws_region}")
-                logger.debug(f"LiveKit URL={self.settings.livekit_url}, API key={self.settings.livekit_api_key[:10]}...")
+                logger.debug(f"LiveKit URL={self.settings.livekit_url}, API key configured: {bool(self.settings.livekit_api_key)}")
                 
                 client = self._get_client()
                 logger.debug(f"LiveKit API client created: {client}")

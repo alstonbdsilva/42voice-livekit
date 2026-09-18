@@ -831,12 +831,16 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"[SIP] Participant attributes: {participant.attributes}")
     logger.info(f"[SIP] Resolved called_number: {called_number}, target_agent_id in metadata: {target_agent_id}")
     
+    t_db = time.perf_counter()
+    if database.pool is None or (hasattr(database.pool, "_loop") and database.pool._loop.is_closed()):
+        await database.init_pool()
+    logger.info(f"[CALL_TIMING] job={job_id} stage=db_ready total_elapsed={time.perf_counter() - t_start:.3f}s step={time.perf_counter() - t_db:.3f}s")
+
     # Case A: Explicit agent_id provided in metadata (Outbound call or Web Agent session)
+    t_agent_cfg = time.perf_counter()
     if target_agent_id:
         logger.info(f"[Agent] Target agent_id '{target_agent_id}' provided in metadata. Loading agent configuration directly...")
         try:
-            if database.pool is None:
-                await database.init_pool()
             agent_rows = await database.query("SELECT * FROM agents WHERE id = $1::uuid", [target_agent_id])
             if agent_rows:
                 ag_data = agent_rows[0]
@@ -945,6 +949,7 @@ async def entrypoint(ctx: JobContext):
         unassigned_number = True
         custom_prompt = "This call cannot be routed. Please dial a configured phone number or select an agent."
 
+    logger.info(f"[CALL_TIMING] job={job_id} stage=agent_config_loaded total_elapsed={time.perf_counter() - t_start:.3f}s step={time.perf_counter() - t_agent_cfg:.3f}s")
     
     # Validate required voice service configuration is present
     if not settings.deepgram_api_key or not settings.openai_api_key:
@@ -958,12 +963,10 @@ async def entrypoint(ctx: JobContext):
     support_agent = SupportAgent(session_manager)
     
     # Dynamic tools loading from database
+    t_tools = time.perf_counter()
     dynamic_tools = []
     if agent_id:
         try:
-            if database.pool is None:
-                await database.init_pool()
-            
             # Fetch tool_ids from agents table
             agent_rows = await database.query("SELECT tool_ids FROM agents WHERE id = $1::uuid", [agent_id])
             if agent_rows:
@@ -1129,6 +1132,8 @@ async def entrypoint(ctx: JobContext):
                             logger.exception(f"Failed to initialize custom tool {tool.get('name')}: {e}")
         except Exception as e:
             logger.exception(f"Error fetching dynamic tools for agent {agent_id}: {e}")
+
+    logger.info(f"[CALL_TIMING] job={job_id} stage=tools_loaded total_elapsed={time.perf_counter() - t_start:.3f}s step={time.perf_counter() - t_tools:.3f}s")
 
     # Create agent session with VAD from prewarm (aggressive low latency settings)
     logger.info("Creating AgentSession")

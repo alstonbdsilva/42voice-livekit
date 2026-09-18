@@ -2,6 +2,7 @@
 Asynchronous PostgreSQL database connector using asyncpg.
 """
 
+import asyncio
 import logging
 import asyncpg
 from typing import List, Dict, Any, Optional
@@ -10,12 +11,20 @@ from config import get_settings
 logger = logging.getLogger("voice-agent.api.database")
 
 pool: Optional[asyncpg.Pool] = None
-_tables_verified: bool = False
+_pool_lock: Optional[asyncio.Lock] = None
+
+
+def _get_lock() -> asyncio.Lock:
+    global _pool_lock
+    if _pool_lock is None:
+        _pool_lock = asyncio.Lock()
+    return _pool_lock
 
 
 async def init_pool() -> None:
-    """Initialize the PostgreSQL connection pool."""
-    global pool, _tables_verified
+    """Initialize the PostgreSQL connection pool without running schema verification queries."""
+    global pool
+    
     if pool is not None:
         try:
             if hasattr(pool, "_loop") and pool._loop.is_closed():
@@ -24,184 +33,206 @@ async def init_pool() -> None:
                 return
         except Exception:
             pool = None
-        
-    settings = get_settings()
-    logger.info(f"Connecting to PostgreSQL database at {settings.pghost}:{settings.pgport}...")
-    
-    try:
-        # Construct SSL context if necessary
-        ssl_ctx = None
-        if "supabase.co" in settings.pghost or settings.log_level != "DEBUG":
-            import ssl
-            ssl_ctx = ssl.create_default_context()
-            ssl_ctx.check_hostname = False
-            ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    lock = _get_lock()
+    async with lock:
+        # Double check inside lock
+        if pool is not None:
+            try:
+                if hasattr(pool, "_loop") and not pool._loop.is_closed():
+                    return
+            except Exception:
+                pool = None
             
-        pool = await asyncpg.create_pool(
-            host=settings.pghost,
-            port=settings.pgport,
-            database=settings.pgdatabase,
-            user=settings.pguser,
-            password=settings.pgpassword,
-            min_size=2,
-            max_size=settings.pgmax_connections,
-            max_inactive_connection_lifetime=30.0,
-            command_timeout=10.0,
-            ssl=ssl_ctx
-        )
-        logger.info("PostgreSQL connection pool initialized successfully")
+        settings = get_settings()
+        logger.info(f"Connecting to PostgreSQL database at {settings.pghost}:{settings.pgport}...")
         
-        if not _tables_verified:
-            _tables_verified = True
-            # Self-healing migration for phone_numbers table
-            try:
-                logger.info("Verifying phone_numbers table exists...")
-                async with pool.acquire() as conn:
-                    await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS phone_numbers (
-                        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                        number VARCHAR(50) UNIQUE NOT NULL,
-                        name VARCHAR(255),
-                        provider VARCHAR(50) NOT NULL,
-                        monthly_cost NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-                        setup_cost NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-                        status VARCHAR(50) NOT NULL DEFAULT 'available',
-                        capabilities JSONB NOT NULL DEFAULT '{"voice": true, "sms": true}'::jsonb,
-                        client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
-                        reseller_id UUID REFERENCES resellers(id) ON DELETE SET NULL,
-                        agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
-                        sip_config JSONB,
-                        lk_sip_trunk_id VARCHAR(255),
-                        lk_sip_dispatch_rule_id VARCHAR(255),
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_phone_numbers_number ON phone_numbers(number);
-                    CREATE INDEX IF NOT EXISTS idx_phone_numbers_client ON phone_numbers(client_id);
-                    CREATE INDEX IF NOT EXISTS idx_phone_numbers_agent ON phone_numbers(agent_id);
-                    """)
-                logger.info("Verified phone_numbers table and indexes.")
-            except Exception as e:
-                logger.warning(f"Could not verify phone_numbers table: {e}")
+        try:
+            # Construct SSL context if necessary
+            ssl_ctx = None
+            if "supabase.co" in settings.pghost or settings.log_level != "DEBUG":
+                import ssl
+                ssl_ctx = ssl.create_default_context()
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl.CERT_NONE
+                
+            pool = await asyncpg.create_pool(
+                host=settings.pghost,
+                port=settings.pgport,
+                database=settings.pgdatabase,
+                user=settings.pguser,
+                password=settings.pgpassword,
+                min_size=1,
+                max_size=settings.pgmax_connections,
+                max_inactive_connection_lifetime=30.0,
+                command_timeout=10.0,
+                ssl=ssl_ctx
+            )
+            logger.info("PostgreSQL connection pool initialized successfully")
+        except Exception as e:
+            logger.critical(f"Failed to initialize PostgreSQL pool: {e}")
+            raise
 
-            # Self-healing migration for agents table columns
-            try:
-                logger.info("Verifying agents table columns exist...")
-                async with pool.acquire() as conn:
-                    await conn.execute("""
-                    ALTER TABLE agents ADD COLUMN IF NOT EXISTS voice_name VARCHAR(50) DEFAULT 'aria';
-                    ALTER TABLE agents ADD COLUMN IF NOT EXISTS voice_gender VARCHAR(20) DEFAULT 'female';
-                    ALTER TABLE agents ADD COLUMN IF NOT EXISTS guardrails JSONB DEFAULT '{}'::jsonb;
-                    ALTER TABLE agents ADD COLUMN IF NOT EXISTS custom_guardrails TEXT;
-                    ALTER TABLE agents ADD COLUMN IF NOT EXISTS knowledge_items JSONB DEFAULT '[]'::jsonb;
-                    ALTER TABLE agents ADD COLUMN IF NOT EXISTS tool_ids JSONB DEFAULT '[]'::jsonb;
-                    """)
-                logger.info("Verified agents table columns.")
-            except Exception as e:
-                logger.warning(f"Could not verify agents columns: {e}")
 
-            # Self-healing migration for tools table
-            try:
-                logger.info("Verifying tools table exists...")
-                async with pool.acquire() as conn:
-                    await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tools (
-                        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                        tool_uuid UUID UNIQUE NOT NULL DEFAULT uuid_generate_v4(),
-                        name VARCHAR(255) NOT NULL,
-                        description TEXT,
-                        category VARCHAR(50) NOT NULL DEFAULT 'http_api',
-                        icon VARCHAR(50) DEFAULT 'globe',
-                        icon_color VARCHAR(7) DEFAULT '#3B82F6',
-                        status VARCHAR(50) NOT NULL DEFAULT 'active',
-                        definition JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-                        client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_tools_user ON tools(user_id);
-                    CREATE INDEX IF NOT EXISTS idx_tools_client ON tools(client_id);
-                    CREATE INDEX IF NOT EXISTS idx_tools_category ON tools(category);
-                    CREATE INDEX IF NOT EXISTS idx_tools_status ON tools(status);
-                    """)
-                logger.info("Verified tools table and indexes.")
-            except Exception as e:
-                logger.warning(f"Could not verify tools table: {e}")
+async def verify_schema() -> None:
+    """Run database table/column verification DDLs during startup/initialization."""
+    if pool is None:
+        await init_pool()
+        
+    if pool is None:
+        logger.error("Database pool is None after init_pool. Aborting verify_schema.")
+        return
 
-            # Self-healing migration for telephony_configurations table
-            try:
-                logger.info("Verifying telephony_configurations table exists...")
-                async with pool.acquire() as conn:
-                    await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS telephony_configurations (
-                        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                        name VARCHAR(255) NOT NULL,
-                        provider VARCHAR(50) NOT NULL,
-                        credentials JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        is_default_outbound BOOLEAN NOT NULL DEFAULT false,
-                        client_id UUID REFERENCES clients(id) ON DELETE CASCADE,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_telephony_configurations_client ON telephony_configurations(client_id);
-                    CREATE INDEX IF NOT EXISTS idx_telephony_configurations_provider ON telephony_configurations(provider);
-
-                    CREATE TABLE IF NOT EXISTS telephony_phone_numbers (
-                        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                        telephony_configuration_id UUID REFERENCES telephony_configurations(id) ON DELETE CASCADE,
-                        address VARCHAR(255) NOT NULL,
-                        address_type VARCHAR(50) NOT NULL DEFAULT 'pstn',
-                        country_code VARCHAR(10),
-                        label VARCHAR(255),
-                        is_active BOOLEAN NOT NULL DEFAULT true,
-                        is_default_caller_id BOOLEAN NOT NULL DEFAULT false,
-                        inbound_agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                    );
-                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS country_code VARCHAR(10);
-                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS label VARCHAR(255);
-                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS address_type VARCHAR(50) DEFAULT 'pstn';
-                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true;
-                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS is_default_caller_id BOOLEAN DEFAULT false;
-                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS inbound_agent_id UUID REFERENCES agents(id) ON DELETE SET NULL;
-                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS lk_sip_trunk_id VARCHAR(255);
-                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS lk_outbound_sip_trunk_id VARCHAR(255);
-                    ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS lk_sip_dispatch_rule_id VARCHAR(255);
-                    CREATE INDEX IF NOT EXISTS idx_telephony_phone_numbers_config ON telephony_phone_numbers(telephony_configuration_id);
-                    """)
-                logger.info("Verified telephony_configurations and telephony_phone_numbers tables.")
-            except Exception as e:
-                logger.warning(f"Could not verify telephony tables: {e}")
-            # Self-healing migration for external_credentials table
-            try:
-                logger.info("Verifying external_credentials table exists...")
-                async with pool.acquire() as conn:
-                    await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS external_credentials (
-                        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                        credential_uuid UUID UNIQUE NOT NULL DEFAULT uuid_generate_v4(),
-                        client_id UUID REFERENCES clients(id) ON DELETE CASCADE,
-                        name VARCHAR(255) NOT NULL,
-                        description TEXT,
-                        credential_type VARCHAR(50) NOT NULL DEFAULT 'none',
-                        credential_data JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                        is_active BOOLEAN NOT NULL DEFAULT true,
-                        UNIQUE (client_id, name)
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_external_credentials_client ON external_credentials(client_id);
-                    CREATE INDEX IF NOT EXISTS idx_external_credentials_uuid ON external_credentials(credential_uuid);
-                    """)
-                logger.info("Verified external_credentials table and indexes.")
-            except Exception as e:
-                logger.warning(f"Could not verify external_credentials table: {e}")
+    db_pool: asyncpg.Pool = pool
+    logger.info("Starting database schema verification...")
+    
+    # Self-healing migration for phone_numbers table
+    try:
+        logger.info("Verifying phone_numbers table exists...")
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS phone_numbers (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                number VARCHAR(50) UNIQUE NOT NULL,
+                name VARCHAR(255),
+                provider VARCHAR(50) NOT NULL,
+                monthly_cost NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+                setup_cost NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+                status VARCHAR(50) NOT NULL DEFAULT 'available',
+                capabilities JSONB NOT NULL DEFAULT '{"voice": true, "sms": true}'::jsonb,
+                client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
+                reseller_id UUID REFERENCES resellers(id) ON DELETE SET NULL,
+                agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
+                sip_config JSONB,
+                lk_sip_trunk_id VARCHAR(255),
+                lk_sip_dispatch_rule_id VARCHAR(255),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_phone_numbers_number ON phone_numbers(number);
+            CREATE INDEX IF NOT EXISTS idx_phone_numbers_client ON phone_numbers(client_id);
+            CREATE INDEX IF NOT EXISTS idx_phone_numbers_agent ON phone_numbers(agent_id);
+            """)
+        logger.info("Verified phone_numbers table and indexes.")
     except Exception as e:
-        logger.critical(f"Failed to initialize PostgreSQL pool: {e}")
-        raise
+        logger.warning(f"Could not verify phone_numbers table: {e}")
+
+    # Self-healing migration for agents table columns
+    try:
+        logger.info("Verifying agents table columns exist...")
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS voice_name VARCHAR(50) DEFAULT 'aria';
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS voice_gender VARCHAR(20) DEFAULT 'female';
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS guardrails JSONB DEFAULT '{}'::jsonb;
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS custom_guardrails TEXT;
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS knowledge_items JSONB DEFAULT '[]'::jsonb;
+            ALTER TABLE agents ADD COLUMN IF NOT EXISTS tool_ids JSONB DEFAULT '[]'::jsonb;
+            """)
+        logger.info("Verified agents table columns.")
+    except Exception as e:
+        logger.warning(f"Could not verify agents columns: {e}")
+
+    # Self-healing migration for tools table
+    try:
+        logger.info("Verifying tools table exists...")
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS tools (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                tool_uuid UUID UNIQUE NOT NULL DEFAULT uuid_generate_v4(),
+                name VARCHAR(255) NOT NULL,
+                description TEXT,
+                category VARCHAR(50) NOT NULL DEFAULT 'http_api',
+                icon VARCHAR(50) DEFAULT 'globe',
+                icon_color VARCHAR(7) DEFAULT '#3B82F6',
+                status VARCHAR(50) NOT NULL DEFAULT 'active',
+                definition JSONB NOT NULL DEFAULT '{}'::jsonb,
+                user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+                client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_tools_user ON tools(user_id);
+            CREATE INDEX IF NOT EXISTS idx_tools_client ON tools(client_id);
+            CREATE INDEX IF NOT EXISTS idx_tools_category ON tools(category);
+            CREATE INDEX IF NOT EXISTS idx_tools_status ON tools(status);
+            """)
+        logger.info("Verified tools table and indexes.")
+    except Exception as e:
+        logger.warning(f"Could not verify tools table: {e}")
+
+    # Self-healing migration for telephony_configurations table
+    try:
+        logger.info("Verifying telephony_configurations table exists...")
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS telephony_configurations (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                name VARCHAR(255) NOT NULL,
+                provider VARCHAR(50) NOT NULL,
+                credentials JSONB NOT NULL DEFAULT '{}'::jsonb,
+                is_default_outbound BOOLEAN NOT NULL DEFAULT false,
+                client_id UUID REFERENCES clients(id) ON DELETE CASCADE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_telephony_configurations_client ON telephony_configurations(client_id);
+            CREATE INDEX IF NOT EXISTS idx_telephony_configurations_provider ON telephony_configurations(provider);
+
+            CREATE TABLE IF NOT EXISTS telephony_phone_numbers (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                telephony_configuration_id UUID REFERENCES telephony_configurations(id) ON DELETE CASCADE,
+                address VARCHAR(255) NOT NULL,
+                address_type VARCHAR(50) NOT NULL DEFAULT 'pstn',
+                country_code VARCHAR(10),
+                label VARCHAR(255),
+                is_active BOOLEAN NOT NULL DEFAULT true,
+                is_default_caller_id BOOLEAN NOT NULL DEFAULT false,
+                inbound_agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS country_code VARCHAR(10);
+            ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS label VARCHAR(255);
+            ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS address_type VARCHAR(50) DEFAULT 'pstn';
+            ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true;
+            ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS is_default_caller_id BOOLEAN DEFAULT false;
+            ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS inbound_agent_id UUID REFERENCES agents(id) ON DELETE SET NULL;
+            ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS lk_sip_trunk_id VARCHAR(255);
+            ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS lk_outbound_sip_trunk_id VARCHAR(255);
+            ALTER TABLE telephony_phone_numbers ADD COLUMN IF NOT EXISTS lk_sip_dispatch_rule_id VARCHAR(255);
+            CREATE INDEX IF NOT EXISTS idx_telephony_phone_numbers_config ON telephony_phone_numbers(telephony_configuration_id);
+            """)
+        logger.info("Verified telephony_configurations and telephony_phone_numbers tables.")
+    except Exception as e:
+        logger.warning(f"Could not verify telephony tables: {e}")
+
+    # Self-healing migration for external_credentials table
+    try:
+        logger.info("Verifying external_credentials table exists...")
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS external_credentials (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                credential_uuid UUID UNIQUE NOT NULL DEFAULT uuid_generate_v4(),
+                client_id UUID REFERENCES clients(id) ON DELETE CASCADE,
+                name VARCHAR(255) NOT NULL,
+                description TEXT,
+                credential_type VARCHAR(50) NOT NULL DEFAULT 'none',
+                credential_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+                user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                is_active BOOLEAN NOT NULL DEFAULT true,
+                UNIQUE (client_id, name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_external_credentials_client ON external_credentials(client_id);
+            CREATE INDEX IF NOT EXISTS idx_external_credentials_uuid ON external_credentials(credential_uuid);
+            """)
+        logger.info("Verified external_credentials table and indexes.")
+    except Exception as e:
+        logger.warning(f"Could not verify external_credentials table: {e}")
 
 
 async def close_pool() -> None:

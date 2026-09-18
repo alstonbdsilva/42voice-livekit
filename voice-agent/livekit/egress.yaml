@@ -1,12 +1,10 @@
-api_key: myapikey
-api_secret: mysupersecret
+api_key: ${LIVEKIT_API_KEY}
+api_secret: ${LIVEKIT_API_SECRET}
 
-# ws_url: wss://ws.42voice.com # EC2 production URL
 ws_url: ws://livekit:7880
 
 redis:
-  # address: localhost:6379 # EC2 host network mode
   address: redis:6379
+  password: ${REDIS_PASSWORD}
 
 template_port: 7980
-
