@@ -20,6 +20,7 @@ load_dotenv()
 import json
 import httpx
 import redis
+import uuid
 from uuid import UUID
 from enum import Enum
 from datetime import datetime, date, timezone
@@ -31,6 +32,13 @@ from custom_tools import (
     resolve_transfer_config,
     call_mcp_tool,
     safe_calculator
+)
+from workflow_engine import (
+    WorkflowRunContext,
+    WorkflowRuntime,
+    build_compatibility_workflow,
+    resolve_legacy_agent_prompt,
+    tool_platform
 )
 from livekit.agents import (
     Agent,
@@ -123,7 +131,27 @@ def sanitize_agent_prompt(prompt_text: Optional[str]) -> str:
 class VoiceAgent(Agent):
     """Voice agent with orchestrator tools."""
     
-    def __init__(self, session_manager, booking_agent, sales_agent, support_agent, settings, room_name: str, participant_id: str, ctx: JobContext, vad=None, out_of_credits: bool = False, custom_prompt: Optional[str] = None, agent_name: Optional[str] = None, unassigned_number: bool = False, client_id: Optional[str] = None, tools: Optional[list] = None, agent_data: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        session_manager,
+        booking_agent,
+        sales_agent,
+        support_agent,
+        settings,
+        room_name: str,
+        participant_id: str,
+        ctx: JobContext,
+        vad=None,
+        out_of_credits: bool = False,
+        custom_prompt: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        unassigned_number: bool = False,
+        client_id: Optional[str] = None,
+        tools: Optional[list] = None,
+        agent_data: Optional[Dict[str, Any]] = None,
+        workflow_runtime: Optional[Any] = None,
+        run_id: Optional[str] = None,
+    ):
         self.session_manager = session_manager
         self.booking_agent = booking_agent
         self.sales_agent = sales_agent
@@ -136,6 +164,8 @@ class VoiceAgent(Agent):
         self.agent_name = agent_name or "unknown"
         self.out_of_credits = out_of_credits
         self.unassigned_number = unassigned_number
+        self.workflow_runtime = workflow_runtime
+        self.run_id = run_id
         self.intent_mapping = {
             "booking": "booking_agent",
             "sales": "sales_agent",
@@ -174,32 +204,7 @@ class VoiceAgent(Agent):
         # Use VAD from prewarm if provided, otherwise load it
         vad_instance = vad if vad else silero.VAD.load()
         
-        clean_custom_prompt = sanitize_agent_prompt(custom_prompt)
-        instructions = (
-            "You are a billing notice voice. State that the account is out of credits and goodbye."
-            if out_of_credits
-            else (clean_custom_prompt if clean_custom_prompt else "You are the orchestrator agent. Start by asking how you can help the user today. Use your tools to route requests, handle booking, sales, and support, or end the call when the conversation is finished.")
-        )
-        
-        # Append strict instructions for automatic call disconnection upon completion and name capture
-        if not out_of_credits:
-            instructions += (
-                "\n\nCRITICAL CONVERSATION TERMINATION RULE:\n"
-                "When the user indicates that the conversation is finished (e.g. saying 'thank you', 'goodbye', 'that's all', 'thanks a lot'), "
-                "or immediately after you confirm/recap all details requested by the user, "
-                "you MUST invoke the end_call tool to disconnect the call. Do NOT linger or ask repetitive questions once the user's request is resolved.\n\n"
-                "### CALLER NAME CAPTURE RULES:\n"
-                "- Capture the caller's name exactly as provided by the speech transcription.\n"
-                "- Do not change, autocorrect, anglicize, or substitute a caller's name.\n"
-                "- An unfamiliar name is NOT automatically an unclear name.\n"
-                "- If the transcription clearly contains a name, accept it directly and continue.\n"
-                "- Ask for spelling ONLY when the speech/transcription is genuinely ambiguous or incomplete.\n"
-                "- When asking for spelling, request letters one at a time.\n"
-                "- Retry spelling no more than twice. Never create an infinite spelling loop.\n"
-                "- If spelling cannot be captured after the allowed retries, continue gracefully using the clearest available caller-provided name or omit it.\n"
-                "- Never invent a spelling.\n"
-                "- If the caller asks for a person whose name is unclear or differs from the configured recipient or team, ask a polite, neutral clarification question using the configured name. Do NOT assert or rewrite what the caller said."
-            )
+        instructions = resolve_legacy_agent_prompt(agent_data, custom_prompt, out_of_credits)
 
         # Filter dynamic tools to avoid duplicate function names with built-in @function_tool methods
         builtin_tool_names = {
@@ -270,6 +275,20 @@ class VoiceAgent(Agent):
         logger.info("on_enter called")
         from datetime import datetime, timezone
         self.call_start = datetime.now(timezone.utc)
+        
+        # Start workflow runtime if attached
+        if hasattr(self, 'workflow_runtime') and self.workflow_runtime:
+            try:
+                await self.workflow_runtime.start()
+            except Exception as wf_err:
+                run_id = getattr(self, 'run_id', 'unknown')
+                room_name = getattr(self, 'room_name', 'unknown')
+                logger.error(f"[WF_RUN] failed run_id={run_id} room_name={room_name} error={wf_err}")
+                self.workflow_runtime.context.status = "failed"
+                # If a published/configured custom workflow failed to start, raise explicitly to prevent silent downgrade
+                compiled_wf = getattr(self.workflow_runtime, 'compiled', None)
+                if compiled_wf and compiled_wf.workflow_id and not compiled_wf.workflow_id.startswith("compat_wf_"):
+                    raise RuntimeError(f"Configured workflow failed to start: {wf_err}") from wf_err
         
         # Initialize transcript session
         if self.settings.enable_transcripts:
@@ -468,6 +487,10 @@ class VoiceAgent(Agent):
                     self.session_manager.clear_all_sessions()
                 except Exception as e:
                     logger.warning(f"Redis cleanup failed (may not be running): {e}")
+            # Update workflow runtime status
+            if hasattr(self, 'workflow_runtime') and self.workflow_runtime:
+                self.workflow_runtime.context.status = "completed"
+
             logger.info("SESSION CLEANED")
         finally:
             self._cleanup_completed = True
@@ -1333,6 +1356,38 @@ async def entrypoint(ctx: JobContext):
     if client_id and "client_id" not in agent_config_data:
         agent_config_data["client_id"] = client_id
 
+    # 1. Initialize WorkflowRunContext early (before conversation/recording exist)
+    call_run_id = str(uuid.uuid4())
+    workflow_run_ctx = WorkflowRunContext(
+        run_id=call_run_id,
+        workflow_version_id=None,
+        agent_id=str(agent_id) if agent_id else None,
+        room_name=ctx.room.name,
+        participant_identity=participant.identity,
+        client_id=str(client_id) if client_id else None,
+        call_metadata={
+            "called_number": called_number,
+            "agent_name": agent_name,
+            "job_id": job_id
+        }
+    )
+
+    # 2. Extract dynamic tool names for compatibility workflow
+    dyn_tool_names = []
+    for t in dynamic_tools:
+        if hasattr(t, "info") and hasattr(t.info, "name") and t.info.name:
+            dyn_tool_names.append(t.info.name)
+        elif hasattr(t, "name") and t.name:
+            dyn_tool_names.append(t.name)
+
+    # 3. Build single-node compatibility workflow for legacy agent
+    compiled_workflow = build_compatibility_workflow(
+        agent_data=agent_config_data,
+        custom_prompt=custom_prompt,
+        dynamic_tool_names=dyn_tool_names,
+        out_of_credits=out_of_credits
+    )
+
     # Create and start the agent
     logger.info("Creating VoiceAgent")
     agent = VoiceAgent(
@@ -1353,6 +1408,15 @@ async def entrypoint(ctx: JobContext):
         tools=dynamic_tools,
         agent_data=agent_config_data
     )
+    
+    # 4. Bind WorkflowRuntime to VoiceAgent
+    workflow_runtime = WorkflowRuntime(
+        compiled=compiled_workflow,
+        context=workflow_run_ctx,
+        agent=agent
+    )
+    agent.workflow_runtime = workflow_runtime
+    agent.run_id = call_run_id
     
     # Initialize recording state
     agent.egress_id = None
