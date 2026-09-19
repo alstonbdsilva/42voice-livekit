@@ -173,6 +173,86 @@ class TestWorkflowPersistence(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["lifecycleStatus"], "published")
         self.assertEqual(res["id"], str(ver_id))
 
+    @patch("api.database.transaction")
+    @patch("api.database.query")
+    async def test_05_republish_creates_v2_and_leaves_v1_untouched(self, mock_query, mock_transaction):
+        """Verify second publish creates version 2 without mutating existing version 1."""
+        wf_id = str(uuid.uuid4())
+        v1_id = uuid.uuid4()
+        v2_id = uuid.uuid4()
+        now_dt = MagicMock()
+        now_dt.isoformat.return_value = "2026-09-19T12:00:00Z"
+
+        mock_wf = {
+            "id": uuid.UUID(wf_id),
+            "client_id": uuid.UUID(self.user_context["client_id"]),
+            "user_id": uuid.UUID(self.user_context["id"]),
+            "name": "Versioned Workflow",
+            "status": "active",
+            "created_at": now_dt,
+            "updated_at": now_dt
+        }
+        mock_draft_v2 = {
+            "id": uuid.uuid4(),
+            "workflow_id": uuid.UUID(wf_id),
+            "version_number": 0,
+            "lifecycle_status": "draft",
+            "definition": json.dumps({
+                "version": 1,
+                "workflow_id": wf_id,
+                "name": "Published WF V2",
+                "start_node": "start",
+                "nodes": {
+                    "start": {"id": "start", "name": "Start", "type": "START", "prompt": "", "tools": [], "config": {"next_node": "agent"}},
+                    "agent": {"id": "agent", "name": "Agent", "type": "AGENT", "prompt": "V2 Prompt", "tools": ["end_call"], "config": {}},
+                    "end": {"id": "end", "name": "End", "type": "END", "prompt": "End", "tools": ["end_call"], "config": {}}
+                },
+                "edges": [
+                    {"id": "e1", "source": "start", "target": "agent", "type": "default"},
+                    {"id": "e2", "source": "agent", "target": "end", "type": "tool"}
+                ]
+            }),
+            "ui_metadata": "{}",
+            "created_at": now_dt
+        }
+
+        mock_query.side_effect = [
+            [mock_wf],        # find_by_id in publish_workflow
+            [mock_draft_v2],  # get_or_create_draft
+        ]
+
+        mock_published_v2_row = {
+            "id": v2_id,
+            "workflow_id": uuid.UUID(wf_id),
+            "version_number": 2,
+            "lifecycle_status": "published",
+            "definition": mock_draft_v2["definition"],
+            "ui_metadata": "{}",
+            "schema_version": "1.0",
+            "engine_version": "1.0",
+            "validation_metadata": "{}",
+            "created_at": now_dt,
+            "published_at": now_dt,
+            "created_by": uuid.UUID(self.user_context["id"])
+        }
+
+        async def fake_pub_v2_tx(cb):
+            conn = MagicMock()
+            conn.fetch = AsyncMock(side_effect=[
+                [{"id": uuid.UUID(wf_id)}], # row lock
+                [{"next_version": 2}],       # next version calculation = 2
+                [mock_published_v2_row]      # insert published version 2
+            ])
+            conn.execute = AsyncMock()
+            return await cb(conn)
+
+        mock_transaction.side_effect = fake_pub_v2_tx
+
+        res = await self.service.publish_workflow(wf_id, self.user_context)
+        self.assertEqual(res["versionNumber"], 2)
+        self.assertEqual(res["lifecycleStatus"], "published")
+        self.assertEqual(res["id"], str(v2_id))
+
 
 if __name__ == "__main__":
     unittest.main()

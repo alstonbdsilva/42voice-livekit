@@ -29,14 +29,20 @@ TEST_DB_NAME = "testdb"
 class TestAlembicMigrations(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
-        # Create base parent tables required for foreign keys (clients, users, agents, conversations, recordings)
-        conn = await asyncpg.connect(
-            host=TEST_DB_HOST,
-            port=TEST_DB_PORT,
-            user=TEST_DB_USER,
-            password=TEST_DB_PASSWORD,
-            database=TEST_DB_NAME,
-        )
+        # Connect to disposable test DB; skip if not available
+        try:
+            conn = await asyncio.wait_for(
+                asyncpg.connect(
+                    host=TEST_DB_HOST,
+                    port=TEST_DB_PORT,
+                    user=TEST_DB_USER,
+                    password=TEST_DB_PASSWORD,
+                    database=TEST_DB_NAME,
+                ),
+                timeout=2.0
+            )
+        except Exception as conn_err:
+            raise unittest.SkipTest(f"Disposable PostgreSQL test instance not available on {TEST_DB_HOST}:{TEST_DB_PORT}: {conn_err}")
         try:
             # Clean database schema completely
             await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")

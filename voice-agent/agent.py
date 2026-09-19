@@ -38,7 +38,8 @@ from workflow_engine import (
     WorkflowRuntime,
     build_compatibility_workflow,
     resolve_legacy_agent_prompt,
-    tool_platform
+    tool_platform,
+    safe_room_ref
 )
 from realtime.livekit_runtime import LiveKitRuntimeAdapter
 from api.modules.workflows.resolver import WorkflowRuntimeResolver
@@ -298,7 +299,7 @@ class VoiceAgent(Agent):
             except Exception as wf_err:
                 run_id = getattr(self, 'run_id', 'unknown')
                 room_name = getattr(self, 'room_name', 'unknown')
-                logger.error(f"[WF_RUN] failed run_id={run_id} room_name={room_name} error={wf_err}")
+                logger.error(f"[WF_RUN] failed run_id={run_id} room_ref={safe_room_ref(room_name)} error={wf_err}")
                 self.workflow_runtime.context.status = "failed"
                 # If a published/configured custom workflow failed to start, raise explicitly to prevent silent downgrade
                 compiled_wf = getattr(self.workflow_runtime, 'compiled', None)
@@ -416,12 +417,12 @@ class VoiceAgent(Agent):
         
         async with self._cleanup_lock:
             if self._cleanup_completed or self._cleanup_in_progress:
-                logger.info(f"[CALL_CLEANUP] skipped_duplicate room={room_name}")
+                logger.info(f"[CALL_CLEANUP] skipped_duplicate room_ref={safe_room_ref(room_name)}")
                 return
             self._cleanup_in_progress = True
 
         try:
-            logger.info(f"[CALL_CLEANUP] starting room={room_name}")
+            logger.info(f"[CALL_CLEANUP] starting room_ref={safe_room_ref(room_name)}")
             self._greeting_sent = False
             
             # Wait for recording startup task to complete before stopping
@@ -492,9 +493,9 @@ class VoiceAgent(Agent):
                         timeout=15.0
                     )
                 except asyncio.TimeoutError:
-                    logger.error(f"[CALL_PERSIST] failed room={room_name} error=timeout_during_shutdown")
+                    logger.error(f"[CALL_PERSIST] failed room_ref={safe_room_ref(room_name)} error=timeout_during_shutdown")
                 except Exception as e:
-                    logger.error(f"[CALL_PERSIST] failed room={room_name} error={e}")
+                    logger.error(f"[CALL_PERSIST] failed room_ref={safe_room_ref(room_name)} error={e}")
 
             # Clear session manager state for this call (safely)
             if hasattr(self, 'session_manager'):
@@ -812,16 +813,16 @@ async def register_call_with_backend(agent, started_at, ended_at):
     room_name = getattr(agent, 'room_name', 'unknown')
     
     if not started_at:
-        logger.warning(f"[CALL_PERSIST] skipped_no_start room={room_name}")
+        logger.warning(f"[CALL_PERSIST] skipped_no_start room_ref={safe_room_ref(room_name)}")
         return
 
     # Check idempotency
     if getattr(agent, '_call_registered', False) or getattr(agent, '_call_registering', False):
-        logger.info(f"[CALL_PERSIST] skipped_duplicate room={room_name}")
+        logger.info(f"[CALL_PERSIST] skipped_duplicate room_ref={safe_room_ref(room_name)}")
         return
     
     agent._call_registering = True
-    logger.info(f"[CALL_PERSIST] starting room={room_name}")
+    logger.info(f"[CALL_PERSIST] starting room_ref={safe_room_ref(room_name)}")
     
     try:
         import httpx
@@ -951,11 +952,11 @@ async def register_call_with_backend(agent, started_at, ended_at):
                                 agent.workflow_runtime.context.conversation_id = str(conv_id)
                     except Exception as json_err:
                         logger.warning(f"Could not extract conversation_id from register response: {json_err}")
-                    logger.info(f"[CALL_PERSIST] success room={room_name} status={response.status_code}")
+                    logger.info(f"[CALL_PERSIST] success room_ref={safe_room_ref(room_name)} status={response.status_code}")
                 else:
-                    logger.error(f"[CALL_PERSIST] failed room={room_name} error=status_{response.status_code}_{response.text}")
+                    logger.error(f"[CALL_PERSIST] failed room_ref={safe_room_ref(room_name)} error=status_{response.status_code}_{response.text}")
         except Exception as exec_err:
-            logger.error(f"[CALL_PERSIST] failed room={room_name} error={exec_err}")
+            logger.error(f"[CALL_PERSIST] failed room_ref={safe_room_ref(room_name)} error={exec_err}")
             # Try fallback synchronous request if loop / executor has issues
             try:
                 def _sync_post():
@@ -983,17 +984,17 @@ async def register_call_with_backend(agent, started_at, ended_at):
                 if status in [200, 201]:
                     registered_success = True
                     agent._call_registered = True
-                    logger.info(f"[CALL_PERSIST] success room={room_name} status={status}")
+                    logger.info(f"[CALL_PERSIST] success room_ref={safe_room_ref(room_name)} status={status}")
                 else:
-                    logger.error(f"[CALL_PERSIST] failed room={room_name} error=fallback_status_{status}")
+                    logger.error(f"[CALL_PERSIST] failed room_ref={safe_room_ref(room_name)} error=fallback_status_{status}")
             except Exception as fb_err:
-                logger.error(f"[CALL_PERSIST] failed room={room_name} error={fb_err}")
+                logger.error(f"[CALL_PERSIST] failed room_ref={safe_room_ref(room_name)} error={fb_err}")
         
         if agent.transcript_session_id:
             transcript_service.clear_session(agent.transcript_session_id)
                 
     except Exception as e:
-        logger.error(f"[CALL_PERSIST] failed room={room_name} error={e}", exc_info=True)
+        logger.error(f"[CALL_PERSIST] failed room_ref={safe_room_ref(room_name)} error={e}", exc_info=True)
     finally:
         agent._call_registering = False
 

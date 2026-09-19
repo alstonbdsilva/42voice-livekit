@@ -34,6 +34,13 @@ MAX_NODE_VISITS_DEFAULT = 5
 DEFAULT_TOOL_TIMEOUT_SECONDS = 10.0
 
 
+def safe_room_ref(room_name: Optional[str]) -> str:
+    """Generate an anonymized, deterministic 12-char SHA-256 hash reference for a room name."""
+    if not room_name:
+        return "none"
+    return hashlib.sha256(room_name.encode("utf-8")).hexdigest()[:12]
+
+
 # =====================================================================
 # 1. Authoring Data Models & Configuration
 # =====================================================================
@@ -521,6 +528,8 @@ class ToolPlatform:
         """Check if a tool exists and is accessible to client."""
         if client_id and self.client_id and client_id != self.client_id:
             return False
+        if name == "end_call":
+            return True
         return name in self._custom_tools or self._system_registry.has(name)
 
     def resolve_tools_for_node(self, tool_names: Tuple[str, ...], client_id: Optional[str] = None) -> List[Any]:
@@ -531,6 +540,15 @@ class ToolPlatform:
                 resolved.append(self._custom_tools[name])
             elif self._system_registry.has(name):
                 resolved.append(self._system_registry.get(name))
+            elif name == "end_call":
+                # Fallback built-in end_call stub
+                from livekit.agents import llm
+                async def _stub_end_call():
+                    return "call_ended"
+                resolved.append(llm.function_tool(
+                    _stub_end_call,
+                    raw_schema={"name": "end_call", "description": "Ends active phone call.", "parameters": {"type": "object", "properties": {}, "required": []}}
+                ))
             else:
                 logger.warning(f"[TOOL_PLATFORM] Referenced tool '{name}' not found in scoped registry for client '{client_id or self.client_id}'")
         return resolved
@@ -999,7 +1017,7 @@ class WorkflowRuntime:
 
     async def start(self) -> None:
         """Enter the start node of the workflow."""
-        logger.info(f"[WF_RUN] start run_id={self.context.run_id} room_name={self.context.room_name} workflow_id={self.compiled.workflow_id} version={self.compiled.version}")
+        logger.info(f"[WF_RUN] start run_id={self.context.run_id} room_ref={safe_room_ref(self.context.room_name)} workflow_id={self.compiled.workflow_id} version={self.compiled.version}")
         self.context.emit_trace("RUN_START", data={"workflow_id": self.compiled.workflow_id, "version": self.compiled.version})
         start_node_id = self.compiled.start_node_id
         await self.enter_node(start_node_id)

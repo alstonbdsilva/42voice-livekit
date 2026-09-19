@@ -189,7 +189,6 @@ async def update(agent_id: str, req_body: UpdateAgentRequest, current_user: Dict
     }
     update_data = req_body.model_dump(exclude_unset=True)
     details_to_update = {k: v for k, v in update_data.items() if k in detail_fields}
-    print("DEBUG DETAILS TO UPDATE:", details_to_update)
 
     if details_to_update:
         agent = await agent_service.update_agent_details(agent_id, details_to_update, user_context=current_user)
