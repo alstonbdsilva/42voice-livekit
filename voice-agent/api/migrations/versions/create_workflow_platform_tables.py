@@ -5,15 +5,17 @@ Revises: 1a2b3c4d5e6f
 Create Date: 2026-09-19 21:45:00.000000
 
 """
+from typing import Sequence, Union
+
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision = '2b3c4d5e6f7a'
-down_revision = '1a2b3c4d5e6f'
-branch_labels = None
-depends_on = None
+revision: str = '2b3c4d5e6f7a'
+down_revision: Union[str, Sequence[str], None] = '1a2b3c4d5e6f'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
@@ -65,7 +67,7 @@ def upgrade() -> None:
         sa.Column('published_workflow_version_id', postgresql.UUID(as_uuid=True), nullable=True)
     )
     op.create_foreign_key(
-        'fk_agents_published_workflow_version',
+        'agents_published_workflow_version_id_fkey',
         'agents',
         'workflow_versions',
         ['published_workflow_version_id'],
@@ -138,7 +140,7 @@ def downgrade() -> None:
 
     # 3. Drop agents.published_workflow_version_id
     op.drop_index('idx_agents_published_workflow_version', table_name='agents')
-    op.drop_constraint('fk_agents_published_workflow_version', 'agents', type_='foreignkey')
+    op.drop_constraint('agents_published_workflow_version_id_fkey', 'agents', type_='foreignkey')
     op.drop_column('agents', 'published_workflow_version_id')
 
     # 4. Drop workflow_versions

@@ -338,77 +338,6 @@ CREATE INDEX IF NOT EXISTS idx_calendar_bookings_integration ON calendar_booking
 CREATE INDEX IF NOT EXISTS idx_calendar_bookings_status ON calendar_bookings(status);
 CREATE INDEX IF NOT EXISTS idx_calendar_bookings_invitee_uri ON calendar_bookings(invitee_uri);
 
--- Workflow Platform Tables (Fresh local/test bootstrap only; Alembic is authoritative for migrations)
-CREATE TABLE IF NOT EXISTS workflows (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    client_id UUID REFERENCES clients(id) ON DELETE CASCADE,
-    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-    name VARCHAR(255) NOT NULL,
-    description TEXT,
-    status VARCHAR(50) NOT NULL DEFAULT 'active',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_workflows_client ON workflows(client_id);
-CREATE INDEX IF NOT EXISTS idx_workflows_user ON workflows(user_id);
-CREATE INDEX IF NOT EXISTS idx_workflows_status ON workflows(status);
-
-CREATE TABLE IF NOT EXISTS workflow_versions (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    workflow_id UUID NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
-    version_number INTEGER NOT NULL,
-    lifecycle_status VARCHAR(50) NOT NULL DEFAULT 'draft',
-    definition JSONB NOT NULL DEFAULT '{"nodes": [], "edges": []}'::jsonb,
-    ui_metadata JSONB DEFAULT '{}'::jsonb,
-    schema_version VARCHAR(20) NOT NULL DEFAULT '1.0',
-    engine_version VARCHAR(20) NOT NULL DEFAULT '1.0',
-    validation_metadata JSONB DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    published_at TIMESTAMP WITH TIME ZONE,
-    created_by UUID REFERENCES users(id) ON DELETE SET NULL,
-    UNIQUE (workflow_id, version_number)
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_versions_workflow ON workflow_versions(workflow_id);
-CREATE INDEX IF NOT EXISTS idx_workflow_versions_status ON workflow_versions(lifecycle_status);
-
-ALTER TABLE agents ADD COLUMN IF NOT EXISTS published_workflow_version_id UUID REFERENCES workflow_versions(id) ON DELETE SET NULL;
-CREATE INDEX IF NOT EXISTS idx_agents_published_workflow_version ON agents(published_workflow_version_id);
-
-CREATE TABLE IF NOT EXISTS workflow_runs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    run_id VARCHAR(255) UNIQUE NOT NULL,
-    workflow_id UUID REFERENCES workflows(id) ON DELETE SET NULL,
-    workflow_version_id UUID REFERENCES workflow_versions(id) ON DELETE SET NULL,
-    agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
-    client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
-    room_name VARCHAR(255),
-    status VARCHAR(50) NOT NULL DEFAULT 'running',
-    started_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    completed_at TIMESTAMP WITH TIME ZONE,
-    error_category VARCHAR(100),
-    conversation_id UUID REFERENCES conversations(id) ON DELETE SET NULL,
-    recording_id UUID REFERENCES recordings(id) ON DELETE SET NULL,
-    safe_metadata JSONB DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_run_id ON workflow_runs(run_id);
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_agent ON workflow_runs(agent_id);
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_version ON workflow_runs(workflow_version_id);
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
-
-CREATE TABLE IF NOT EXISTS workflow_run_events (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    run_id VARCHAR(255) NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
-    sequence_number INTEGER NOT NULL,
-    event_type VARCHAR(100) NOT NULL,
-    node_id VARCHAR(255),
-    edge_id VARCHAR(255),
-    safe_metadata JSONB DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (run_id, sequence_number)
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_run_events_run ON workflow_run_events(run_id);
-
 CREATE TABLE IF NOT EXISTS calendar_webhooks (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     integration_id UUID NOT NULL REFERENCES calendar_integrations(id) ON DELETE CASCADE,
@@ -482,47 +411,34 @@ async def init_db() -> None:
     logger.info("Initializing database...")
     settings = get_settings()
     
-    # Initialize database pool and run schema verification during backend/migration startup
+    # Initialize database pool
     await database.init_pool()
-    await database.verify_schema()
     
     try:
         # 1. Test database connection
         connected = await database.test_connection()
         if not connected:
-            logger.critical("Cannot connect to database. Aborting migrations.")
+            logger.critical("Cannot connect to database. Aborting initialization.")
             sys.exit(1)
             
-        # 2. Run schema execution
-        logger.info("Creating database tables and indexes...")
-        # Since asyncpg execute executes multi-statement scripts, we can pass it directly
-        if database.pool is None:
-            logger.critical("Database pool not initialized. Aborting migrations.")
-            sys.exit(1)
-        async with database.pool.acquire() as conn:
-            await conn.execute(schema_sql)
-            await conn.execute(seed_roles_sql)
-            await conn.execute("""
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS call_type VARCHAR(50) NOT NULL DEFAULT 'inbound';
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS use_case VARCHAR(255);
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS activity_description TEXT;
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS voice_name VARCHAR(50) DEFAULT 'aria';
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS voice_gender VARCHAR(20) DEFAULT 'female';
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS guardrails JSONB DEFAULT '{}'::jsonb;
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS custom_guardrails TEXT;
-                ALTER TABLE agents ADD COLUMN IF NOT EXISTS knowledge_items JSONB DEFAULT '[]'::jsonb;
-                
-                ALTER TABLE resellers ADD COLUMN IF NOT EXISTS minutes_balance INTEGER NOT NULL DEFAULT 0;
-                ALTER TABLE resellers ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(255);
-                
-                ALTER TABLE clients ADD COLUMN IF NOT EXISTS minutes_balance INTEGER NOT NULL DEFAULT 0;
-                ALTER TABLE clients ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(255);
-
-                ALTER TABLE calendar_integrations ADD COLUMN IF NOT EXISTS refresh_token TEXT;
-                ALTER TABLE calendar_integrations ADD COLUMN IF NOT EXISTS provider_user_id VARCHAR(255);
-            """)
+        auto_bootstrap = os.getenv("AUTO_BOOTSTRAP_DB", "false").lower() in ("1", "true", "yes")
+        is_production = os.getenv("ENVIRONMENT", "").lower() == "production"
+        
+        # 2. Schema execution (only when explicitly requested in dev/test, never in production)
+        if auto_bootstrap and not is_production:
+            logger.info("Dev/Test auto-bootstrap enabled: creating legacy base tables...")
+            if database.pool is None:
+                logger.critical("Database pool not initialized. Aborting.")
+                sys.exit(1)
+            async with database.pool.acquire() as conn:
+                await conn.execute(schema_sql)
+                await conn.execute(seed_roles_sql)
+            logger.info("Base legacy tables created successfully.")
+        else:
+            logger.info("Production mode or auto-bootstrap disabled: schema changes managed exclusively by Alembic.")
             
-        logger.info("Tables created and roles seeded successfully.")
+        # Run schema verification logging only
+        await database.verify_schema()
         
         # 3. Seed default users
         logger.info("Seeding default users...")
