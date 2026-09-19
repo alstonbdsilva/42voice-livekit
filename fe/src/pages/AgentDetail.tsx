@@ -7,6 +7,8 @@ import ResellerService from "@/services/reseller.service";
 import ClientService from "@/services/client.service";
 import PhoneNumberService from "@/services/phone-number.service";
 import ToolsService from "@/services/tools.service";
+import { useActiveTools, useResellers, useClients, usePhoneNumbers } from "@/hooks/useReferenceData";
+import { queryClient } from "@/lib/queryClient";
 import PageHeader from "@/components/PageHeader";
 import KpiCard from "@/components/KpiCard";
 import StatusBadge from "@/components/StatusBadge";
@@ -122,6 +124,10 @@ export default function AgentDetail() {
   const [editCallType, setEditCallType] = useState("inbound");
   const [editVoiceGender, setEditVoiceGender] = useState<"female" | "male">("female");
   const [editVoiceName, setEditVoiceName] = useState("aria");
+  const [editTtsProvider, setEditTtsProvider] = useState("elevenlabs");
+  const [editTtsModel, setEditTtsModel] = useState("eleven_multilingual_v2");
+  const [editTtsVoiceId, setEditTtsVoiceId] = useState("");
+  const [editTtsVoiceName, setEditTtsVoiceName] = useState("aria");
   const [editGuardrails, setEditGuardrails] = useState<any>(DEFAULT_GUARDRAILS);
   const [editCustomGuardrails, setEditCustomGuardrails] = useState("");
   const [editKnowledgeItems, setEditKnowledgeItems] = useState<any[]>([]);
@@ -242,23 +248,26 @@ export default function AgentDetail() {
     );
   };
 
-  const fetchNumbers = async () => {
-    try {
-      const data = await PhoneNumberService.getAll();
-      setPhoneNumbers(data);
-    } catch (err) {
-      console.error("Failed to load phone numbers:", err);
-    }
-  };
+  const { data: cachedTools } = useActiveTools();
+  const { data: cachedPhoneNumbers } = usePhoneNumbers();
+  const { data: cachedResellers } = useResellers(isAdmin);
+  const { data: cachedClients } = useClients(isAdmin || isReseller);
 
-  const fetchTools = async () => {
-    try {
-      const data = await ToolsService.getAll({ status: "active" });
-      setAllTools(data);
-    } catch (err) {
-      console.error("Failed to load tools:", err);
-    }
-  };
+  useEffect(() => {
+    if (cachedTools) setAllTools(cachedTools);
+  }, [cachedTools]);
+
+  useEffect(() => {
+    if (cachedPhoneNumbers) setPhoneNumbers(cachedPhoneNumbers);
+  }, [cachedPhoneNumbers]);
+
+  useEffect(() => {
+    if (cachedResellers) setAllResellers(cachedResellers);
+  }, [cachedResellers]);
+
+  useEffect(() => {
+    if (cachedClients) setAllClients(cachedClients);
+  }, [cachedClients]);
 
   const load = () => {
     if (!id) return;
@@ -269,16 +278,7 @@ export default function AgentDetail() {
 
   useEffect(() => {
     load();
-    fetchNumbers();
-    fetchTools();
-    if (isAdmin) {
-      ResellerService.getAll().then(setAllResellers).catch(() => { });
-      ClientService.getAll().then(setAllClients).catch(() => { });
-    } else if (isReseller) {
-      ClientService.getAll().then(setAllClients).catch(() => { });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, isAdmin, isReseller]);
+  }, [id]);
 
   useEffect(() => {
     if (a) {
@@ -288,6 +288,10 @@ export default function AgentDetail() {
       setEditCallType(a.callType || "inbound");
       setEditVoiceGender((a.voiceGender as any) || "female");
       setEditVoiceName(a.voiceName || "aria");
+      setEditTtsProvider(a.ttsProvider || "elevenlabs");
+      setEditTtsModel(a.ttsModel || "eleven_multilingual_v2");
+      setEditTtsVoiceId(a.ttsVoiceId || "");
+      setEditTtsVoiceName(a.ttsVoiceName || a.voiceName || "aria");
       setEditGuardrails(a.guardrails || DEFAULT_GUARDRAILS);
       setEditCustomGuardrails(a.customGuardrails || "");
       setEditKnowledgeItems(a.knowledgeItems || []);
@@ -335,6 +339,10 @@ export default function AgentDetail() {
         callType: editCallType,
         voiceName: editVoiceName,
         voiceGender: editVoiceGender,
+        ttsProvider: editTtsProvider,
+        ttsModel: editTtsModel,
+        ttsVoiceId: editTtsVoiceId,
+        ttsVoiceName: editTtsVoiceName || editVoiceName,
         guardrails: editGuardrails,
         customGuardrails: editCustomGuardrails.trim(),
         knowledgeItems: editKnowledgeItems.map((k) => ({
@@ -372,7 +380,8 @@ export default function AgentDetail() {
 
       toast.success("Agent changes saved successfully!");
       load();
-      fetchNumbers();
+      queryClient.invalidateQueries({ queryKey: ["phone-numbers"] });
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
     } catch (err: any) {
       toast.error(err?.response?.data?.message ?? "Failed to save agent changes.");
     } finally {
@@ -731,11 +740,20 @@ export default function AgentDetail() {
         {/* ── Voice & Safety Tab ─────────────────────────────────────── */}
         <TabsContent value="voice" className="outline-none space-y-6">
           <ElevenLabsVoiceSelector
-            selectedVoiceName={editVoiceName}
+            selectedProvider={editTtsProvider}
+            selectedModel={editTtsModel}
+            selectedVoiceId={editTtsVoiceId}
+            selectedVoiceName={editTtsVoiceName || editVoiceName}
             selectedVoiceGender={editVoiceGender as "female" | "male"}
-            onSelectVoice={(vName, g) => {
+            onSelectProvider={setEditTtsProvider}
+            onSelectModel={setEditTtsModel}
+            onSelectVoice={(vName, g, vId) => {
+              setEditTtsVoiceName(vName);
               setEditVoiceName(vName);
               setEditVoiceGender(g);
+              if (vId !== undefined) {
+                setEditTtsVoiceId(vId);
+              }
             }}
             disabled={!canEdit}
           />

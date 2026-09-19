@@ -3,6 +3,7 @@ Finance Module Router.
 Handles endpoints for plan management, invoices, payments, contracts, renewals, commissions, and dashboards.
 """
 
+import asyncio
 import logging
 import uuid
 import datetime
@@ -698,54 +699,77 @@ async def get_dashboard_summary(current_user: Dict[str, Any] = Depends(get_curre
             "revenueDue": 0.00
         })
 
-    # Fetch total call records
-    agent_stats = await database.query(
+    # 1. Common database query tasks
+    agent_stats_query = database.query(
         "SELECT SUM(total_calls) as calls, SUM(total_messages) as msgs, SUM(total_minutes) as mins FROM agents"
     )
-    if agent_stats and agent_stats[0]["calls"] is not None:
-        totals["totalCalls"] = int(agent_stats[0]["calls"])
-        totals["totalMessages"] = int(agent_stats[0]["msgs"])
-        totals["totalMinutes"] = int(agent_stats[0]["mins"])
-        totals["totalConversations"] = int(agent_stats[0]["calls"])
+    cl_count_query = database.query("SELECT COUNT(*) FROM clients WHERE status = 'active'")
+    re_count_query = database.query("SELECT COUNT(*) FROM resellers WHERE status = 'active'")
+    ag_count_query = database.query("SELECT COUNT(*) FROM agents WHERE status = 'active'")
 
-    # Expose counts
-    cl_count = await database.query("SELECT COUNT(*) FROM clients WHERE status = 'active'")
-    totals["activeClients"] = cl_count[0]["count"] if cl_count else 0
-    
-    re_count = await database.query("SELECT COUNT(*) FROM resellers WHERE status = 'active'")
-    totals["activeResellers"] = re_count[0]["count"] if re_count else 0
-    
-    ag_count = await database.query("SELECT COUNT(*) FROM agents WHERE status = 'active'")
-    totals["activeAgents"] = ag_count[0]["count"] if ag_count else 0
-
-    # Scoped calculations
+    # 2. Scoped calculations executed concurrently with common queries
     if role in ["SUPER_ADMIN", "FINANCE_ADMIN"]:
-        # MRR sum
-        mrr_res = await database.query("SELECT SUM(monthly_recurring) FROM clients WHERE status = 'active'")
-        totals["mrr"] = float(mrr_res[0]["sum"] or 0.00)
-        totals["arr"] = totals["mrr"] * 12
-        
-        # Collections
-        collected = await database.query("SELECT SUM(amount) FROM payments WHERE status = 'succeeded'")
-        totals["revenueCollected"] = float(collected[0]["sum"] or 0.00)
-        
-        # Outstanding
-        due = await database.query("SELECT SUM(total - paid_amount) FROM invoices WHERE status = 'pending' AND due_date >= $1", [now])
-        totals["revenueDue"] = float(due[0]["sum"] or 0.00)
-        
-        overdue = await database.query("SELECT SUM(total - paid_amount) FROM invoices WHERE status = 'overdue' OR (status = 'pending' AND due_date < $1)", [now])
-        totals["revenueOverdue"] = float(overdue[0]["sum"] or 0.00)
-        
-        pending_count = await database.query("SELECT COUNT(*) FROM invoices WHERE status = 'pending'")
-        totals["pendingInvoices"] = pending_count[0]["count"] if pending_count else 0
-
-        # Build database-driven trend
-        col_rows = await database.query(
+        mrr_query = database.query("SELECT SUM(monthly_recurring) FROM clients WHERE status = 'active'")
+        collected_query = database.query("SELECT SUM(amount) FROM payments WHERE status = 'succeeded'")
+        due_query = database.query("SELECT SUM(total - paid_amount) FROM invoices WHERE status = 'pending' AND due_date >= $1", [now])
+        overdue_query = database.query("SELECT SUM(total - paid_amount) FROM invoices WHERE status = 'overdue' OR (status = 'pending' AND due_date < $1)", [now])
+        pending_count_query = database.query("SELECT COUNT(*) FROM invoices WHERE status = 'pending'")
+        col_rows_query = database.query(
             """SELECT EXTRACT(MONTH FROM paid_at) as m_num, EXTRACT(YEAR FROM paid_at) as y_num, SUM(amount) as total_amt
                FROM payments
                WHERE status = 'succeeded' AND paid_at IS NOT NULL
                GROUP BY EXTRACT(MONTH FROM paid_at), EXTRACT(YEAR FROM paid_at)"""
         )
+        due_rows_query = database.query(
+            """SELECT EXTRACT(MONTH FROM due_date) as m_num, EXTRACT(YEAR FROM due_date) as y_num, SUM(total - paid_amount) as total_amt
+               FROM invoices
+               WHERE status = 'pending' AND due_date IS NOT NULL
+               GROUP BY EXTRACT(MONTH FROM due_date), EXTRACT(YEAR FROM due_date)"""
+        )
+
+        (
+            agent_stats,
+            cl_count,
+            re_count,
+            ag_count,
+            mrr_res,
+            collected,
+            due,
+            overdue,
+            pending_count,
+            col_rows,
+            due_rows
+        ) = await asyncio.gather(
+            agent_stats_query,
+            cl_count_query,
+            re_count_query,
+            ag_count_query,
+            mrr_query,
+            collected_query,
+            due_query,
+            overdue_query,
+            pending_count_query,
+            col_rows_query,
+            due_rows_query
+        )
+
+        if agent_stats and agent_stats[0]["calls"] is not None:
+            totals["totalCalls"] = int(agent_stats[0]["calls"])
+            totals["totalMessages"] = int(agent_stats[0]["msgs"])
+            totals["totalMinutes"] = int(agent_stats[0]["mins"])
+            totals["totalConversations"] = int(agent_stats[0]["calls"])
+
+        totals["activeClients"] = cl_count[0]["count"] if cl_count else 0
+        totals["activeResellers"] = re_count[0]["count"] if re_count else 0
+        totals["activeAgents"] = ag_count[0]["count"] if ag_count else 0
+
+        totals["mrr"] = float(mrr_res[0]["sum"] or 0.00)
+        totals["arr"] = totals["mrr"] * 12
+        totals["revenueCollected"] = float(collected[0]["sum"] or 0.00)
+        totals["revenueDue"] = float(due[0]["sum"] or 0.00)
+        totals["revenueOverdue"] = float(overdue[0]["sum"] or 0.00)
+        totals["pendingInvoices"] = pending_count[0]["count"] if pending_count else 0
+
         for r in col_rows:
             m_n = int(r["m_num"])
             y_n = int(r["y_num"])
@@ -755,12 +779,6 @@ async def get_dashboard_summary(current_user: Dict[str, Any] = Depends(get_curre
                     item["revenueCollected"] = t_a
                     break
 
-        due_rows = await database.query(
-            """SELECT EXTRACT(MONTH FROM due_date) as m_num, EXTRACT(YEAR FROM due_date) as y_num, SUM(total - paid_amount) as total_amt
-               FROM invoices
-               WHERE status = 'pending' AND due_date IS NOT NULL
-               GROUP BY EXTRACT(MONTH FROM due_date), EXTRACT(YEAR FROM due_date)"""
-        )
         for r in due_rows:
             m_n = int(r["m_num"])
             y_n = int(r["y_num"])
@@ -773,27 +791,60 @@ async def get_dashboard_summary(current_user: Dict[str, Any] = Depends(get_curre
     elif role == "RESELLER":
         reseller_id = uuid.UUID(current_user["reseller_id"])
         
-        # Managed client counts
-        totals["activeClients"] = (await database.query("SELECT COUNT(*) FROM clients WHERE reseller_id = $1 AND status = 'active'", [reseller_id]))[0]["count"]
-        
-        # Collected commissions
-        collected_comm = await database.query("SELECT SUM(amount) FROM commissions WHERE reseller_id = $1 AND status = 'paid'", [reseller_id])
-        totals["revenueCollected"] = float(collected_comm[0]["sum"] or 0.00)
-        
-        # Pending commissions
-        due_comm = await database.query("SELECT SUM(amount) FROM commissions WHERE reseller_id = $1 AND status = 'payable'", [reseller_id])
-        totals["revenueDue"] = float(due_comm[0]["sum"] or 0.00)
-        
-        totals["revenueOverdue"] = 0.00
-
-        # Trend query for Reseller
-        col_rows = await database.query(
+        cl_reseller_query = database.query("SELECT COUNT(*) FROM clients WHERE reseller_id = $1 AND status = 'active'", [reseller_id])
+        collected_comm_query = database.query("SELECT SUM(amount) FROM commissions WHERE reseller_id = $1 AND status = 'paid'", [reseller_id])
+        due_comm_query = database.query("SELECT SUM(amount) FROM commissions WHERE reseller_id = $1 AND status = 'payable'", [reseller_id])
+        col_rows_query = database.query(
             """SELECT EXTRACT(MONTH FROM date) as m_num, EXTRACT(YEAR FROM date) as y_num, SUM(amount) as total_amt
                FROM commissions
                WHERE reseller_id = $1 AND status = 'paid' AND date IS NOT NULL
                GROUP BY EXTRACT(MONTH FROM date), EXTRACT(YEAR FROM date)""",
             [reseller_id]
         )
+        due_rows_query = database.query(
+            """SELECT EXTRACT(MONTH FROM date) as m_num, EXTRACT(YEAR FROM date) as y_num, SUM(amount) as total_amt
+               FROM commissions
+               WHERE reseller_id = $1 AND status = 'payable' AND date IS NOT NULL
+               GROUP BY EXTRACT(MONTH FROM date), EXTRACT(YEAR FROM date)""",
+            [reseller_id]
+        )
+
+        (
+            agent_stats,
+            cl_count,
+            re_count,
+            ag_count,
+            cl_reseller_count,
+            collected_comm,
+            due_comm,
+            col_rows,
+            due_rows
+        ) = await asyncio.gather(
+            agent_stats_query,
+            cl_count_query,
+            re_count_query,
+            ag_count_query,
+            cl_reseller_query,
+            collected_comm_query,
+            due_comm_query,
+            col_rows_query,
+            due_rows_query
+        )
+
+        if agent_stats and agent_stats[0]["calls"] is not None:
+            totals["totalCalls"] = int(agent_stats[0]["calls"])
+            totals["totalMessages"] = int(agent_stats[0]["msgs"])
+            totals["totalMinutes"] = int(agent_stats[0]["mins"])
+            totals["totalConversations"] = int(agent_stats[0]["calls"])
+
+        totals["activeClients"] = cl_reseller_count[0]["count"] if cl_reseller_count else 0
+        totals["activeResellers"] = re_count[0]["count"] if re_count else 0
+        totals["activeAgents"] = ag_count[0]["count"] if ag_count else 0
+
+        totals["revenueCollected"] = float(collected_comm[0]["sum"] or 0.00)
+        totals["revenueDue"] = float(due_comm[0]["sum"] or 0.00)
+        totals["revenueOverdue"] = 0.00
+
         for r in col_rows:
             m_n = int(r["m_num"])
             y_n = int(r["y_num"])
@@ -803,13 +854,6 @@ async def get_dashboard_summary(current_user: Dict[str, Any] = Depends(get_curre
                     item["revenueCollected"] = t_a
                     break
 
-        due_rows = await database.query(
-            """SELECT EXTRACT(MONTH FROM date) as m_num, EXTRACT(YEAR FROM date) as y_num, SUM(amount) as total_amt
-               FROM commissions
-               WHERE reseller_id = $1 AND status = 'payable' AND date IS NOT NULL
-               GROUP BY EXTRACT(MONTH FROM date), EXTRACT(YEAR FROM date)""",
-            [reseller_id]
-        )
         for r in due_rows:
             m_n = int(r["m_num"])
             y_n = int(r["y_num"])
@@ -822,25 +866,60 @@ async def get_dashboard_summary(current_user: Dict[str, Any] = Depends(get_curre
     elif role == "CLIENT":
         client_id = uuid.UUID(current_user["client_id"])
         
-        # Collections from client
-        collected = await database.query("SELECT SUM(amount) FROM payments WHERE client_id = $1 AND status = 'succeeded'", [client_id])
-        totals["revenueCollected"] = float(collected[0]["sum"] or 0.00)
-        
-        # Due from client
-        due = await database.query("SELECT SUM(total - paid_amount) FROM invoices WHERE client_id = $1 AND status = 'pending' AND due_date >= $2", [client_id, now])
-        totals["revenueDue"] = float(due[0]["sum"] or 0.00)
-        
-        overdue = await database.query("SELECT SUM(total - paid_amount) FROM invoices WHERE client_id = $1 AND (status = 'overdue' OR (status = 'pending' AND due_date < $2))", [client_id, now])
-        totals["revenueOverdue"] = float(overdue[0]["sum"] or 0.00)
-
-        # Trend query for Client
-        col_rows = await database.query(
+        collected_query = database.query("SELECT SUM(amount) FROM payments WHERE client_id = $1 AND status = 'succeeded'", [client_id])
+        due_query = database.query("SELECT SUM(total - paid_amount) FROM invoices WHERE client_id = $1 AND status = 'pending' AND due_date >= $2", [client_id, now])
+        overdue_query = database.query("SELECT SUM(total - paid_amount) FROM invoices WHERE client_id = $1 AND (status = 'overdue' OR (status = 'pending' AND due_date < $2))", [client_id, now])
+        col_rows_query = database.query(
             """SELECT EXTRACT(MONTH FROM paid_at) as m_num, EXTRACT(YEAR FROM paid_at) as y_num, SUM(amount) as total_amt
                FROM payments
                WHERE client_id = $1 AND status = 'succeeded' AND paid_at IS NOT NULL
                GROUP BY EXTRACT(MONTH FROM paid_at), EXTRACT(YEAR FROM paid_at)""",
             [client_id]
         )
+        due_rows_query = database.query(
+            """SELECT EXTRACT(MONTH FROM due_date) as m_num, EXTRACT(YEAR FROM due_date) as y_num, SUM(total - paid_amount) as total_amt
+               FROM invoices
+               WHERE client_id = $1 AND status = 'pending' AND due_date IS NOT NULL
+               GROUP BY EXTRACT(MONTH FROM due_date), EXTRACT(YEAR FROM due_date)""",
+            [client_id]
+        )
+
+        (
+            agent_stats,
+            cl_count,
+            re_count,
+            ag_count,
+            collected,
+            due,
+            overdue,
+            col_rows,
+            due_rows
+        ) = await asyncio.gather(
+            agent_stats_query,
+            cl_count_query,
+            re_count_query,
+            ag_count_query,
+            collected_query,
+            due_query,
+            overdue_query,
+            col_rows_query,
+            due_rows_query
+        )
+
+        if agent_stats and agent_stats[0]["calls"] is not None:
+            totals["totalCalls"] = int(agent_stats[0]["calls"])
+            totals["totalMessages"] = int(agent_stats[0]["msgs"])
+            totals["totalMinutes"] = int(agent_stats[0]["mins"])
+            totals["totalConversations"] = int(agent_stats[0]["calls"])
+
+        totals["activeClients"] = cl_count[0]["count"] if cl_count else 0
+        totals["activeResellers"] = re_count[0]["count"] if re_count else 0
+        totals["activeAgents"] = ag_count[0]["count"] if ag_count else 0
+
+        totals["revenueCollected"] = float(collected[0]["sum"] or 0.00)
+        totals["revenueDue"] = float(due[0]["sum"] or 0.00)
+        totals["revenueOverdue"] = float(overdue[0]["sum"] or 0.00)
+
         for r in col_rows:
             m_n = int(r["m_num"])
             y_n = int(r["y_num"])
@@ -850,13 +929,6 @@ async def get_dashboard_summary(current_user: Dict[str, Any] = Depends(get_curre
                     item["revenueCollected"] = t_a
                     break
 
-        due_rows = await database.query(
-            """SELECT EXTRACT(MONTH FROM due_date) as m_num, EXTRACT(YEAR FROM due_date) as y_num, SUM(total - paid_amount) as total_amt
-               FROM invoices
-               WHERE client_id = $1 AND status = 'pending' AND due_date IS NOT NULL
-               GROUP BY EXTRACT(MONTH FROM due_date), EXTRACT(YEAR FROM due_date)""",
-            [client_id]
-        )
         for r in due_rows:
             m_n = int(r["m_num"])
             y_n = int(r["y_num"])
@@ -865,6 +937,29 @@ async def get_dashboard_summary(current_user: Dict[str, Any] = Depends(get_curre
                 if item["month_num"] == m_n and item["year"] == y_n:
                     item["revenueDue"] = t_a
                     break
+
+    else:
+        (
+            agent_stats,
+            cl_count,
+            re_count,
+            ag_count
+        ) = await asyncio.gather(
+            agent_stats_query,
+            cl_count_query,
+            re_count_query,
+            ag_count_query
+        )
+
+        if agent_stats and agent_stats[0]["calls"] is not None:
+            totals["totalCalls"] = int(agent_stats[0]["calls"])
+            totals["totalMessages"] = int(agent_stats[0]["msgs"])
+            totals["totalMinutes"] = int(agent_stats[0]["mins"])
+            totals["totalConversations"] = int(agent_stats[0]["calls"])
+
+        totals["activeClients"] = cl_count[0]["count"] if cl_count else 0
+        totals["activeResellers"] = re_count[0]["count"] if re_count else 0
+        totals["activeAgents"] = ag_count[0]["count"] if ag_count else 0
 
     # Clean up fields only used for internal mapping before returning
     for item in monthly_trend:
@@ -1003,4 +1098,100 @@ async def get_notifications(current_user: Dict[str, Any] = Depends(get_current_u
         }
     ]
     return ApiResponse.success(data=mock_notifs)
+
+
+class NotificationUpdate(BaseModel):
+    read: Optional[bool] = None
+
+
+@router.patch("/notifications/{notification_id}")
+async def update_notification(notification_id: int, payload: Optional[NotificationUpdate] = None,
+                              current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Update a notification (mock, consistent with the mock notifications endpoint)."""
+    read = payload.read if payload and payload.read is not None else True
+    return ApiResponse.success(data={"id": notification_id, "read": read})
+
+
+@router.get("/reports/{kind}")
+async def get_report(kind: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Generate financial and operational reports from real database data."""
+    normalised = kind.lower()
+
+    if normalised == "client_spend":
+        rows = await database.query(
+            """
+            SELECT COALESCE(c.name, 'Unknown') AS client,
+                   COALESCE(SUM(i.total), 0) AS invoiced,
+                   COALESCE(SUM(i.paid_amount), 0) AS paid
+            FROM invoices i
+            LEFT JOIN clients c ON c.id = i.client_id
+            GROUP BY COALESCE(c.name, 'Unknown')
+            ORDER BY invoiced DESC
+            """
+        )
+        report_rows = [
+            {
+                "client": row["client"],
+                "invoiced": float(row["invoiced"]),
+                "paid": float(row["paid"]),
+                "outstanding": float(row["invoiced"] - row["paid"]),
+            }
+            for row in rows
+        ]
+        return ApiResponse.success(data={"rows": report_rows, "buckets": None})
+
+    if normalised == "agent_performance":
+        rows = await database.query(
+            """
+            SELECT name AS agent,
+                   total_calls AS calls,
+                   total_messages AS messages,
+                   total_minutes AS minutes,
+                   success_rate AS success,
+                   escalation_rate AS escalation
+            FROM agents
+            ORDER BY total_minutes DESC
+            """
+        )
+        report_rows = [
+            {
+                "agent": row["agent"],
+                "calls": row["calls"],
+                "messages": row["messages"],
+                "minutes": row["minutes"],
+                "success": float(row["success"]),
+                "escalation": float(row["escalation"]),
+            }
+            for row in rows
+        ]
+        return ApiResponse.success(data={"rows": report_rows, "buckets": None})
+
+    if normalised == "ageing":
+        rows = await database.query(
+            """
+            SELECT i.number, i.total, i.paid_amount, i.due_date, COALESCE(c.name, 'Unknown') AS client
+            FROM invoices i
+            LEFT JOIN clients c ON c.id = i.client_id
+            WHERE i.status NOT IN ('paid', 'void', 'cancelled', 'draft')
+              AND i.due_date < NOW()
+            ORDER BY i.due_date
+            """
+        )
+        now = datetime.datetime.now(datetime.timezone.utc)
+        buckets: Dict[str, List[Dict[str, Any]]] = {"0-30": [], "31-60": [], "61-90": [], "90+": []}
+        for row in rows:
+            due_date = row["due_date"]
+            if due_date.tzinfo is None:
+                due_date = due_date.replace(tzinfo=datetime.timezone.utc)
+            days_overdue = max((now - due_date).days, 0)
+            label = "0-30" if days_overdue <= 30 else "31-60" if days_overdue <= 60 else "61-90" if days_overdue <= 90 else "90+"
+            buckets[label].append({
+                "invoice": row["number"],
+                "client": row["client"],
+                "amount": float(row["total"] - row["paid_amount"]),
+                "daysOverdue": days_overdue,
+            })
+        return ApiResponse.success(data={"rows": None, "buckets": buckets})
+
+    raise HTTPException(status_code=404, detail=f"Unknown report kind: {kind}")
 

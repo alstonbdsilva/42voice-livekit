@@ -24,6 +24,8 @@ import {
 import AgentService, { CreateAgentDto } from "@/services/agent.service";
 import PhoneNumberService from "@/services/phone-number.service";
 import ToolsService from "@/services/tools.service";
+import { useActiveTools, usePhoneNumbers } from "@/hooks/useReferenceData";
+import { queryClient } from "@/lib/queryClient";
 import { Tool } from "@/types";
 import { useAuth } from "@/store/authStore";
 import { Button } from "@/components/ui/button";
@@ -110,6 +112,10 @@ export default function CreateAgent() {
   // Voice
   const [voiceGender, setVoiceGender] = useState<"female" | "male">("female");
   const [voiceName, setVoiceName] = useState("Kira");
+  const [ttsProvider, setTtsProvider] = useState("elevenlabs");
+  const [ttsModel, setTtsModel] = useState("eleven_multilingual_v2");
+  const [ttsVoiceId, setTtsVoiceId] = useState("");
+  const [ttsVoiceName, setTtsVoiceName] = useState("Kira");
   const [elevenLabsSettings, setElevenLabsSettings] =
     useState<ElevenLabsVoiceSettings>(DEFAULT_ELEVENLABS_SETTINGS);
 
@@ -137,26 +143,16 @@ export default function CreateAgent() {
     "analysis.completed",
   ]);
 
+  const { data: cachedPhoneNumbers } = usePhoneNumbers();
+  const { data: cachedTools } = useActiveTools();
+
   useEffect(() => {
-    const fetchNumbers = async () => {
-      try {
-        const data = await PhoneNumberService.getAll();
-        setPhoneNumbers(data);
-      } catch (err) {
-        console.error("Failed to load phone numbers:", err);
-      }
-    };
-    const fetchTools = async () => {
-      try {
-        const data = await ToolsService.getAll({ status: "active" });
-        setTools(data);
-      } catch (err) {
-        console.error("Failed to load tools:", err);
-      }
-    };
-    fetchNumbers();
-    fetchTools();
-  }, []);
+    if (cachedPhoneNumbers) setPhoneNumbers(cachedPhoneNumbers);
+  }, [cachedPhoneNumbers]);
+
+  useEffect(() => {
+    if (cachedTools) setTools(cachedTools);
+  }, [cachedTools]);
 
   const isSuperAdmin = user?.role === "super_admin" || user?.role === "finance_admin";
   const userOwnerId = user?.clientId || user?.resellerId || user?.id;
@@ -268,8 +264,12 @@ export default function CreateAgent() {
         callType,
         useCase: useCase.trim(),
         activityDescription: systemPrompt.trim(),
-        voiceName,
+        voiceName: ttsVoiceName || voiceName,
         voiceGender,
+        ttsProvider,
+        ttsModel,
+        ttsVoiceId,
+        ttsVoiceName: ttsVoiceName || voiceName,
         guardrails,
         customGuardrails: customGuardrails.trim(),
         knowledgeItems: knowledgeItems.map((k) => ({
@@ -294,6 +294,9 @@ export default function CreateAgent() {
           console.error("Failed to link phone number:", err);
         }
       }
+
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      queryClient.invalidateQueries({ queryKey: ["phone-numbers"] });
 
       navigate("/agents");
     } catch (err: any) {
@@ -611,11 +614,20 @@ export default function CreateAgent() {
           {/* ── Voice ───────────────────────────────────────────────────── */}
           <TabsContent value="voice" className="outline-none space-y-6">
             <ElevenLabsVoiceSelector
-              selectedVoiceName={voiceName}
+              selectedProvider={ttsProvider}
+              selectedModel={ttsModel}
+              selectedVoiceId={ttsVoiceId}
+              selectedVoiceName={ttsVoiceName || voiceName}
               selectedVoiceGender={voiceGender}
-              onSelectVoice={(vName, g) => {
+              onSelectProvider={setTtsProvider}
+              onSelectModel={setTtsModel}
+              onSelectVoice={(vName, g, vId) => {
+                setTtsVoiceName(vName);
                 setVoiceName(vName);
                 setVoiceGender(g);
+                if (vId !== undefined) {
+                  setTtsVoiceId(vId);
+                }
               }}
               voiceSettings={elevenLabsSettings}
               onUpdateSettings={setElevenLabsSettings}
