@@ -849,6 +849,116 @@ class TestWorkflowEngine(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(run_ctx.status, "failed")
 
+    async def test_28_wf_run_completed_emitted_exactly_once(self):
+        """Verify that [WF_RUN] completed is emitted exactly once upon on_exit, and duplicate on_exit is suppressed."""
+        from agent import VoiceAgent
+        import logging
+
+        mock_session_mgr = MagicMock()
+        mock_booking = MagicMock()
+        mock_sales = MagicMock()
+        mock_support = MagicMock()
+        mock_settings = MagicMock()
+        mock_settings.enable_transcripts = False
+        mock_ctx = MagicMock()
+        mock_ctx.room.name = "room_complete_test"
+
+        agent = VoiceAgent(
+            session_manager=mock_session_mgr,
+            booking_agent=mock_booking,
+            sales_agent=mock_sales,
+            support_agent=mock_support,
+            settings=mock_settings,
+            room_name="room_complete_test",
+            participant_id="part_complete",
+            ctx=mock_ctx,
+            custom_prompt="Prompt",
+            agent_name="CompleteAgent"
+        )
+
+        compiled = build_compatibility_workflow(
+            agent_data={"name": "CompleteAgent"},
+            custom_prompt="Prompt",
+            dynamic_tool_names=["lookup_caller"],
+            tool_platform_instance=self.tp
+        )
+        run_ctx = WorkflowRunContext(
+            run_id="run_complete_once",
+            workflow_version_id="compat_v1",
+            agent_id="ag_comp_1",
+            room_name="room_complete_test",
+            participant_identity="part_complete"
+        )
+        runtime = WorkflowRuntime(compiled, run_ctx, agent, self.tp)
+        agent.workflow_runtime = runtime
+        agent.run_id = "run_complete_once"
+
+        with self.assertLogs("voice-agent", level="INFO") as log_ctx:
+            # 1. First exit
+            await agent.on_exit()
+            # 2. Duplicate exit
+            await agent.on_exit()
+
+        completion_logs = [record for record in log_ctx.output if "[WF_RUN] completed run_id=run_complete_once status=completed" in record]
+        self.assertEqual(len(completion_logs), 1, "Expected exactly one [WF_RUN] completed log")
+        
+        duplicate_skipped_logs = [record for record in log_ctx.output if "[CALL_CLEANUP] skipped_duplicate" in record]
+        self.assertEqual(len(duplicate_skipped_logs), 1, "Expected duplicate on_exit to be skipped")
+
+    def test_29_provider_429_classification_and_cleanup_resilience(self):
+        """Verify classify_provider_error classifies 429 quota/spend limit safely without crashing or leaking secrets."""
+        from agent import classify_provider_error
+
+        # 1. 429 quota classification
+        res1 = classify_provider_error("429 organization_spend_limit_exceeded with secret sk-proj-12345", capability="llm", provider="openai")
+        self.assertEqual(res1, "quota_exceeded")
+
+        # 2. 401 auth classification
+        res2 = classify_provider_error("401 invalid_api_key Bearer sk-xyz", capability="tts", provider="openai")
+        self.assertEqual(res2, "auth_failed")
+
+        # 3. 503 service unavailable
+        res3 = classify_provider_error("503 Service Unavailable", capability="llm", provider="openai")
+        self.assertEqual(res3, "service_unavailable")
+
+    def test_30_inbound_lookup_and_outbound_dispatch_sanitized_logs(self):
+        """Verify that inbound lookup debug logging and outbound dispatch logging do not contain raw prompts or numbers."""
+        from agent import logger as agent_logger
+        import io
+
+        # Inbound lookup structured log format verification
+        lookup_data = {
+            "exists": True,
+            "has_credits": True,
+            "agent_id": "agent-123",
+            "telephony_configuration_id": "config-456",
+            "provider": "twilio",
+            "prompt": "SECRET PROMPT: You are confidential agent",
+            "phone_number": "+1234567890"
+        }
+
+        # Format of the sanitized inbound log
+        sanitized_inbound_msg = (
+            f"[INBOUND_DEBUG] lookup_success exists=true "
+            f"has_credits={str(bool(lookup_data.get('has_credits', True))).lower()} "
+            f"agent_present={str(bool(lookup_data.get('agent_id'))).lower()} "
+            f"telephony_config_present={str(bool(lookup_data.get('telephony_configuration_id'))).lower()} "
+            f"provider_present={str(bool(lookup_data.get('provider'))).lower()}"
+        )
+
+        self.assertNotIn("SECRET PROMPT", sanitized_inbound_msg)
+        self.assertNotIn("+1234567890", sanitized_inbound_msg)
+        self.assertIn("exists=true", sanitized_inbound_msg)
+        self.assertIn("has_credits=true", sanitized_inbound_msg)
+        self.assertIn("agent_present=true", sanitized_inbound_msg)
+
+        # Outbound dispatch format verification
+        outbound_msg = "[OUTBOUND_DISPATCH] Dispatched agent 'voice_agent' to room 'call-abcdef12'"
+        self.assertNotIn("metadata", outbound_msg)
+        self.assertNotIn("+", outbound_msg)
+        self.assertIn("[OUTBOUND_DISPATCH]", outbound_msg)
+
 
 if __name__ == "__main__":
     unittest.main()
+

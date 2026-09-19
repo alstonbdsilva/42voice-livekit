@@ -559,12 +559,12 @@ async def lookup_number(number: str):
             )
 
         number_candidates = get_phone_number_variants(number)
-        logger.info(f"Inbound call lookup for {number} (canonical: {canonical_number}, candidates: {number_candidates})")
+        logger.info(f"Inbound call lookup request received (candidates_count={len(number_candidates)})")
 
         # Try serving from Redis cache first
         cached_lookup = phone_sync_service.get_cached_lookup(canonical_number)
         if cached_lookup:
-            logger.info(f"Cache HIT for {canonical_number}")
+            logger.info("Cache HIT for inbound number lookup")
             return cached_lookup
 
         # Query active telephony_phone_numbers joined with telephony_configurations
@@ -587,10 +587,10 @@ async def lookup_number(number: str):
         )
 
         if not rows:
-            logger.warning(f"PHONE_NUMBER_NOT_FOUND: {number} (canonical: {canonical_number})")
+            logger.warning("PHONE_NUMBER_NOT_FOUND: Inbound lookup number not found")
             raise HTTPException(
                 status_code=404,
-                detail={"error": "PHONE_NUMBER_NOT_FOUND", "message": f"Phone number {number} not found"}
+                detail={"error": "PHONE_NUMBER_NOT_FOUND", "message": "Phone number not found"}
             )
 
         num_record = rows[0]
@@ -601,12 +601,12 @@ async def lookup_number(number: str):
 
         # CRITICAL: Verify agent is assigned. Unassigned phone numbers cannot accept calls.
         if not agent_uuid:
-            logger.warning(f"PHONE_NOT_ASSIGNED: {number} has no assigned agent")
+            logger.warning("PHONE_NOT_ASSIGNED: Number has no assigned agent")
             raise HTTPException(
                 status_code=409,
                 detail={
                     "error": "PHONE_NOT_ASSIGNED",
-                    "message": f"Phone number {number} has no assigned agent",
+                    "message": "Phone number has no assigned agent",
                     "prompt": "Welcome to 42 voice and we will get back to you."
                 }
             )
@@ -622,12 +622,12 @@ async def lookup_number(number: str):
                 has_credits = minutes_balance > 0
 
         if not has_credits:
-            logger.warning(f"INSUFFICIENT_CREDITS for phone number {number}. Balance: {minutes_balance}")
+            logger.warning(f"INSUFFICIENT_CREDITS: Balance={minutes_balance}")
             raise HTTPException(
                 status_code=403,
                 detail={
                     "error": "INSUFFICIENT_CREDITS",
-                    "message": f"Account has insufficient call minutes for {number}",
+                    "message": "Account has insufficient call minutes",
                     "prompt": "We are sorry, but this account has run out of call minutes. Please recharge your balance in the dashboard. Goodbye."
                 }
             )

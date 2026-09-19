@@ -1040,7 +1040,7 @@ async def initiate_call(
                             metadata=metadata_payload
                         )
                     )
-                    logger.info(f"Dispatched agent '{settings.livekit_agent_name}' to room '{room_name}' with metadata: {metadata_payload}")
+                    logger.info(f"[OUTBOUND_DISPATCH] Dispatched agent '{settings.livekit_agent_name}' to room '{room_name}'")
                 except Exception as dispatch_err:
                     logger.warning(f"Could not dispatch agent to room {room_name}: {dispatch_err}")
 

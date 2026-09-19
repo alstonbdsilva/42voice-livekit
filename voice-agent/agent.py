@@ -65,6 +65,23 @@ logger = logging.getLogger("voice-agent")
 from name_service import build_stt_keywords, parse_caller_name, NameCaptureState
 
 
+def classify_provider_error(error: Any, capability: str = "llm", provider: str = "openai") -> str:
+    """Classify external AI provider errors cleanly without leaking credentials or raw data."""
+    err_str = str(error).lower()
+    if any(q in err_str for q in ("429", "quota", "spend_limit", "rate_limit", "organization_spend_limit_exceeded")):
+        logger.error(f"[PROVIDER_ERROR] capability={capability} provider={provider} category=quota_exceeded")
+        return "quota_exceeded"
+    elif any(a in err_str for a in ("401", "unauthorized", "invalid_api_key", "authentication")):
+        logger.error(f"[PROVIDER_ERROR] capability={capability} provider={provider} category=auth_failed")
+        return "auth_failed"
+    elif any(s in err_str for s in ("500", "502", "503", "504", "service_unavailable")):
+        logger.error(f"[PROVIDER_ERROR] capability={capability} provider={provider} category=service_unavailable")
+        return "service_unavailable"
+    else:
+        logger.error(f"[PROVIDER_ERROR] capability={capability} provider={provider} category=unknown_error")
+        return "unknown_error"
+
+
 def make_json_safe(obj: Any, parent_key: str = "") -> Any:
     """
     Recursively converts non-JSON-serializable types into JSON-safe primitives:
@@ -195,11 +212,7 @@ class VoiceAgent(Agent):
         stt_keywords = build_stt_keywords(agent_data)
         stt_lang = (agent_data.get("language") if agent_data and isinstance(agent_data, dict) and agent_data.get("language") else "en-US")
 
-        logger.info(f"[STT_CONFIG_DEBUG] agent_data_keys={list(agent_data.keys()) if agent_data else []}")
-        logger.info(f"[STT_CONFIG_DEBUG] resolved_agent_name={agent_data.get('name') or agent_data.get('agent_name') if agent_data else None}")
-        logger.info(f"[STT_CONFIG_DEBUG] resolved_client_name={agent_data.get('client_name') if agent_data else None}")
-        logger.info(f"[STT_CONFIG_DEBUG] generated_keywords={stt_keywords}")
-        logger.info(f"[STT] Initializing Deepgram STT for agent '{self.agent_name}' (lang={stt_lang}) with {len(stt_keywords)} dynamic entity keywords: {stt_keywords}")
+        logger.info(f"[STT] Initializing Deepgram STT for agent '{self.agent_name}' (lang={stt_lang}) with {len(stt_keywords)} dynamic entity keywords")
         
         # Use VAD from prewarm if provided, otherwise load it
         vad_instance = vad if vad else silero.VAD.load()
@@ -490,6 +503,8 @@ class VoiceAgent(Agent):
             # Update workflow runtime status
             if hasattr(self, 'workflow_runtime') and self.workflow_runtime:
                 self.workflow_runtime.context.status = "completed"
+                wf_run_id = getattr(self, 'run_id', None) or getattr(self.workflow_runtime.context, 'run_id', 'unknown')
+                logger.info(f"[WF_RUN] completed run_id={wf_run_id} status=completed")
 
             logger.info("SESSION CLEANED")
         finally:
@@ -710,8 +725,10 @@ async def analyze_transcript_with_llm(full_text: str, settings) -> dict:
                         "leadScore": int(parsed.get("leadScore", 50)),
                         "actionItems": [str(x) for x in parsed.get("actionItems", [])] or ["Follow up with customer inquiry"]
                     }
+                else:
+                    classify_provider_error(f"status_{res.status_code}_{res.text[:100]}", capability="llm", provider="openai")
     except Exception as e:
-        logger.warning(f"AI transcript analysis via OpenAI failed: {e}")
+        classify_provider_error(e, capability="llm", provider="openai")
         
     # Smart Fallback rules if LLM is unreachable
     lines_count = len(full_text.splitlines())
@@ -1017,8 +1034,7 @@ async def entrypoint(ctx: JobContext):
     )
     logger.info("[SIP] Participant Connected")
     logger.info(f"[SIP] Participant identity: {participant.identity}")
-    logger.info(f"[SIP] Participant attributes: {participant.attributes}")
-    logger.info(f"[SIP] Resolved called_number: {called_number}, target_agent_id in metadata: {target_agent_id}")
+    logger.info(f"[SIP] Resolved called_number_present={bool(called_number)} target_agent_id={target_agent_id}")
     
     t_db = time.perf_counter()
     if database.pool is None or (hasattr(database.pool, "_loop") and database.pool._loop.is_closed()):
@@ -1072,7 +1088,7 @@ async def entrypoint(ctx: JobContext):
             
     # Case B: Inbound call to a phone number (Lookup assigned agent via called_number)
     elif called_number:
-        logger.info(f"[Backend] Starting routing lookup for inbound call to {called_number} at {backend_url}/phone-numbers/lookup")
+        logger.info(f"[Backend] Starting routing lookup for inbound call at {backend_url}/phone-numbers/lookup")
         try:
             async with httpx.AsyncClient() as http_client:
                 lookup_resp = await http_client.get(
@@ -1080,36 +1096,42 @@ async def entrypoint(ctx: JobContext):
                     params={"number": called_number},
                     timeout=10.0
                 )
-                logger.info(f"[INBOUND_DEBUG] lookup_status={lookup_resp.status_code} called_number={called_number}")
+                logger.info(f"[INBOUND_DEBUG] lookup_status={lookup_resp.status_code}")
                 
                 if lookup_resp.status_code == 200:
                     lookup_data = lookup_resp.json()
-                    logger.info(f"[INBOUND_DEBUG] lookup_success: {lookup_data}")
+                    logger.info(
+                        f"[INBOUND_DEBUG] lookup_success exists=true "
+                        f"has_credits={str(bool(lookup_data.get('has_credits', True))).lower()} "
+                        f"agent_present={str(bool(lookup_data.get('agent_id'))).lower()} "
+                        f"telephony_config_present={str(bool(lookup_data.get('telephony_configuration_id'))).lower()} "
+                        f"provider_present={str(bool(lookup_data.get('provider'))).lower()}"
+                    )
                     client_id = lookup_data.get("client_id")
                     target_agent_id = lookup_data.get("agent_id")
                     
                     if not lookup_data.get("has_credits", True):
-                        logger.warning(f"[Credits] Insufficient credits for {called_number}")
+                        logger.warning("[Credits] Insufficient credits for inbound call")
                         out_of_credits = True
                     elif lookup_data.get("agent_status") != "active":
                         logger.warning(f"[Agent] Assigned agent is not active (status={lookup_data.get('agent_status')})")
                         unassigned_number = True
                         custom_prompt = "The assigned agent is currently unavailable. Please try again later."
                     elif not target_agent_id:
-                        logger.warning(f"[Agent] No agent_id returned for {called_number}")
+                        logger.warning("[Agent] No agent_id returned for inbound call")
                         unassigned_number = True
                         custom_prompt = "This phone number is not fully configured. Please contact support."
                     elif not lookup_data.get("prompt"):
-                        logger.warning(f"[Agent] No prompt configured for assigned agent on {called_number}")
+                        logger.warning("[Agent] No prompt configured for assigned agent")
                         unassigned_number = True
                         custom_prompt = "The assigned agent is not configured. Please contact support."
                     else:
                         custom_prompt = lookup_data.get("prompt")
                         agent_name = lookup_data.get("agent_name")
                         agent_id = target_agent_id
-                        logger.info(f"[INBOUND_DEBUG] Loaded agent '{agent_name}' for {called_number} (ID={agent_id})")
+                        logger.info(f"[INBOUND_DEBUG] Loaded agent '{agent_name}' (ID={agent_id})")
                 elif lookup_resp.status_code == 404:
-                    logger.warning(f"[INBOUND_DEBUG] PHONE_NUMBER_NOT_FOUND: {called_number}")
+                    logger.warning("[INBOUND_DEBUG] PHONE_NUMBER_NOT_FOUND")
                     unassigned_number = True
                     try:
                         detail = lookup_resp.json().get("detail", {})
@@ -1117,7 +1139,7 @@ async def entrypoint(ctx: JobContext):
                     except Exception:
                         custom_prompt = "This phone number is not configured in the system."
                 elif lookup_resp.status_code == 409:
-                    logger.warning(f"[INBOUND_DEBUG] PHONE_NOT_ASSIGNED: {called_number}")
+                    logger.warning("[INBOUND_DEBUG] PHONE_NOT_ASSIGNED")
                     unassigned_number = True
                     try:
                         detail = lookup_resp.json().get("detail", {})
@@ -1125,14 +1147,14 @@ async def entrypoint(ctx: JobContext):
                     except Exception:
                         custom_prompt = "Welcome to 42 voice and we will get back to you."
                 elif lookup_resp.status_code == 403:
-                    logger.warning(f"[INBOUND_DEBUG] INSUFFICIENT_CREDITS: {called_number}")
+                    logger.warning("[INBOUND_DEBUG] INSUFFICIENT_CREDITS")
                     out_of_credits = True
                 else:
-                    logger.error(f"[INBOUND_DEBUG] Lookup failed: status={lookup_resp.status_code}, body={lookup_resp.text}")
+                    logger.error(f"[INBOUND_DEBUG] Lookup failed: status={lookup_resp.status_code}")
                     unassigned_number = True
                     custom_prompt = "An error occurred while processing your call. Please try again later."
         except Exception as e:
-            logger.exception(f"[INBOUND_DEBUG] Exception during phone number lookup for {called_number}: {e}")
+            logger.error(f"[INBOUND_DEBUG] Exception during phone number lookup: {e}")
             unassigned_number = True
             custom_prompt = "An error occurred while processing your call. Please try again later."
     else:
