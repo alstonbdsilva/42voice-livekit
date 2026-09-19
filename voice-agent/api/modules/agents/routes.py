@@ -43,6 +43,7 @@ class UpdateAgentRequest(BaseModel):
     customGuardrails: Optional[str] = None
     knowledgeItems: Optional[List[Dict[str, Any]]] = None
     toolIds: Optional[List[str]] = None
+    publishedWorkflowVersionId: Optional[str] = None
 
 
 class CreateAgentRequest(BaseModel):
@@ -58,6 +59,7 @@ class CreateAgentRequest(BaseModel):
     customGuardrails: Optional[str] = ""
     knowledgeItems: Optional[List[Dict[str, Any]]] = []
     toolIds: Optional[List[str]] = []
+    publishedWorkflowVersionId: Optional[str] = None
 
 
 # --- Route Endpoints ---
@@ -181,13 +183,16 @@ async def update(agent_id: str, req_body: UpdateAgentRequest, current_user: Dict
         )
 
     # Filter only configuration detail fields for update_agent_details
-    detail_fields = {"name", "useCase", "activityDescription", "callType", "voiceName", "voiceGender", "guardrails", "customGuardrails", "knowledgeItems", "toolIds"}
+    detail_fields = {
+        "name", "useCase", "activityDescription", "callType", "voiceName", "voiceGender",
+        "guardrails", "customGuardrails", "knowledgeItems", "toolIds", "publishedWorkflowVersionId"
+    }
     update_data = req_body.model_dump(exclude_unset=True)
     details_to_update = {k: v for k, v in update_data.items() if k in detail_fields}
     print("DEBUG DETAILS TO UPDATE:", details_to_update)
 
     if details_to_update:
-        agent = await agent_service.update_agent_details(agent_id, details_to_update)
+        agent = await agent_service.update_agent_details(agent_id, details_to_update, user_context=current_user)
 
     if req_body.status:
         agent = await agent_service.update_agent_status(agent_id, req_body.status)

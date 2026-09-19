@@ -18,6 +18,7 @@ class AgentRepository:
                a.total_calls, a.total_messages, a.total_minutes, a.success_rate, a.escalation_rate,
                a.prompt_version, a.kb_version, a.total_cost, a.last_activity, a.user_id, a.client_id, a.created_at, a.updated_at,
                a.voice_name, a.voice_gender, a.guardrails, a.custom_guardrails, a.knowledge_items, a.tool_ids,
+               a.published_workflow_version_id,
                COALESCE(
                  (SELECT json_agg(json_build_object('id', r.id, 'name', r.name)) 
                   FROM agent_resellers ar JOIN resellers r ON ar.reseller_id = r.id 
@@ -288,6 +289,12 @@ class AgentRepository:
         if "toolIds" in data and data["toolIds"] is not None:
             fields.append(f"tool_ids = ${param_idx}")
             params.append(json.dumps(data["toolIds"]))
+            param_idx += 1
+
+        if "publishedWorkflowVersionId" in data or "published_workflow_version_id" in data:
+            val = data.get("publishedWorkflowVersionId") if "publishedWorkflowVersionId" in data else data.get("published_workflow_version_id")
+            fields.append(f"published_workflow_version_id = ${param_idx}")
+            params.append(val)
             param_idx += 1
             
         if not fields:

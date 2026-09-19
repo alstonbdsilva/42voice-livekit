@@ -53,8 +53,38 @@ class AgentService:
             return None
         return self.map_to_response(updated)
 
-    async def update_agent_details(self, agent_id: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Update configurable fields (name, use_case, activity_description)."""
+    async def update_agent_details(self, agent_id: str, data: Dict[str, Any], user_context: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """Update configurable fields (name, use_case, activity_description, publishedWorkflowVersionId)."""
+        wf_ver_id = data.get("publishedWorkflowVersionId")
+        if wf_ver_id:
+            # Validate workflow version exists, is published, and belongs to authorized tenant
+            from api.modules.workflows.repositories import WorkflowRepository
+            wf_repo = WorkflowRepository()
+            ver = await wf_repo.find_version_by_id(wf_ver_id)
+            if not ver:
+                from api.utils.errors import NotFoundError
+                raise NotFoundError(f"Workflow version '{wf_ver_id}' not found.", "WORKFLOW_VERSION_NOT_FOUND")
+
+            if ver.get("lifecycle_status") != "published":
+                from api.utils.errors import BadRequestError
+                raise BadRequestError("Cannot assign a non-published (draft or archived) workflow version to an agent.", "INVALID_WORKFLOW_VERSION_STATUS")
+
+            # Validate tenant ownership of the workflow
+            if user_context and user_context.get("role") not in ["SUPER_ADMIN", "FINANCE_ADMIN"]:
+                wf = await wf_repo.find_by_id(str(ver["workflow_id"]))
+                if not wf:
+                    from api.utils.errors import NotFoundError
+                    raise NotFoundError(f"Parent workflow for version '{wf_ver_id}' not found.", "WORKFLOW_NOT_FOUND")
+
+                client_id = user_context.get("client_id")
+                user_id = user_context.get("id") or user_context.get("userId")
+                rec_client = str(wf["client_id"]) if wf.get("client_id") else None
+                rec_user = str(wf["user_id"]) if wf.get("user_id") else None
+
+                if client_id and rec_client and client_id != rec_client:
+                    from api.utils.errors import ForbiddenError
+                    raise ForbiddenError("Cannot assign workflow version belonging to another tenant.", "CROSS_TENANT_WORKFLOW_ASSIGNMENT")
+
         updated = await self.agent_repository.update_details(agent_id, data)
         if not updated:
             return None
@@ -83,7 +113,8 @@ class AgentService:
             "guardrails": payload.get("guardrails", {}),
             "customGuardrails": payload.get("customGuardrails", ""),
             "knowledgeItems": payload.get("knowledgeItems", []),
-            "toolIds": payload.get("toolIds", [])
+            "toolIds": payload.get("toolIds", []),
+            "publishedWorkflowVersionId": payload.get("publishedWorkflowVersionId")
         }
 
         if role in ["SUPER_ADMIN", "FINANCE_ADMIN"]:
@@ -156,5 +187,6 @@ class AgentService:
             "guardrails": guardrails,
             "customGuardrails": a.get("custom_guardrails") or "",
             "knowledgeItems": knowledge_items,
-            "toolIds": tool_ids
+            "toolIds": tool_ids,
+            "publishedWorkflowVersionId": str(a["published_workflow_version_id"]) if a.get("published_workflow_version_id") else None
         }

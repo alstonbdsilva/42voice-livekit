@@ -40,6 +40,8 @@ from workflow_engine import (
     resolve_legacy_agent_prompt,
     tool_platform
 )
+from realtime.livekit_runtime import LiveKitRuntimeAdapter
+from api.modules.workflows.resolver import WorkflowRuntimeResolver
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -505,6 +507,31 @@ class VoiceAgent(Agent):
                 self.workflow_runtime.context.status = "completed"
                 wf_run_id = getattr(self, 'run_id', None) or getattr(self.workflow_runtime.context, 'run_id', 'unknown')
                 logger.info(f"[WF_RUN] completed run_id={wf_run_id} status=completed")
+                try:
+                    from api.modules.workflows.repositories import WorkflowRepository
+                    wf_repo = WorkflowRepository()
+                    conv_id = getattr(self.workflow_runtime.context, "conversation_id", None) or getattr(self, "_registered_conversation_id", None)
+                    await asyncio.wait_for(
+                        wf_repo.update_workflow_run(
+                            run_id=wf_run_id,
+                            update_data={
+                                "status": "completed",
+                                "conversation_id": conv_id
+                            }
+                        ),
+                        timeout=3.0
+                    )
+                    await asyncio.wait_for(
+                        wf_repo.append_run_event({
+                            "run_id": wf_run_id,
+                            "sequence_number": 9999,
+                            "event_type": "run_completed",
+                            "safe_metadata": {"status": "completed"}
+                        }),
+                        timeout=3.0
+                    )
+                except Exception as run_comp_err:
+                    logger.debug(f"[WF_RUN] Notice during run_completed persistence: {run_comp_err}")
 
             logger.info("SESSION CLEANED")
         finally:
@@ -915,6 +942,15 @@ async def register_call_with_backend(agent, started_at, ended_at):
                 if response.status_code in [200, 201]:
                     registered_success = True
                     agent._call_registered = True
+                    try:
+                        resp_data = response.json().get("data", {})
+                        conv_id = resp_data.get("id")
+                        if conv_id:
+                            agent._registered_conversation_id = str(conv_id)
+                            if hasattr(agent, "workflow_runtime") and agent.workflow_runtime:
+                                agent.workflow_runtime.context.conversation_id = str(conv_id)
+                    except Exception as json_err:
+                        logger.warning(f"Could not extract conversation_id from register response: {json_err}")
                     logger.info(f"[CALL_PERSIST] success room={room_name} status={response.status_code}")
                 else:
                     logger.error(f"[CALL_PERSIST] failed room={room_name} error=status_{response.status_code}_{response.text}")
@@ -931,7 +967,17 @@ async def register_call_with_backend(agent, started_at, ended_at):
                         method="POST"
                     )
                     with urllib.request.urlopen(req, timeout=4.0) as resp:
-                        return resp.status
+                        status = resp.status
+                        try:
+                            body = json.loads(resp.read().decode("utf-8"))
+                            conv_id = body.get("data", {}).get("id")
+                            if conv_id:
+                                agent._registered_conversation_id = str(conv_id)
+                                if hasattr(agent, "workflow_runtime") and agent.workflow_runtime:
+                                    agent.workflow_runtime.context.conversation_id = str(conv_id)
+                        except Exception:
+                            pass
+                        return status
 
                 status = await asyncio.to_thread(_sync_post)
                 if status in [200, 201]:
@@ -1378,11 +1424,29 @@ async def entrypoint(ctx: JobContext):
     if client_id and "client_id" not in agent_config_data:
         agent_config_data["client_id"] = client_id
 
-    # 1. Initialize WorkflowRunContext early (before conversation/recording exist)
+    # 1. Extract dynamic tool names for compatibility or custom tools
+    dyn_tool_names = []
+    for t in dynamic_tools:
+        if hasattr(t, "info") and hasattr(t.info, "name") and t.info.name:
+            dyn_tool_names.append(t.info.name)
+        elif hasattr(t, "name") and t.name:
+            dyn_tool_names.append(t.name)
+
+    # 2. Resolve workflow definition (exact pinned version or runtime compatibility)
+    resolver = WorkflowRuntimeResolver()
+    compiled_workflow, resolved_wf_id, resolved_wf_version_id = await resolver.resolve_for_agent(
+        agent_data=agent_config_data,
+        custom_prompt=custom_prompt,
+        dynamic_tools=dyn_tool_names,
+        out_of_credits=out_of_credits
+    )
+
+    # 3. Initialize WorkflowRunContext early (before conversation/recording exist)
     call_run_id = str(uuid.uuid4())
     workflow_run_ctx = WorkflowRunContext(
         run_id=call_run_id,
-        workflow_version_id=None,
+        workflow_id=resolved_wf_id,
+        workflow_version_id=resolved_wf_version_id,
         agent_id=str(agent_id) if agent_id else None,
         room_name=ctx.room.name,
         participant_identity=participant.identity,
@@ -1394,21 +1458,34 @@ async def entrypoint(ctx: JobContext):
         }
     )
 
-    # 2. Extract dynamic tool names for compatibility workflow
-    dyn_tool_names = []
-    for t in dynamic_tools:
-        if hasattr(t, "info") and hasattr(t.info, "name") and t.info.name:
-            dyn_tool_names.append(t.info.name)
-        elif hasattr(t, "name") and t.name:
-            dyn_tool_names.append(t.name)
-
-    # 3. Build single-node compatibility workflow for legacy agent
-    compiled_workflow = build_compatibility_workflow(
-        agent_data=agent_config_data,
-        custom_prompt=custom_prompt,
-        dynamic_tool_names=dyn_tool_names,
-        out_of_credits=out_of_credits
-    )
+    # 4. Durably record run_started event
+    try:
+        from api.modules.workflows.repositories import WorkflowRepository
+        wf_repo = WorkflowRepository()
+        await asyncio.wait_for(
+            wf_repo.create_workflow_run({
+                "run_id": call_run_id,
+                "workflow_id": resolved_wf_id,
+                "workflow_version_id": resolved_wf_version_id,
+                "agent_id": str(agent_id) if agent_id else None,
+                "client_id": str(client_id) if client_id else None,
+                "room_name": ctx.room.name,
+                "status": "running",
+                "safe_metadata": {"mode": "compatibility" if not resolved_wf_version_id else "pinned"}
+            }),
+            timeout=3.0
+        )
+        await asyncio.wait_for(
+            wf_repo.append_run_event({
+                "run_id": call_run_id,
+                "sequence_number": 1,
+                "event_type": "run_started",
+                "safe_metadata": {"room_name": ctx.room.name}
+            }),
+            timeout=3.0
+        )
+    except Exception as run_init_err:
+        logger.debug(f"[WF_RUN] Notice during run_started persistence: {run_init_err}")
 
     # Create and start the agent
     logger.info("Creating VoiceAgent")
@@ -1431,11 +1508,17 @@ async def entrypoint(ctx: JobContext):
         agent_data=agent_config_data
     )
     
-    # 4. Bind WorkflowRuntime to VoiceAgent
+    # 5. Bind LiveKitRuntimeAdapter and WorkflowRuntime
+    realtime_adapter = LiveKitRuntimeAdapter(
+        agent=agent,
+        session=session,
+        room=ctx.room
+    )
     workflow_runtime = WorkflowRuntime(
         compiled=compiled_workflow,
         context=workflow_run_ctx,
-        agent=agent
+        agent=agent,
+        realtime=realtime_adapter
     )
     agent.workflow_runtime = workflow_runtime
     agent.run_id = call_run_id

@@ -24,6 +24,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Set, Tuple, Union
 
+from realtime.base import RealtimeRuntime
+from realtime.livekit_runtime import LiveKitRuntimeAdapter
+
 logger = logging.getLogger("voice-agent.workflow_engine")
 
 MAX_TRANSITIONS_DEFAULT = 30
@@ -160,6 +163,7 @@ class WorkflowRunContext:
     room_name: str
     participant_identity: str
     client_id: Optional[str] = None
+    workflow_id: Optional[str] = None
     
     # Context Segregation
     initial_context: Dict[str, Any] = field(default_factory=dict)
@@ -933,18 +937,29 @@ class WorkflowCompiler:
 class WorkflowRuntime:
     """
     In-Call Workflow Orchestrator.
-    Executes compiled nodes, evaluates transitions, and mutates the single active VoiceAgent in-place.
+    Executes compiled nodes, evaluates transitions, and mutates active realtime session in-place
+    via RealtimeRuntime.
     """
     def __init__(
         self,
         compiled: CompiledWorkflow,
         context: WorkflowRunContext,
-        agent: Any,  # LiveKit VoiceAgent instance
-        tool_platform_instance: Optional[ToolPlatform] = None
+        agent: Optional[Any] = None,  # VoiceAgent or legacy target
+        tool_platform_instance: Optional[ToolPlatform] = None,
+        realtime: Optional[RealtimeRuntime] = None
     ):
         self.compiled = compiled
         self.context = context
         self.agent = agent
+        if realtime is not None:
+            self.realtime: Optional[RealtimeRuntime] = realtime
+        elif agent is not None:
+            if isinstance(agent, RealtimeRuntime):
+                self.realtime = agent
+            else:
+                self.realtime = LiveKitRuntimeAdapter(agent=agent)
+        else:
+            self.realtime = None
         self.tool_platform = tool_platform_instance or tool_platform
         self.transition_engine = TransitionEngine()
 
@@ -990,7 +1005,7 @@ class WorkflowRuntime:
         await self.enter_node(start_node_id)
 
     async def enter_node(self, node_id: str) -> None:
-        """Enter a node, execute its strategy executor, and apply updates to active agent."""
+        """Enter a node, execute its strategy executor, and apply updates to active realtime runtime."""
         if node_id not in self.compiled.nodes:
             logger.error(f"[WF_RUN] failed run_id={self.context.run_id} error=target_node_not_found node_id={node_id}")
             self.context.emit_trace("NODE_NOT_FOUND", node_id=node_id)
@@ -1027,17 +1042,17 @@ class WorkflowRuntime:
         if result.status == "terminal":
             logger.info(f"[WF_RUN] completed run_id={self.context.run_id} status={self.context.status}")
 
-        # Apply in-place prompt updates to active agent if present
-        if result.updated_instructions and hasattr(self.agent, "update_instructions"):
+        # Apply in-place prompt updates via RealtimeRuntime
+        if result.updated_instructions and self.realtime:
             try:
-                await self.agent.update_instructions(result.updated_instructions)
+                await self.realtime.update_instructions(result.updated_instructions)
             except Exception as e:
                 logger.error(f"[WF_AGENT_MUTATION_ERROR] run_id={self.context.run_id} failed to update instructions: {e}")
 
-        # Apply in-place tool updates to active agent if present
-        if result.updated_tools is not None and hasattr(self.agent, "update_tools"):
+        # Apply in-place tool updates via RealtimeRuntime
+        if result.updated_tools is not None and self.realtime:
             try:
-                await self.agent.update_tools(result.updated_tools)
+                await self.realtime.update_tools(result.updated_tools)
             except Exception as e:
                 logger.error(f"[WF_AGENT_MUTATION_ERROR] run_id={self.context.run_id} failed to update tools: {e}")
 

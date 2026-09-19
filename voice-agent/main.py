@@ -46,6 +46,7 @@ from api.modules.phone_numbers.routes import router as phone_numbers_router
 from api.modules.tools.routes import router as tools_router
 from api.modules.credentials.routes import router as credentials_router
 from api.modules.telephony_configs.routes import router as telephony_configs_router
+from api.modules.workflows.routes import router as workflows_router
 
 # Configure logging
 logging.basicConfig(
@@ -156,6 +157,7 @@ app.include_router(phone_numbers_router, prefix="/api/v1/phone-numbers", tags=["
 app.include_router(tools_router, prefix="/api/v1/tools", tags=["Tools"])
 app.include_router(credentials_router, prefix="/api/v1/credentials", tags=["Credentials"])
 app.include_router(telephony_configs_router, prefix="/api/v1/telephony-configs", tags=["Telephony Configurations"])
+app.include_router(workflows_router, prefix="/api/v1/workflows", tags=["Workflows"])
 
 # Root-level health endpoint mount
 app.include_router(health_router, prefix="/health", tags=["Health"])

@@ -338,6 +338,77 @@ CREATE INDEX IF NOT EXISTS idx_calendar_bookings_integration ON calendar_booking
 CREATE INDEX IF NOT EXISTS idx_calendar_bookings_status ON calendar_bookings(status);
 CREATE INDEX IF NOT EXISTS idx_calendar_bookings_invitee_uri ON calendar_bookings(invitee_uri);
 
+-- Workflow Platform Tables (Fresh local/test bootstrap only; Alembic is authoritative for migrations)
+CREATE TABLE IF NOT EXISTS workflows (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    client_id UUID REFERENCES clients(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_workflows_client ON workflows(client_id);
+CREATE INDEX IF NOT EXISTS idx_workflows_user ON workflows(user_id);
+CREATE INDEX IF NOT EXISTS idx_workflows_status ON workflows(status);
+
+CREATE TABLE IF NOT EXISTS workflow_versions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    workflow_id UUID NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+    version_number INTEGER NOT NULL,
+    lifecycle_status VARCHAR(50) NOT NULL DEFAULT 'draft',
+    definition JSONB NOT NULL DEFAULT '{"nodes": [], "edges": []}'::jsonb,
+    ui_metadata JSONB DEFAULT '{}'::jsonb,
+    schema_version VARCHAR(20) NOT NULL DEFAULT '1.0',
+    engine_version VARCHAR(20) NOT NULL DEFAULT '1.0',
+    validation_metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    published_at TIMESTAMP WITH TIME ZONE,
+    created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    UNIQUE (workflow_id, version_number)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_versions_workflow ON workflow_versions(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_versions_status ON workflow_versions(lifecycle_status);
+
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS published_workflow_version_id UUID REFERENCES workflow_versions(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_agents_published_workflow_version ON agents(published_workflow_version_id);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    run_id VARCHAR(255) UNIQUE NOT NULL,
+    workflow_id UUID REFERENCES workflows(id) ON DELETE SET NULL,
+    workflow_version_id UUID REFERENCES workflow_versions(id) ON DELETE SET NULL,
+    agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
+    client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
+    room_name VARCHAR(255),
+    status VARCHAR(50) NOT NULL DEFAULT 'running',
+    started_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    error_category VARCHAR(100),
+    conversation_id UUID REFERENCES conversations(id) ON DELETE SET NULL,
+    recording_id UUID REFERENCES recordings(id) ON DELETE SET NULL,
+    safe_metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_run_id ON workflow_runs(run_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_agent ON workflow_runs(agent_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_version ON workflow_runs(workflow_version_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
+
+CREATE TABLE IF NOT EXISTS workflow_run_events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    run_id VARCHAR(255) NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    sequence_number INTEGER NOT NULL,
+    event_type VARCHAR(100) NOT NULL,
+    node_id VARCHAR(255),
+    edge_id VARCHAR(255),
+    safe_metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (run_id, sequence_number)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_run_events_run ON workflow_run_events(run_id);
+
 CREATE TABLE IF NOT EXISTS calendar_webhooks (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     integration_id UUID NOT NULL REFERENCES calendar_integrations(id) ON DELETE CASCADE,
