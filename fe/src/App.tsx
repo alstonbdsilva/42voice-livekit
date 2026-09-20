@@ -44,6 +44,8 @@ import Outbound from "@/pages/Outbound";
 import Tools from "@/pages/Tools";
 import ToolDetail from "@/pages/ToolDetail";
 import CalendarPage from "@/pages/CalendarPage";
+import Workflows from "@/pages/Workflows";
+import WorkflowBuilder from "@/pages/WorkflowBuilder";
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
@@ -83,6 +85,8 @@ export default function App() {
         <Route path="/campaigns/:id" element={<Shell><CampaignDetail /></Shell>} />
         <Route path="/calendar" element={<Shell><CalendarPage /></Shell>} />
         <Route path="/outbound" element={<Navigate to="/campaigns" replace />} />
+        <Route path="/workflows" element={<Shell><Workflows /></Shell>} />
+        <Route path="/workflows/:id/builder" element={<ProtectedRoute><WorkflowBuilder /></ProtectedRoute>} />
         <Route path="/tools" element={<Shell><Tools /></Shell>} />
         <Route path="/tools/:toolUuid" element={<Shell><ToolDetail /></Shell>} />
         <Route path="/invoices" element={<Shell><Invoices /></Shell>} />

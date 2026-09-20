@@ -188,5 +188,6 @@ class AgentService:
             "customGuardrails": a.get("custom_guardrails") or "",
             "knowledgeItems": knowledge_items,
             "toolIds": tool_ids,
-            "publishedWorkflowVersionId": str(a["published_workflow_version_id"]) if a.get("published_workflow_version_id") else None
+            "publishedWorkflowVersionId": str(a["published_workflow_version_id"]) if a.get("published_workflow_version_id") else None,
+            "platformModelConfigurationId": str(a["platform_model_configuration_id"]) if a.get("platform_model_configuration_id") else None
         }

@@ -71,7 +71,8 @@ class TestInboundLookupAndRecording(unittest.IsolatedAsyncioTestCase):
             await lookup_number("+19999999999")
             
         self.assertEqual(ctx.exception.status_code, 404)
-        self.assertEqual(ctx.exception.detail["error"], "PHONE_NUMBER_NOT_FOUND")
+        detail = ctx.exception.detail
+        self.assertTrue(isinstance(detail, dict) and detail.get("error") == "PHONE_NUMBER_NOT_FOUND")
 
     @patch("api.modules.phone_numbers.routes.database")
     @patch("api.modules.phone_numbers.routes.phone_sync_service")

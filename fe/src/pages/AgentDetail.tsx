@@ -7,6 +7,9 @@ import ResellerService from "@/services/reseller.service";
 import ClientService from "@/services/client.service";
 import PhoneNumberService from "@/services/phone-number.service";
 import ToolsService from "@/services/tools.service";
+import WorkflowService from "@/services/workflow.service";
+import ModelConfigService, { ModelConfigRecord } from "@/services/model-config.service";
+import { WorkflowSummary, WorkflowVersion } from "@/types/workflow";
 import PageHeader from "@/components/PageHeader";
 import KpiCard from "@/components/KpiCard";
 import StatusBadge from "@/components/StatusBadge";
@@ -132,6 +135,12 @@ export default function AgentDetail() {
   // Tools edit state
   const [allTools, setAllTools] = useState<Tool[]>([]);
   const [editToolIds, setEditToolIds] = useState<string[]>([]);
+
+  // Workflow and Model Config assignments
+  const [allWorkflows, setAllWorkflows] = useState<WorkflowSummary[]>([]);
+  const [allModelConfigs, setAllModelConfigs] = useState<ModelConfigRecord[]>([]);
+  const [selectedWorkflowVersionId, setSelectedWorkflowVersionId] = useState<string>("none");
+  const [selectedModelConfigId, setSelectedModelConfigId] = useState<string>("default");
 
   const isSuperAdmin = user?.role === "super_admin" || user?.role === "finance_admin";
   const userOwnerId = user?.clientId || user?.resellerId || user?.id;
@@ -260,6 +269,19 @@ export default function AgentDetail() {
     }
   };
 
+  const fetchWorkflowsAndConfigs = async () => {
+    try {
+      const [wfs, mcs] = await Promise.all([
+        WorkflowService.listWorkflows().catch(() => []),
+        ModelConfigService.listModelConfigs().catch(() => []),
+      ]);
+      setAllWorkflows(wfs);
+      setAllModelConfigs(mcs);
+    } catch (err) {
+      console.error("Failed to load workflows or model configs:", err);
+    }
+  };
+
   const load = () => {
     if (!id) return;
     AgentService.getById(id).then((data) => {
@@ -271,6 +293,7 @@ export default function AgentDetail() {
     load();
     fetchNumbers();
     fetchTools();
+    fetchWorkflowsAndConfigs();
     if (isAdmin) {
       ResellerService.getAll().then(setAllResellers).catch(() => { });
       ClientService.getAll().then(setAllClients).catch(() => { });
@@ -292,6 +315,8 @@ export default function AgentDetail() {
       setEditCustomGuardrails(a.customGuardrails || "");
       setEditKnowledgeItems(a.knowledgeItems || []);
       setEditToolIds(a.toolIds || []);
+      setSelectedWorkflowVersionId(a.publishedWorkflowVersionId ? String(a.publishedWorkflowVersionId) : "none");
+      setSelectedModelConfigId(a.platformModelConfigurationId ? String(a.platformModelConfigurationId) : "default");
 
       const resIds = (a.assignedResellers || []).map((r) => String(r.id));
       const cliIds = (a.assignedClients || []).map((c) => String(c.id));
@@ -313,6 +338,7 @@ export default function AgentDetail() {
       const connected = filteredNumbersForDropdown.find((num) => num.agentId && String(num.agentId) === String(id));
       setSelectedPhoneNumberId(connected ? connected.id : "none");
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [a, phoneNumbers]);
 
   const handleSaveAllChanges = async (e?: React.FormEvent) => {
@@ -345,6 +371,8 @@ export default function AgentDetail() {
           size: k.size,
         })),
         toolIds: editToolIds,
+        publishedWorkflowVersionId: selectedWorkflowVersionId === "none" ? null : selectedWorkflowVersionId,
+        platformModelConfigurationId: selectedModelConfigId === "default" ? null : selectedModelConfigId,
       });
 
       // 2. Save assignments
@@ -572,6 +600,61 @@ export default function AgentDetail() {
                 ))}
               </select>
               <p className="text-[11px] text-zinc-500">Attach one of your registered phone numbers to route to this agent</p>
+            </div>
+
+            {/* Workflow Version Assignment */}
+            <div className="space-y-1.5 pt-2 border-t border-zinc-100">
+              <Label htmlFor="workflow-version" className="text-xs font-medium">
+                Voice Workflow Execution Version
+              </Label>
+              <select
+                id="workflow-version"
+                value={selectedWorkflowVersionId}
+                onChange={(e) => setSelectedWorkflowVersionId(e.target.value)}
+                disabled={!canEdit}
+                className="flex h-9 w-full rounded-md border border-zinc-200 bg-white px-3 py-1 text-sm shadow-xs focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-zinc-950"
+              >
+                <option value="none">
+                  ⚡ Compatibility / Legacy Flow (Single-node system prompt execution)
+                </option>
+                {allWorkflows.map((wf) => {
+                  if (!wf.latestPublishedVersionId) return null;
+                  return (
+                    <option key={wf.id} value={wf.latestPublishedVersionId}>
+                      {wf.name} (Published V{wf.latestPublishedVersionNumber})
+                    </option>
+                  );
+                })}
+              </select>
+              <p className="text-[11px] text-zinc-500">
+                Pins this agent to an exact immutable published workflow version. Drafts and unapproved graphs are never executed.
+              </p>
+            </div>
+
+            {/* Model Configuration Assignment */}
+            <div className="space-y-1.5 pt-2 border-t border-zinc-100">
+              <Label htmlFor="model-config" className="text-xs font-medium">
+                AI Model & Provider Configuration
+              </Label>
+              <select
+                id="model-config"
+                value={selectedModelConfigId}
+                onChange={(e) => setSelectedModelConfigId(e.target.value)}
+                disabled={!canEdit}
+                className="flex h-9 w-full rounded-md border border-zinc-200 bg-white px-3 py-1 text-sm shadow-xs focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-zinc-950"
+              >
+                <option value="default">
+                  🌐 Default Platform Configuration (Deepgram STT + OpenAI LLM + OpenAI TTS)
+                </option>
+                {allModelConfigs.map((mc) => (
+                  <option key={mc.id} value={mc.id}>
+                    {mc.name} ({mc.stt_provider.toUpperCase()} STT / {mc.llm_provider.toUpperCase()} LLM / {mc.tts_provider.toUpperCase()} TTS)
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-zinc-500">
+                Call-level model provider routing. Keeps workflow structure cleanly separated from model infrastructure.
+              </p>
             </div>
           </div>
         </TabsContent>

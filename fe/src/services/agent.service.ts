@@ -1,6 +1,6 @@
-import { API_ENDPOINTS } from "@/constants/apiEndpoints";
+import { API_ENDPOINTS } from "../constants/apiEndpoints";
 import { api } from "./api";
-import { Agent } from "@/types";
+import { Agent } from "../types";
 
 export interface CreateAgentDto {
   name: string;
@@ -15,6 +15,8 @@ export interface CreateAgentDto {
   customGuardrails?: string;
   knowledgeItems?: any[];
   toolIds?: string[];
+  publishedWorkflowVersionId?: string | null;
+  platformModelConfigurationId?: string | null;
 }
 
 interface ApiSuccessResponse<T> {
@@ -61,6 +63,8 @@ class AgentServiceClass {
     customGuardrails?: string;
     knowledgeItems?: any[];
     toolIds?: string[];
+    publishedWorkflowVersionId?: string | null;
+    platformModelConfigurationId?: string | null;
   }): Promise<Agent> {
     const res = await api.patch<ApiSuccessResponse<Agent>>(`${API_ENDPOINTS.AGENTS}/${id}`, details);
     return res?.data ?? (res as any);

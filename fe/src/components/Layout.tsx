@@ -5,7 +5,7 @@ import { LucideIcon } from "lucide-react";
 import {
   LayoutDashboard, Users, Briefcase, Bot, MessageSquare, Mic, FileText,
   Receipt, CreditCard, FileSignature, RefreshCw, Bell, BarChart3, Settings,
-  ChevronDown, Search, LogOut, Wallet, ScrollText, Phone, PhoneCall, Wrench, Megaphone, Webhook, Calendar
+  ChevronDown, Search, LogOut, Wallet, ScrollText, Phone, PhoneCall, Wrench, Megaphone, Webhook, Calendar, GitBranch
 } from "lucide-react";
 
 interface NavLinkItem {
@@ -34,6 +34,7 @@ const navItems: NavItem[] = [
   { to: "/resellers", label: "Partners", icon: Users, roles: ["super_admin", "finance_admin"] },
   { to: "/clients", label: "Clients", icon: Briefcase, roles: ["super_admin", "finance_admin", "reseller"] },
   { to: "/agents", label: "AI Agents", icon: Bot, roles: [] },
+  { to: "/workflows", label: "Workflows", icon: GitBranch, roles: [] },
   { to: "/conversations", label: "Conversations", icon: MessageSquare, roles: [] },
   { to: "/recordings", label: "Recordings", icon: Mic, roles: [] },
   { to: "/messages", label: "Messages", icon: MessageSquare, roles: [] },

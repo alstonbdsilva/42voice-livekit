@@ -72,7 +72,7 @@ async def create_model_bundle(
         credential_id=stt_config.credential_id,
         client_id=client_id
     )
-    stt_runtime_opts = {}
+    stt_runtime_opts: Dict[str, Any] = {}
     if dynamic_stt_keywords:
         stt_runtime_opts["keywords"] = dynamic_stt_keywords
     if stt_language:
@@ -103,7 +103,7 @@ async def create_model_bundle(
         credential_id=tts_config.credential_id,
         client_id=client_id
     )
-    tts_runtime_opts = {}
+    tts_runtime_opts: Dict[str, Any] = {}
     if voice_override:
         tts_runtime_opts["voice"] = voice_override
 

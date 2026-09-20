@@ -48,6 +48,8 @@ export interface Agent {
   customGuardrails?: string;
   knowledgeItems?: any[];
   toolIds?: string[];
+  publishedWorkflowVersionId?: string | null;
+  platformModelConfigurationId?: string | null;
 }
 
 export interface TranscriptLine {
