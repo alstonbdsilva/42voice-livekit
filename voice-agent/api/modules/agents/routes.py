@@ -60,6 +60,8 @@ class CreateAgentRequest(BaseModel):
     knowledgeItems: Optional[List[Dict[str, Any]]] = []
     toolIds: Optional[List[str]] = []
     publishedWorkflowVersionId: Optional[str] = None
+    platformModelConfigurationId: Optional[str] = None
+    platform_model_configuration_id: Optional[str] = None
 
 
 # --- Route Endpoints ---

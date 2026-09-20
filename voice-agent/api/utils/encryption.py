@@ -1,25 +1,38 @@
 import logging
+from typing import Optional
 from cryptography.fernet import Fernet
 from config import get_settings
 
 logger = logging.getLogger("voice-agent.api.utils.encryption")
 
+
 class TokenEncryptor:
-    def __init__(self):
+    """Fernet symmetric token encryptor."""
+
+    def __init__(self, key_override: Optional[str] = None, key_name: str = "CALENDLY_ENCRYPTION_KEY"):
         settings = get_settings()
-        self.key = settings.calendly_encryption_key
-        
-        key_str = self.key
+        if key_override:
+            key_str = key_override
+        elif key_name == "PROVIDER_CREDENTIAL_ENCRYPTION_KEY":
+            key_str = (
+                getattr(settings, "provider_credential_encryption_key", None)
+                or getattr(settings, "external_credentials_encryption_key", None)
+                or getattr(settings, "calendly_encryption_key", None)
+            )
+        else:
+            key_str = getattr(settings, "calendly_encryption_key", None)
+
+        self.key = key_str
         if not key_str:
-            logger.warning("CALENDLY_ENCRYPTION_KEY is not configured. Falling back to temporary key.")
-            # Generate a temporary key for safety (though not persistent across restarts)
+            logger.warning(f"{key_name} is not configured. Falling back to temporary key.")
+            # Generate a temporary key for safety (not persistent across restarts)
             key_str = Fernet.generate_key().decode()
             self.key = key_str
-            
+
         try:
             self.cipher = Fernet(key_str.encode())
         except Exception as e:
-            logger.error(f"Failed to initialize encryption cipher: {e}. Generating new key.")
+            logger.error(f"Failed to initialize encryption cipher with provided key: {e}. Generating fallback key.")
             self.cipher = Fernet(Fernet.generate_key())
 
     def encrypt(self, plain_text: str) -> str:
@@ -27,7 +40,7 @@ class TokenEncryptor:
         if not plain_text:
             return ""
         try:
-            return self.cipher.encrypt(plain_text.encode()).decode()
+            return self.cipher.encrypt(plain_text.encode("utf-8")).decode("utf-8")
         except Exception as e:
             logger.error(f"Token encryption failed: {e}")
             raise RuntimeError("Cryptographic encryption failure") from e
@@ -37,10 +50,15 @@ class TokenEncryptor:
         if not cipher_text:
             return ""
         try:
-            return self.cipher.decrypt(cipher_text.encode()).decode()
+            return self.cipher.decrypt(cipher_text.encode("utf-8")).decode("utf-8")
         except Exception as e:
             logger.error(f"Token decryption failed: {e}")
             raise RuntimeError("Cryptographic decryption failure") from e
 
-# Global single-instance helper
-token_encryptor = TokenEncryptor()
+
+# Global instances:
+# 1. token_encryptor: for Calendly and legacy integrations (preserves full backward compatibility)
+token_encryptor = TokenEncryptor(key_name="CALENDLY_ENCRYPTION_KEY")
+
+# 2. provider_encryptor: dedicated for AI provider API keys
+provider_encryptor = TokenEncryptor(key_name="PROVIDER_CREDENTIAL_ENCRYPTION_KEY")

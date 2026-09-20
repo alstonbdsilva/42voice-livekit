@@ -43,6 +43,12 @@ from workflow_engine import (
 )
 from realtime.livekit_runtime import LiveKitRuntimeAdapter
 from api.modules.workflows.resolver import WorkflowRuntimeResolver
+from providers import (
+    provider_resolver,
+    RealtimeModelBundle,
+    classify_provider_error,
+    ProviderError,
+)
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -68,21 +74,7 @@ logger = logging.getLogger("voice-agent")
 from name_service import build_stt_keywords, parse_caller_name, NameCaptureState
 
 
-def classify_provider_error(error: Any, capability: str = "llm", provider: str = "openai") -> str:
-    """Classify external AI provider errors cleanly without leaking credentials or raw data."""
-    err_str = str(error).lower()
-    if any(q in err_str for q in ("429", "quota", "spend_limit", "rate_limit", "organization_spend_limit_exceeded")):
-        logger.error(f"[PROVIDER_ERROR] capability={capability} provider={provider} category=quota_exceeded")
-        return "quota_exceeded"
-    elif any(a in err_str for a in ("401", "unauthorized", "invalid_api_key", "authentication")):
-        logger.error(f"[PROVIDER_ERROR] capability={capability} provider={provider} category=auth_failed")
-        return "auth_failed"
-    elif any(s in err_str for s in ("500", "502", "503", "504", "service_unavailable")):
-        logger.error(f"[PROVIDER_ERROR] capability={capability} provider={provider} category=service_unavailable")
-        return "service_unavailable"
-    else:
-        logger.error(f"[PROVIDER_ERROR] capability={capability} provider={provider} category=unknown_error")
-        return "unknown_error"
+# Classify provider error is imported from providers package
 
 
 def make_json_safe(obj: Any, parent_key: str = "") -> Any:
@@ -171,6 +163,7 @@ class VoiceAgent(Agent):
         agent_data: Optional[Dict[str, Any]] = None,
         workflow_runtime: Optional[Any] = None,
         run_id: Optional[str] = None,
+        model_bundle: Optional[RealtimeModelBundle] = None,
     ):
         self.session_manager = session_manager
         self.booking_agent = booking_agent
@@ -186,6 +179,7 @@ class VoiceAgent(Agent):
         self.unassigned_number = unassigned_number
         self.workflow_runtime = workflow_runtime
         self.run_id = run_id
+        self.model_bundle = model_bundle
         self.intent_mapping = {
             "booking": "booking_agent",
             "sales": "sales_agent",
@@ -215,8 +209,6 @@ class VoiceAgent(Agent):
         stt_keywords = build_stt_keywords(agent_data)
         stt_lang = (agent_data.get("language") if agent_data and isinstance(agent_data, dict) and agent_data.get("language") else "en-US")
 
-        logger.info(f"[STT] Initializing Deepgram STT for agent '{self.agent_name}' (lang={stt_lang}) with {len(stt_keywords)} dynamic entity keywords")
-        
         # Use VAD from prewarm if provided, otherwise load it
         vad_instance = vad if vad else silero.VAD.load()
         
@@ -247,32 +239,37 @@ class VoiceAgent(Agent):
                     seen_names.add(t_name)
                     filtered_tools.append(t)
 
-        stt_kwargs: Dict[str, Any] = {
-            "model": "nova-2-phonecall",
-            "language": stt_lang,
-            "smart_format": True,
-            "interim_results": True,
-        }
-        if stt_keywords:
-            stt_kwargs["keywords"] = stt_keywords
+        if model_bundle is not None:
+            resolved_stt = model_bundle.stt
+            resolved_llm = model_bundle.llm
+            resolved_tts = model_bundle.tts
+        else:
+            # Fallback for unbundled constructor invocations
+            stt_kwargs: Dict[str, Any] = {
+                "model": "nova-2-phonecall",
+                "language": stt_lang,
+                "smart_format": True,
+                "interim_results": True,
+            }
+            if stt_keywords:
+                stt_kwargs["keywords"] = stt_keywords
 
-        # Resolve voice for OpenAI TTS if provided in agent_data, default to "alloy" (or "nova")
-        tts_voice = "alloy"
-        valid_openai_voices = {"alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"}
-        if agent_data and isinstance(agent_data, dict):
-            cand_voice = agent_data.get("voice_id") or agent_data.get("voice") or agent_data.get("tts_voice")
-            if cand_voice and isinstance(cand_voice, str) and cand_voice.lower() in valid_openai_voices:
-                tts_voice = cand_voice.lower()
+            tts_voice = "alloy"
+            valid_openai_voices = {"alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"}
+            if agent_data and isinstance(agent_data, dict):
+                cand_voice = agent_data.get("voice_id") or agent_data.get("voice") or agent_data.get("tts_voice")
+                if cand_voice and isinstance(cand_voice, str) and cand_voice.lower() in valid_openai_voices:
+                    tts_voice = cand_voice.lower()
+
+            resolved_stt = deepgram.STT(**stt_kwargs)
+            resolved_llm = openai.LLM(model="gpt-4o-mini")
+            resolved_tts = openai.TTS(model="tts-1", voice=tts_voice, speed=1.05)
 
         super().__init__(
             vad=vad_instance,
-            stt=deepgram.STT(**stt_kwargs),
-            llm=openai.LLM(model="gpt-4o-mini"),
-            tts=openai.TTS(
-                model="tts-1",  # OpenAI's lowest latency TTS model
-                voice=tts_voice,
-                speed=1.05      # Slight speed bump reduces turnaround latency
-            ),
+            stt=resolved_stt,
+            llm=resolved_llm,
+            tts=resolved_tts,
             instructions=instructions,
             tools=filtered_tools
         )
@@ -1425,6 +1422,25 @@ async def entrypoint(ctx: JobContext):
     if client_id and "client_id" not in agent_config_data:
         agent_config_data["client_id"] = client_id
 
+    # Build dynamic STT entity/keyword hints
+    dynamic_stt_keywords = build_stt_keywords(agent_config_data)
+    stt_lang = (agent_config_data.get("language") if agent_config_data and isinstance(agent_config_data, dict) and agent_config_data.get("language") else "en-US")
+
+    # Resolve call-level model configuration bundle (STT + LLM + TTS)
+    try:
+        model_bundle = await provider_resolver.resolve_bundle_for_agent(
+            agent_data=agent_config_data,
+            client_id=str(client_id) if client_id else None,
+            dynamic_stt_keywords=dynamic_stt_keywords,
+            stt_language=stt_lang
+        )
+    except Exception as model_res_err:
+        classify_provider_error(model_res_err, capability="all", provider="resolver")
+        # Explicit configured model failure policy: raise to prevent starting with broken configuration
+        if agent_config_data.get("platform_model_configuration_id"):
+            raise RuntimeError(f"Configured provider platform model resolution failed: {model_res_err}") from model_res_err
+        raise
+
     # 1. Extract dynamic tool names for compatibility or custom tools
     dyn_tool_names = []
     for t in dynamic_tools:
@@ -1444,6 +1460,14 @@ async def entrypoint(ctx: JobContext):
 
     # 3. Initialize WorkflowRunContext early (before conversation/recording exist)
     call_run_id = str(uuid.uuid4())
+    run_call_metadata = {
+        "called_number": called_number,
+        "agent_name": agent_name,
+        "job_id": job_id
+    }
+    if model_bundle:
+        run_call_metadata.update(model_bundle.to_safe_metadata())
+
     workflow_run_ctx = WorkflowRunContext(
         run_id=call_run_id,
         workflow_id=resolved_wf_id,
@@ -1452,11 +1476,7 @@ async def entrypoint(ctx: JobContext):
         room_name=ctx.room.name,
         participant_identity=participant.identity,
         client_id=str(client_id) if client_id else None,
-        call_metadata={
-            "called_number": called_number,
-            "agent_name": agent_name,
-            "job_id": job_id
-        }
+        call_metadata=run_call_metadata
     )
 
     # 4. Durably record run_started event
@@ -1506,7 +1526,8 @@ async def entrypoint(ctx: JobContext):
         unassigned_number=unassigned_number,
         client_id=client_id,
         tools=dynamic_tools,
-        agent_data=agent_config_data
+        agent_data=agent_config_data,
+        model_bundle=model_bundle
     )
     
     # 5. Bind LiveKitRuntimeAdapter and WorkflowRuntime

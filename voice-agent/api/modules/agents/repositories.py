@@ -19,6 +19,7 @@ class AgentRepository:
                a.prompt_version, a.kb_version, a.total_cost, a.last_activity, a.user_id, a.client_id, a.created_at, a.updated_at,
                a.voice_name, a.voice_gender, a.guardrails, a.custom_guardrails, a.knowledge_items, a.tool_ids,
                a.published_workflow_version_id,
+               a.platform_model_configuration_id,
                COALESCE(
                  (SELECT json_agg(json_build_object('id', r.id, 'name', r.name)) 
                   FROM agent_resellers ar JOIN resellers r ON ar.reseller_id = r.id 
@@ -117,11 +118,13 @@ class AgentRepository:
         custom_guardrails = data.get("customGuardrails", "")
         knowledge_items = data.get("knowledgeItems", [])
         tool_ids = data.get("toolIds", [])
+        platform_model_config_id = data.get("platformModelConfigurationId") if "platformModelConfigurationId" in data else data.get("platform_model_configuration_id")
         
         rows = await database.query(
             """INSERT INTO agents (name, type, call_type, use_case, activity_description, channels, status, user_id, client_id,
-                                   voice_name, voice_gender, guardrails, custom_guardrails, knowledge_items, tool_ids)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                                   voice_name, voice_gender, guardrails, custom_guardrails, knowledge_items, tool_ids,
+                                   platform_model_configuration_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                RETURNING id""",
             [
                 data["name"].strip(),
@@ -138,7 +141,8 @@ class AgentRepository:
                 json.dumps(guardrails),
                 custom_guardrails,
                 json.dumps(knowledge_items),
-                json.dumps(tool_ids)
+                json.dumps(tool_ids),
+                platform_model_config_id
             ],
             client=client
         )
@@ -231,7 +235,8 @@ class AgentRepository:
             "guardrails": original.get("guardrails") or {},
             "customGuardrails": original.get("custom_guardrails") or "",
             "knowledgeItems": original.get("knowledge_items") or [],
-            "toolIds": original.get("tool_ids") or []
+            "toolIds": original.get("tool_ids") or [],
+            "platformModelConfigurationId": original.get("platform_model_configuration_id")
         }
         return await self.create(clone_data)
 
@@ -294,6 +299,12 @@ class AgentRepository:
         if "publishedWorkflowVersionId" in data or "published_workflow_version_id" in data:
             val = data.get("publishedWorkflowVersionId") if "publishedWorkflowVersionId" in data else data.get("published_workflow_version_id")
             fields.append(f"published_workflow_version_id = ${param_idx}")
+            params.append(val)
+            param_idx += 1
+
+        if "platformModelConfigurationId" in data or "platform_model_configuration_id" in data:
+            val = data.get("platformModelConfigurationId") if "platformModelConfigurationId" in data else data.get("platform_model_configuration_id")
+            fields.append(f"platform_model_configuration_id = ${param_idx}")
             params.append(val)
             param_idx += 1
             

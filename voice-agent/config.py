@@ -131,6 +131,10 @@ class Settings(BaseSettings):
     calendly_redirect_uri: Optional[str] = Field(default=None, validation_alias="CALENDLY_REDIRECT_URI")
     calendly_encryption_key: Optional[str] = Field(default=None, validation_alias="CALENDLY_ENCRYPTION_KEY")
 
+    # Provider & External Credential Encryption Settings
+    provider_credential_encryption_key: Optional[str] = Field(default=None, validation_alias="PROVIDER_CREDENTIAL_ENCRYPTION_KEY")
+    external_credentials_encryption_key: Optional[str] = Field(default=None, validation_alias="EXTERNAL_CREDENTIALS_ENCRYPTION_KEY")
+
     @field_validator('backend_url', mode='before')
     @classmethod
     def validate_backend_url(cls, v):

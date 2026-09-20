@@ -79,6 +79,21 @@ class TestAlembicMigrations(unittest.IsolatedAsyncioTestCase):
                     filename VARCHAR(255) NOT NULL,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 );
+
+                CREATE TABLE external_credentials (
+                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                    credential_uuid UUID UNIQUE NOT NULL DEFAULT uuid_generate_v4(),
+                    client_id UUID REFERENCES clients(id) ON DELETE CASCADE,
+                    name VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    credential_type VARCHAR(50) NOT NULL DEFAULT 'none',
+                    credential_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    UNIQUE (client_id, name)
+                );
             """)
         finally:
             await conn.close()
@@ -110,7 +125,7 @@ class TestAlembicMigrations(unittest.IsolatedAsyncioTestCase):
             # Check alembic_version contains head
             row = await conn.fetchrow("SELECT version_num FROM alembic_version;")
             self.assertIsNotNone(row)
-            self.assertEqual(row["version_num"], "2b3c4d5e6f7a")
+            self.assertEqual(row["version_num"], "3c4d5e6f7a8b")
 
             # Check tables exist
             tables = await conn.fetch(
@@ -122,6 +137,15 @@ class TestAlembicMigrations(unittest.IsolatedAsyncioTestCase):
             self.assertIn("workflow_versions", table_names)
             self.assertIn("workflow_runs", table_names)
             self.assertIn("workflow_run_events", table_names)
+            self.assertIn("platform_model_configurations", table_names)
+
+            # Check agents columns
+            agent_cols = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'agents';"
+            )
+            col_names = {c["column_name"] for c in agent_cols}
+            self.assertIn("published_workflow_version_id", col_names)
+            self.assertIn("platform_model_configuration_id", col_names)
         finally:
             await conn.close()
 
@@ -294,7 +318,7 @@ class TestAlembicMigrations(unittest.IsolatedAsyncioTestCase):
         )
         try:
             row = await conn.fetchrow("SELECT version_num FROM alembic_version;")
-            self.assertEqual(row["version_num"], "2b3c4d5e6f7a")
+            self.assertEqual(row["version_num"], "3c4d5e6f7a8b")
         finally:
             await conn.close()
 
