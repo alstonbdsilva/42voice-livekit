@@ -15,19 +15,20 @@ logger = logging.getLogger("voice-agent.api.agents.repositories")
 class AgentRepository:
     select_query_base = """
         SELECT a.id, a.name, a.type, a.call_type, a.use_case, a.activity_description, a.channels, a.status,
-               a.total_calls, a.total_messages, a.total_minutes, a.success_rate, a.escalation_rate,
-               a.prompt_version, a.kb_version, a.total_cost, a.last_activity, a.user_id, a.client_id, a.created_at, a.updated_at,
-               a.voice_name, a.voice_gender, a.guardrails, a.custom_guardrails, a.knowledge_items, a.tool_ids,
-               COALESCE(
-                 (SELECT json_agg(json_build_object('id', r.id, 'name', r.name)) 
-                  FROM agent_resellers ar JOIN resellers r ON ar.reseller_id = r.id 
-                  WHERE ar.agent_id = a.id), '[]'::json
-               ) AS assigned_resellers,
-               COALESCE(
-                 (SELECT json_agg(json_build_object('id', c.id, 'name', c.name)) 
-                  FROM agent_clients ac JOIN clients c ON ac.client_id = c.id 
-                  WHERE ac.agent_id = a.id), '[]'::json
-               ) AS assigned_clients
+                a.total_calls, a.total_messages, a.total_minutes, a.success_rate, a.escalation_rate,
+                a.prompt_version, a.kb_version, a.total_cost, a.last_activity, a.user_id, a.client_id, a.created_at, a.updated_at,
+                a.voice_name, a.voice_gender, a.tts_provider, a.tts_model, a.tts_voice_id, a.tts_voice_name,
+                a.guardrails, a.custom_guardrails, a.knowledge_items, a.tool_ids,
+                COALESCE(
+                  (SELECT json_agg(json_build_object('id', r.id, 'name', r.name))
+                   FROM agent_resellers ar JOIN resellers r ON ar.reseller_id = r.id
+                   WHERE ar.agent_id = a.id), '[]'::json
+                ) AS assigned_resellers,
+                COALESCE(
+                  (SELECT json_agg(json_build_object('id', c.id, 'name', c.name))
+                   FROM agent_clients ac JOIN clients c ON ac.client_id = c.id
+                   WHERE ac.agent_id = a.id), '[]'::json
+                ) AS assigned_clients
         FROM agents a
     """
 
@@ -69,8 +70,8 @@ class AgentRepository:
             [user_id]
         )
 
-    async def find_by_id(self, agent_id: Any, client: Optional[Any] = None) -> Optional[Dict[str, Any]]:
-        """Find a single agent by ID."""
+    async def find_by_id(self, agent_id: str, client: Optional[Any] = None) -> Optional[Dict[str, Any]]:
+        """Find an agent by ID with its assignments."""
         rows = await database.query(
             f"{self.select_query_base} WHERE a.id = $1",
             [agent_id],
@@ -112,6 +113,10 @@ class AgentRepository:
         
         voice_name = data.get("voiceName", "aria")
         voice_gender = data.get("voiceGender", "female")
+        tts_provider = data.get("ttsProvider")
+        tts_model = data.get("ttsModel")
+        tts_voice_id = data.get("ttsVoiceId")
+        tts_voice_name = data.get("ttsVoiceName") or voice_name
         guardrails = data.get("guardrails", {})
         custom_guardrails = data.get("customGuardrails", "")
         knowledge_items = data.get("knowledgeItems", [])
@@ -119,8 +124,9 @@ class AgentRepository:
         
         rows = await database.query(
             """INSERT INTO agents (name, type, call_type, use_case, activity_description, channels, status, user_id, client_id,
-                                   voice_name, voice_gender, guardrails, custom_guardrails, knowledge_items, tool_ids)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                                   voice_name, voice_gender, tts_provider, tts_model, tts_voice_id, tts_voice_name,
+                                   guardrails, custom_guardrails, knowledge_items, tool_ids)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                RETURNING id""",
             [
                 data["name"].strip(),
@@ -134,6 +140,10 @@ class AgentRepository:
                 client_id,
                 voice_name,
                 voice_gender,
+                tts_provider,
+                tts_model,
+                tts_voice_id,
+                tts_voice_name,
                 json.dumps(guardrails),
                 custom_guardrails,
                 json.dumps(knowledge_items),
@@ -184,6 +194,10 @@ class AgentRepository:
                 "assigned_clients": client_ids,
                 "voice_name": voice_name,
                 "voice_gender": voice_gender,
+                "tts_provider": tts_provider,
+                "tts_model": tts_model,
+                "tts_voice_id": tts_voice_id,
+                "tts_voice_name": tts_voice_name,
                 "guardrails": guardrails,
                 "custom_guardrails": custom_guardrails,
                 "knowledge_items": knowledge_items
@@ -227,6 +241,10 @@ class AgentRepository:
             "clientIds": client_ids or [],
             "voiceName": original.get("voice_name") or "aria",
             "voiceGender": original.get("voice_gender") or "female",
+            "ttsProvider": original.get("tts_provider"),
+            "ttsModel": original.get("tts_model"),
+            "ttsVoiceId": original.get("tts_voice_id"),
+            "ttsVoiceName": original.get("tts_voice_name"),
             "guardrails": original.get("guardrails") or {},
             "customGuardrails": original.get("custom_guardrails") or "",
             "knowledgeItems": original.get("knowledge_items") or [],
@@ -235,7 +253,7 @@ class AgentRepository:
         return await self.create(clone_data)
 
     async def update_details(self, agent_id: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Update configurable agent details (name, use_case, activity_description)."""
+        """Update configurable agent details (name, use_case, activity_description, voice, tts, guardrails)."""
         fields = []
         params = []
         param_idx = 1
@@ -270,6 +288,26 @@ class AgentRepository:
             params.append(data["voiceGender"])
             param_idx += 1
 
+        if "ttsProvider" in data and data["ttsProvider"] is not None:
+            fields.append(f"tts_provider = ${param_idx}")
+            params.append(data["ttsProvider"])
+            param_idx += 1
+
+        if "ttsModel" in data and data["ttsModel"] is not None:
+            fields.append(f"tts_model = ${param_idx}")
+            params.append(data["ttsModel"])
+            param_idx += 1
+
+        if "ttsVoiceId" in data and data["ttsVoiceId"] is not None:
+            fields.append(f"tts_voice_id = ${param_idx}")
+            params.append(data["ttsVoiceId"])
+            param_idx += 1
+
+        if "ttsVoiceName" in data and data["ttsVoiceName"] is not None:
+            fields.append(f"tts_voice_name = ${param_idx}")
+            params.append(data["ttsVoiceName"])
+            param_idx += 1
+
         if "guardrails" in data and data["guardrails"] is not None:
             fields.append(f"guardrails = ${param_idx}")
             params.append(json.dumps(data["guardrails"]))
@@ -301,48 +339,51 @@ class AgentRepository:
         return await self.find_by_id(agent_id)
 
     async def increment_stats(self, agent_id: Any, stats: Dict[str, Any], client: Optional[Any] = None) -> None:
-        """Increment call and message metrics for an agent."""
-        agent = await self.find_by_id(agent_id, client=client)
-        if not agent:
-            return
-            
-        new_calls = agent.get("total_calls", 0) + stats.get("callCount", 0)
-        new_messages = agent.get("total_messages", 0) + stats.get("messageCount", 0)
-        new_minutes = agent.get("total_minutes", 0) + stats.get("durationMinutes", 0)
-        new_cost = float(agent.get("total_cost", 0.0)) + stats.get("cost", 0.0)
-        
-        # Calculate rates
-        old_calls = agent.get("total_calls", 0)
-        success_count = round((float(agent.get("success_rate", 0.0)) / 100.0) * old_calls)
-        escalation_count = round((float(agent.get("escalation_rate", 0.0)) / 100.0) * old_calls)
-        
-        if stats.get("callCount", 0) > 0:
-            if stats.get("is_success"):
-                success_count += 1
-            if stats.get("is_escalated"):
-                escalation_count += 1
-                
-        new_success_rate = round((success_count / new_calls) * 100.0, 2) if new_calls > 0 else 0.00
-        new_escalation_rate = round((escalation_count / new_calls) * 100.0, 2) if new_calls > 0 else 0.00
-        
+        """Increment call and message metrics for an agent atomically without prior SELECT."""
+        calls_inc = int(stats.get("callCount", 0))
+        messages_inc = int(stats.get("messageCount", 0))
+        minutes_inc = int(stats.get("durationMinutes", 0))
+        cost_inc = Decimal(str(stats.get("cost", 0.0)))
+        success_inc = 1 if (calls_inc > 0 and stats.get("is_success")) else 0
+        escalation_inc = 1 if (calls_inc > 0 and stats.get("is_escalated")) else 0
+
+        query = """
+            UPDATE agents
+            SET total_calls = COALESCE(total_calls, 0) + $1,
+                total_messages = COALESCE(total_messages, 0) + $2,
+                total_minutes = COALESCE(total_minutes, 0) + $3,
+                total_cost = COALESCE(total_cost, 0) + $4,
+                success_rate = CASE
+                    WHEN (COALESCE(total_calls, 0) + $1) > 0 THEN
+                        ROUND(
+                            ((ROUND((COALESCE(success_rate, 0.00) / 100.0) * COALESCE(total_calls, 0)) + $5) /
+                             (COALESCE(total_calls, 0) + $1)::numeric) * 100.0,
+                            2
+                        )
+                    ELSE 0.00
+                END,
+                escalation_rate = CASE
+                    WHEN (COALESCE(total_calls, 0) + $1) > 0 THEN
+                        ROUND(
+                            ((ROUND((COALESCE(escalation_rate, 0.00) / 100.0) * COALESCE(total_calls, 0)) + $6) /
+                             (COALESCE(total_calls, 0) + $1)::numeric) * 100.0,
+                            2
+                        )
+                    ELSE 0.00
+                END,
+                last_activity = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $7
+        """
         await database.query(
-            """UPDATE agents 
-               SET total_calls = $1, 
-                   total_messages = $2, 
-                   total_minutes = $3, 
-                   total_cost = $4, 
-                   success_rate = $5, 
-                   escalation_rate = $6, 
-                   last_activity = CURRENT_TIMESTAMP, 
-                   updated_at = CURRENT_TIMESTAMP 
-               WHERE id = $7""",
+            query,
             [
-                new_calls, 
-                new_messages, 
-                new_minutes, 
-                Decimal(str(new_cost)), 
-                Decimal(str(new_success_rate)), 
-                Decimal(str(new_escalation_rate)), 
+                calls_inc,
+                messages_inc,
+                minutes_inc,
+                cost_inc,
+                success_inc,
+                escalation_inc,
                 agent_id
             ],
             client=client

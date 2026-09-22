@@ -1,8 +1,13 @@
+# ==============================================================================
+# LOCAL DEV STACK (alternative) - keeps configured via env like the canonical
+# root docker-compose.yml. Credentials come from the environment:
+# REDIS_PASSWORD / LIVEKIT_API_KEY / LIVEKIT_API_SECRET.
+# ==============================================================================
 services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD:-redissecret}
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     ports:
       - "6379:6379"
     volumes:
@@ -13,9 +18,24 @@ services:
   livekit:
     image: livekit/livekit-server:v1.8
     restart: unless-stopped
-    command: --config /etc/livekit.yaml
-    volumes:
-      - ./livekit.local.yaml:/etc/livekit.yaml
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        bind_addresses:
+          - ""
+        rtc:
+          udp_port: 7882
+          tcp_port: 7881
+          use_external_ip: false
+        redis:
+          address: redis:6379
+          password: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+          db: 0
+        keys:
+          ${LIVEKIT_API_KEY:?LIVEKIT_API_KEY is required}: ${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET is required}
+        logging:
+          json: false
+          level: info
     ports:
       - "7880:7880"
       - "7881:7881"
@@ -27,9 +47,21 @@ services:
     image: livekit/sip:v1.1.0
     restart: unless-stopped
     network_mode: host
-    command: --config /etc/livekit-sip.yaml
-    volumes:
-      - ./voice-agent/livekit/sip.yaml:/etc/livekit-sip.yaml
+    environment:
+      # Host networking means Docker service names do not resolve; LiveKit/Redis
+      # are reached via the published loopback ports.
+      SIP_CONFIG_BODY: |
+        api_key: ${LIVEKIT_API_KEY:?LIVEKIT_API_KEY is required}
+        api_secret: ${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET is required}
+        ws_url: ws://127.0.0.1:7880
+        redis:
+          address: 127.0.0.1:6379
+          password: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+        sip_port: 5060
+        rtp_port: 10000-20000
+        use_external_ip: false
+        logging:
+          level: info
     depends_on:
       - livekit
       - redis
@@ -45,7 +77,7 @@ services:
     environment:
       - ENVIRONMENT=development
       - PORT=8000
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-redissecret}@redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       - LIVEKIT_URL=http://livekit:7880
       - LIVEKIT_PUBLIC_URL=ws://localhost:7880
       - BACKEND_URL=http://localhost:8000/api/v1
@@ -64,7 +96,7 @@ services:
       - .env.local
     environment:
       - ENVIRONMENT=development
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-redissecret}@redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       - LIVEKIT_URL=ws://livekit:7880
       - BACKEND_URL=http://backend:8000/api/v1
     networks:

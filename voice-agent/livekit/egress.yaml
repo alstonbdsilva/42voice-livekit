@@ -1,3 +1,11 @@
+# ==============================================================================
+# REFERENCE TEMPLATE for the LiveKit Egress service config.
+# These ${...} placeholders are NOT interpolated by egress when this file is
+# mounted directly (EGRESS_CONFIG_FILE) - that was a bug. docker-compose
+# injects this configuration via the EGRESS_CONFIG_BODY environment variable,
+# where ${...} is expanded by the compose engine before it reaches egress.
+# Placeholders must NEVER be committed with real values.
+# ==============================================================================
 api_key: ${LIVEKIT_API_KEY}
 api_secret: ${LIVEKIT_API_SECRET}
 

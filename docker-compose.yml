@@ -1,8 +1,14 @@
+# ==============================================================================
+# CANONICAL DEPLOYMENT STACK (production)
+# See DEPLOYMENT.md for required environment variables and startup order.
+# deploy.sh and entrypoint.sh target this file. No credential values are
+# hardcoded anywhere; every secret is injected from the environment below.
+# ==============================================================================
 services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD:-redissecret}
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
@@ -13,9 +19,24 @@ services:
   livekit:
     image: livekit/livekit-server:v1.8
     restart: unless-stopped
-    command: --config /etc/livekit.yaml
-    volumes:
-      - ./livekit.yaml:/etc/livekit.yaml
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        bind_addresses:
+          - ""
+        rtc:
+          udp_port: 7882
+          tcp_port: 7881
+          use_external_ip: true
+        redis:
+          address: redis:6379
+          password: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+          db: 0
+        keys:
+          ${LIVEKIT_API_KEY:?LIVEKIT_API_KEY is required}: ${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET is required}
+        logging:
+          json: false
+          level: info
     ports:
       - "127.0.0.1:7880:7880"
       - "7881:7881"
@@ -27,9 +48,22 @@ services:
     image: livekit/sip:v1.1.0
     restart: unless-stopped
     network_mode: host
-    command: --config /etc/livekit-sip.yaml
-    volumes:
-      - ./voice-agent/livekit/sip.yaml:/etc/livekit-sip.yaml
+    environment:
+      # Host networking is required for the wide RTP/SIP port range. With host
+      # networking, Docker service names do NOT resolve, so LiveKit and Redis
+      # must be addressed via the published host loopback ports.
+      SIP_CONFIG_BODY: |
+        api_key: ${LIVEKIT_API_KEY:?LIVEKIT_API_KEY is required}
+        api_secret: ${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET is required}
+        ws_url: ws://127.0.0.1:7880
+        redis:
+          address: 127.0.0.1:6379
+          password: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+        sip_port: 5060
+        rtp_port: 10000-20000
+        use_external_ip: true
+        logging:
+          level: info
     depends_on:
       - livekit
       - redis
@@ -67,7 +101,7 @@ services:
     environment:
       - ENVIRONMENT=production
       - PORT=8000
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-redissecret}@redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       - LIVEKIT_URL=http://livekit:7880
       - BACKEND_URL=https://api.42voice.com/api/v1
     ports:
@@ -85,7 +119,7 @@ services:
       - .env
     environment:
       - ENVIRONMENT=production
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-redissecret}@redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       - LIVEKIT_URL=ws://livekit:7880
       - BACKEND_URL=http://backend:8000/api/v1
     networks:

@@ -3,6 +3,7 @@ Authentication and Role authorization dependencies.
 Decodes JWT Bearer tokens and checks user database states.
 """
 
+import hmac
 import jwt
 from fastapi import Request, Depends
 from typing import List, Dict, Any, Callable
@@ -70,6 +71,42 @@ async def get_current_user(request: Request) -> Dict[str, Any]:
     # Store user state on the request context
     request.state.user = user_dict
     return user_dict
+
+
+async def require_internal_worker(request: Request) -> None:
+    """
+    FastAPI dependency that authenticates machine-to-machine requests from the
+    trusted voice-agent worker (e.g. POST /conversations/register).
+
+    Authenticates via an `Authorization: Bearer <token>` header carrying the
+    shared internal worker token (INTERNAL_WORKER_TOKEN). Comparison is done in
+    constant time to avoid timing side-channels.
+
+    Fail-closed: if the token is not configured, every request is rejected.
+    In production the Settings model itself refuses to boot without the token.
+    """
+    settings = get_settings()
+
+    # In development the worker token is optional and registration may proceed
+    # (matching the pre-existing dev/test behaviour). Production/staging always
+    # fail-closed: a missing or mismatched token rejects the request.
+    if settings.environment == "development":
+        return
+
+    raw_token = settings.internal_worker_token
+    # A missing token is always a hard failure, never a pass-through.
+    if not raw_token:
+        raise UnauthorizedError(
+            "Internal worker authentication is not configured", "INTERNAL_TOKEN_NOT_CONFIGURED"
+        )
+
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise UnauthorizedError("Internal worker token is missing or malformed", "TOKEN_MISSING")
+
+    presented = auth_header.split(" ", 1)[1].strip()
+    if not hmac.compare_digest(presented.encode("utf-8"), raw_token.encode("utf-8")):
+        raise UnauthorizedError("Invalid internal worker token", "TOKEN_INVALID")
 
 
 def require_roles(allowed_roles: List[str]) -> Callable:

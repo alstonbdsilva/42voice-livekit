@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any, List
 
 from api.utils.api_response import ApiResponse
 from api.modules.conversations.services import ConversationsService
-from api.middlewares.auth import get_current_user
+from api.middlewares.auth import get_current_user, require_internal_worker
 
 router = APIRouter()
 conv_service = ConversationsService()
@@ -35,6 +35,7 @@ class TranscriptInfo(BaseModel):
 
 
 class RegisterCallRequest(BaseModel):
+    agentId: Optional[str] = None
     agentName: str
     customerName: str
     customerContact: Optional[str] = None
@@ -51,6 +52,7 @@ class RegisterCallRequest(BaseModel):
     escalationReason: Optional[str] = None
     userId: Optional[str] = None
     clientId: Optional[str] = None
+    roomName: Optional[str] = None
     recording: Optional[RecordingInfo] = None
     transcript: Optional[TranscriptInfo] = None
 
@@ -58,8 +60,13 @@ class RegisterCallRequest(BaseModel):
 # --- Route Endpoints ---
 
 @router.post("/register")
-async def register(req_body: RegisterCallRequest):
-    """Public endpoint called by agent.py to register call details upon disconnection."""
+async def register(
+    req_body: RegisterCallRequest,
+    _: None = Depends(require_internal_worker),
+):
+    """Internal worker endpoint. Only the trusted voice-agent worker may call
+    this (authenticated via INTERNAL_WORKER_TOKEN). Registers a completed call;
+    registering a call whose roomName was already registered is idempotent."""
     dto = req_body.model_dump()
     conv = await conv_service.register_call(dto)
     return ApiResponse.success(

@@ -1,6 +1,7 @@
 livekit>=0.11.0
 livekit-api>=0.2.0
 livekit-agents==1.5.13
+livekit-plugins-cartesia==1.5.13
 livekit-plugins-deepgram
 livekit-plugins-elevenlabs
 livekit-plugins-openai

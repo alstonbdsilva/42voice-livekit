@@ -15,35 +15,61 @@ logger = logging.getLogger(__name__)
 
 
 _redis_available: Optional[bool] = None
+_shared_redis: Optional[redis.Redis] = None
+
+
+def _get_shared_redis() -> Optional[redis.Redis]:
+    """Return the process-wide shared Redis client, creating it lazily once.
+
+    Reuses a single client/connection pool across all SessionManager instances in
+    this process (no per-call connect + ping). Each process has its own client,
+    so there is no cross-process shared state. redis-py manages an internal
+    connection pool, making shared use from the same event loop process-safe.
+    """
+    global _redis_available, _shared_redis
+    if _shared_redis is not None:
+        return _shared_redis
+    if _redis_available is False:
+        return None
+
+    try:
+        client = redis.Redis.from_url(
+            get_settings().redis_url, decode_responses=True, socket_connect_timeout=1
+        )
+        # Test connection once at warm-up time
+        client.ping()
+        _shared_redis = client
+        _redis_available = True
+        logger.info("Redis connection established (shared client)")
+        return client
+    except Exception as e:
+        _redis_available = False
+        logger.info(f"Redis unavailable, using in-memory storage fallback.")
+        return None
+
+
+def warm_redis() -> Optional[redis.Redis]:
+    """Warm the shared Redis client during worker startup (optional dependency).
+
+    Returns the shared client if Redis is reachable, otherwise None (the caller
+    must continue with the in-memory fallback). Never raises.
+    """
+    return _get_shared_redis()
 
 
 class SessionManager:
     """Manages session state and conversation history using Redis with in-memory fallback."""
     
     def __init__(self):
-        global _redis_available
         self.settings = get_settings()
         self.session_timeout = self.settings.session_timeout
         self.max_history = self.settings.max_conversation_history
-        
-        # Try to initialize Redis, fall back to in-memory storage
-        self.redis = None
-        self.in_memory_storage = {}  # Fallback in-memory storage
-        
-        if _redis_available is False:
-            # Skip slow connection attempt if Redis was already determined to be unavailable
-            return
-            
-        try:
-            self.redis = redis.Redis.from_url(self.settings.redis_url, decode_responses=True, socket_connect_timeout=1)
-            # Test connection
-            self.redis.ping()
-            _redis_available = True
-            logger.info("Redis connection established")
-        except Exception as e:
-            _redis_available = False
-            logger.info(f"Redis unavailable, using in-memory storage fallback.")
-            self.redis = None
+
+        # Shared Redis client (connection + readiness probe happen once per
+        # process, not per call). In-memory storage stays per-instance so
+        # concurrent calls never share mutable call state.
+        self.redis = _get_shared_redis()
+        self.in_memory_storage = {}  # Fallback in-memory storage (per instance)
     
     def create_session(
         self,
@@ -268,10 +294,18 @@ class SessionManager:
                 logger.warning(f"Redis clear failed (may not be running): {e}")
     
     def close(self):
-        """Close Redis connection."""
-        if self.redis:
+        """Close the shared Redis connection (process-wide shutdown only).
+
+        The client is shared across SessionManager instances, so this must only
+        be called once at process shutdown (as the API lifespan does). After
+        close, the flag resets so a later instance can re-probe Redis.
+        """
+        global _shared_redis, _redis_available
+        if _shared_redis is not None:
             try:
-                self.redis.close()
+                _shared_redis.close()
                 logger.info("Session manager Redis connection closed")
             except Exception as e:
-                logger.error(f"Error closing session manager: {e}")
+                logger.error(f"Error closing session manager Redis: {e}")
+            _shared_redis = None
+            _redis_available = None

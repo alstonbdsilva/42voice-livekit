@@ -136,9 +136,10 @@ class TranscriptService:
             # Convert to JSON
             json_data = json.dumps(transcript_data, indent=2, default=str)
             
-            # Upload to S3
+            # Upload to S3 (off the event loop: boto3 put_object is blocking)
             s3_client = self._get_s3_client()
-            s3_client.put_object(
+            await asyncio.to_thread(
+                s3_client.put_object,
                 Bucket=self.settings.s3_bucket_name,
                 Key=s3_key,
                 Body=json_data,
@@ -183,12 +184,13 @@ class TranscriptService:
             s3_key = f"transcripts/{date}/{session_id}.json"
             
             s3_client = self._get_s3_client()
-            response = s3_client.get_object(
+            response = await asyncio.to_thread(
+                s3_client.get_object,
                 Bucket=self.settings.s3_bucket_name,
                 Key=s3_key
             )
-            
-            json_data = response['Body'].read().decode('utf-8')
+            body = await asyncio.to_thread(response['Body'].read)
+            json_data = body.decode('utf-8')
             transcript_data = json.loads(json_data)
             
             logger.info(f"Retrieved transcript from S3: {s3_key}")

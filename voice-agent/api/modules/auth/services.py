@@ -199,14 +199,18 @@ class AuthService:
         password_hash = hashed.decode('utf-8')
         
         # 3. Role mapping
-        role_name = dto.get("role_name") or "CLIENT"
+        # Public registration is always a standard user; privileged roles are
+        # assigned exclusively through the admin users module. Any value
+        # supplied by the caller for role_name is ignored.
+        role_name = "CLIENT"
         role_id = await self.user_repository.get_role_id_by_name(role_name)
-        
+
         # 4. Save user
         user_dto = dto.copy()
         user_dto.update({
             "password_hash": password_hash,
-            "role_id": role_id
+            "role_id": role_id,
+            "role_name": role_name
         })
         new_user = await self.user_repository.create(user_dto)
         

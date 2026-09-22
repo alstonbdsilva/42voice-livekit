@@ -160,7 +160,7 @@ class TestCallPersistence(unittest.IsolatedAsyncioTestCase):
     async def test_6_urllib_fallback_receives_json_safe_payload(
         self, mock_httpx_cls, mock_rec_service, mock_tx_service, mock_analyze
     ):
-        """Test 6: urllib fallback also receives and serializes JSON-safe payload without UUID error."""
+        """Test 6: failure does NOT trigger urllib fallback to prevent duplicate non-idempotent registration."""
         from agent import register_call_with_backend
 
         agent = self._create_mock_agent(call_started=True)
@@ -174,27 +174,18 @@ class TestCallPersistence(unittest.IsolatedAsyncioTestCase):
             "intent": "general", "leadScore": 50, "actionItems": []
         }
 
-        # Make httpx raise RuntimeError to trigger urllib fallback
+        # Make httpx raise RuntimeError
         mock_http_client = AsyncMock()
         mock_http_client.post = AsyncMock(side_effect=RuntimeError("Event loop shutting down"))
         mock_httpx_cls.return_value.__aenter__.return_value = mock_http_client
 
         with patch("urllib.request.urlopen") as mock_urlopen:
-            mock_resp = MagicMock()
-            mock_resp.status = 201
-            mock_urlopen.return_value.__enter__.return_value = mock_resp
-
             start_time = datetime.now(timezone.utc) - timedelta(seconds=15)
             end_time = datetime.now(timezone.utc)
             await register_call_with_backend(agent, start_time, end_time)
 
-            self.assertTrue(agent._call_registered)
-            mock_urlopen.assert_called_once()
-            req = mock_urlopen.call_args[0][0]
-            # Ensure the request body was successfully decoded from json bytes
-            body_dict = json.loads(req.data.decode("utf-8"))
-            self.assertEqual(body_dict["agentId"], "907f4d4a-5d34-41b3-82f1-5aebdf9db582")
-            self.assertEqual(body_dict["clientId"], "c18360db-7ec5-48d2-9a34-d2fe9502a985")
+            self.assertFalse(agent._call_registered)
+            mock_urlopen.assert_not_called()
 
     # -------------------------------------------------------------------------
     # IDEMPOTENT CLEANUP & RECORDING TESTS (7-10)
@@ -476,6 +467,187 @@ class TestCallPersistence(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rec["duration"], 40)
         self.assertEqual(rec["s3_key"], "recordings/rec_call_2026.mp4")
         self.assertIn("size", rec)
+
+
+    # -------------------------------------------------------------------------
+    # P1-14: ORPHANED RECORDING / TEARDOWN LIFECYCLE TESTS (16-19)
+    # -------------------------------------------------------------------------
+
+    @patch("agent.analyze_transcript_with_llm")
+    @patch("agent.transcript_service")
+    @patch("recording_service.recording_service")
+    @patch("httpx.AsyncClient")
+    async def test_16_recording_teardown_awaits_orphan_cleanup_not_fire_and_forget(
+        self, mock_httpx_cls, mock_rec_service, mock_tx_service, mock_analyze
+    ):
+        """Test 16: When teardown finds no local egress_id, orphan cleanup is awaited and
+        retained (not abandoned as a fire-and-forget task), so Egress cannot survive
+        worker teardown."""
+        from agent import VoiceAgent
+
+        agent = self._create_mock_agent(call_started=True)
+        # Simulate the orphan window: Egress created server-side but local startup was
+        # cancelled before egress_id could be assigned (teardown race).
+        agent.egress_id = None
+        # No lingering recording startup task to wait for (already cancelled).
+        agent._recording_task = None
+
+        mock_cleanup = AsyncMock(return_value=1)
+        mock_rec_service.cleanup_orphaned_egress = mock_cleanup
+        # AsyncMock so we can assert the orphan path never locally stops a recording
+        # (cleanup is done via egress discovery, not a local stop).
+        mock_rec_service.stop_recording = AsyncMock(return_value=True)
+        # (cleanup is done via egress discovery, not a local stop).
+        mock_rec_service.stop_recording = AsyncMock(return_value=True)
+        mock_tx_service.finalize_transcript.return_value = {"lines": [], "full_text": ""}
+        mock_analyze.return_value = {
+            "summary": "Done", "sentiment": "neutral", "sentimentScore": 0.0,
+            "intent": "general", "leadScore": 50, "actionItems": []
+        }
+        mock_post_resp = MagicMock()
+        mock_post_resp.status_code = 418
+        mock_http_client = AsyncMock()
+        mock_http_client.post = AsyncMock(return_value=mock_post_resp)
+        mock_httpx_cls.return_value.__aenter__.return_value = mock_http_client
+
+        await VoiceAgent.on_exit(agent)
+
+        # The orphan cleanup must have been invoked exactly once with the room name
+        mock_cleanup.assert_awaited_once_with("test-room-123")
+        # stop_recording must NOT be called on the cleanup path (nothing to locally stop)
+        mock_rec_service.stop_recording.assert_not_awaited()
+
+    @patch("agent.analyze_transcript_with_llm")
+    @patch("agent.transcript_service")
+    @patch("recording_service.recording_service")
+    @patch("httpx.AsyncClient")
+    async def test_17_orphan_cleanup_result_is_logged_not_faked(
+        self, mock_httpx_cls, mock_rec_service, mock_tx_service, mock_analyze
+    ):
+        """Test 17: Orphan cleanup returning 0 cleaned (nothing to stop) does NOT produce
+        a fake success state — the call is still finalized normally and no double
+        backend registration occurs."""
+        from agent import VoiceAgent
+
+        agent = self._create_mock_agent(call_started=True)
+        agent.egress_id = None
+        agent._recording_task = None
+
+        mock_rec_service.cleanup_orphaned_egress = AsyncMock(return_value=0)
+        mock_tx_service.finalize_transcript.return_value = {"lines": [], "full_text": ""}
+        mock_analyze.return_value = {
+            "summary": "Done", "sentiment": "neutral", "sentimentScore": 0.0,
+            "intent": "general", "leadScore": 50, "actionItems": []
+        }
+        mock_post_resp = MagicMock()
+        mock_post_resp.status_code = 418
+        mock_http_client = AsyncMock()
+        mock_http_client.post = AsyncMock(return_value=mock_post_resp)
+        mock_httpx_cls.return_value.__aenter__.return_value = mock_http_client
+
+        await VoiceAgent.on_exit(agent)
+
+        self.assertTrue(agent._cleanup_completed)
+        mock_rec_service.cleanup_orphaned_egress.assert_awaited_once()
+        self.assertFalse(getattr(agent, "_call_registered", True))
+
+    @patch("agent.analyze_transcript_with_llm")
+    @patch("agent.transcript_service")
+    @patch("recording_service.recording_service")
+    @patch("httpx.AsyncClient")
+    async def test_18_orphan_cleanup_failure_is_observed_never_fakes_success(
+        self, mock_httpx_cls, mock_rec_service, mock_tx_service, mock_analyze
+    ):
+        """Test 18: If orphan cleanup itself raises, teardown logs the error, does not
+        crash, and does NOT claim a successful cleanup/recovery (fails observable)."""
+        from agent import VoiceAgent
+
+        agent = self._create_mock_agent(call_started=True)
+        agent.egress_id = None
+        agent._recording_task = None
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("LiveKit egress list failed and cannot reach service")
+
+        mock_rec_service.cleanup_orphaned_egress = AsyncMock(side_effect=_boom)
+        # AsyncMock so a failing cleanup can never be reported as a fake success, and
+        # so we can assert the trusted teardown NEVER performs a local recording stop
+        # on this path (nothing local was started; failure is observable, not faked).
+        mock_rec_service.stop_recording = AsyncMock(return_value=True)
+        mock_tx_service.finalize_transcript.return_value = {"lines": [], "full_text": ""}
+        mock_analyze.return_value = {
+            "summary": "Done", "sentiment": "neutral", "sentimentScore": 0.0,
+            "intent": "general", "leadScore": 50, "actionItems": []
+        }
+        mock_post_resp = MagicMock()
+        mock_post_resp.status_code = 418
+        mock_http_client = AsyncMock()
+        mock_http_client.post = AsyncMock(return_value=mock_post_resp)
+        mock_httpx_cls.return_value.__aenter__.return_value = mock_http_client
+
+        # Teardown must complete without propagating the cleanup exception
+        await VoiceAgent.on_exit(agent)
+
+        self.assertTrue(agent._cleanup_completed)
+        mock_rec_service.cleanup_orphaned_egress.assert_awaited_once_with("test-room-123")
+        # No recording was reported as stopped successfully on this failing path
+        mock_rec_service.stop_recording.assert_not_awaited()
+
+    @patch("agent.analyze_transcript_with_llm")
+    @patch("agent.transcript_service")
+    @patch("recording_service.recording_service")
+    @patch("httpx.AsyncClient")
+    async def test_19_orphan_cleanup_is_room_scoped_and_active_only(
+        self, mock_httpx_cls, mock_rec_service, mock_tx_service, mock_analyze
+    ):
+        """Test 19: cleanup_orphaned_egress only stops ACTIVE egress for the returned room —
+        never a completed recording or another room's active Egress (room isolation)."""
+        from recording_service import RecordingService
+        from livekit.protocol import egress
+
+        async def _fake_list_egress(request):
+            items = []
+            # Active egress for OUR room -> must be cleaned
+            ours_active = MagicMock()
+            ours_active.room_name = "test-room-123"
+            ours_active.status = egress.EgressStatus.EGRESS_ACTIVE
+            ours_active.egress_id = "EG_ORPHAN_O"
+            items.append(ours_active)
+            # Another room's ACTIVE egress -> must NOT be touched
+            other_active = MagicMock()
+            other_active.room_name = "other-room-999"
+            other_active.status = egress.EgressStatus.EGRESS_ACTIVE
+            other_active.egress_id = "EG_OTHER_9"
+            items.append(other_active)
+            # Completed egress for our room -> must NOT be touched
+            done = MagicMock()
+            done.room_name = "test-room-123"
+            done.status = egress.EgressStatus.EGRESS_COMPLETE
+            done.egress_id = "EG_DONE_C"
+            items.append(done)
+            return MagicMock(items=items)
+
+        mock_egress_client = MagicMock()
+        mock_egress_client.list_egress = AsyncMock(side_effect=_fake_list_egress)
+        mock_full_client = MagicMock()
+        mock_full_client.egress = mock_egress_client
+        stopped = []
+
+        async def _fake_stop_recording(egress_id, timeout_sec=10):
+            stopped.append(egress_id)
+            return True
+
+        service = RecordingService()
+        service._get_client = MagicMock(return_value=mock_full_client)
+        service.stop_recording = _fake_stop_recording
+        service._get_client.return_value.__aenter__ = None  # not used on this path
+
+        cleaned = await service.cleanup_orphaned_egress("test-room-123")
+
+        self.assertIn("EG_ORPHAN_O", stopped)
+        self.assertNotIn("EG_OTHER_9", stopped)
+        self.assertNotIn("EG_DONE_C", stopped)
+        self.assertEqual(cleaned, 1)
 
 
 if __name__ == "__main__":

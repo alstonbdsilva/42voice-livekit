@@ -1,3 +1,11 @@
+# ==============================================================================
+# REFERENCE TEMPLATE for the canonical livekit-server config.
+# This file is NOT consumed directly by docker compose: the canonical
+# docker-compose.yml injects this configuration via the LIVEKIT_CONFIG
+# environment variable (see DEPLOYMENT.md). It is kept as a documented example;
+# the ${...} placeholders below are only expanded by deployment tooling
+# (envsubst) and must NEVER be committed with real values.
+# ==============================================================================
 port: 7880
 bind_addresses:
   - ""
@@ -9,11 +17,11 @@ rtc:
 
 redis:
   address: redis:6379
-  password: redissecret
+  password: ${REDIS_PASSWORD}
   db: 0
 
 keys:
-  myapikey: mysupersecret
+  ${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}
 
 logging:
   json: false

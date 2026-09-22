@@ -44,6 +44,10 @@ export interface Agent {
   assignedClients?: AgentEntityRef[];
   voiceName?: string;
   voiceGender?: string;
+  ttsProvider?: string;
+  ttsModel?: string;
+  ttsVoiceId?: string;
+  ttsVoiceName?: string;
   guardrails?: any;
   customGuardrails?: string;
   knowledgeItems?: any[];

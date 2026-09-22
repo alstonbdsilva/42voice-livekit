@@ -299,9 +299,12 @@ Phone Call → Twilio → SIP Trunk → LiveKit SIP → LiveKit Room → Voice A
    - Configure termination and origination settings
 
 2. **Configure LiveKit SIP**:
-   - Update `sip.yaml` with your Twilio credentials
+   - Set the LiveKit SIP/Trunk credentials via environment variables
+     (`LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `REDIS_PASSWORD`); the compose
+     stacks inject the SIP config through `SIP_CONFIG_BODY`. See DEPLOYMENT.md
+     at the repository root. The `sip.yaml` template is not read by compose.
    - Set NAT configuration with your public IP
-   - Start LiveKit SIP connector
+   - Start LiveKit SIP connector (`docker compose up -d sip`)
 
 3. **Configure Environment Variables**:
    ```bash

@@ -1,14 +1,19 @@
+# ==============================================================================
+# REFERENCE TEMPLATE for the local dev stack livekit-server config.
+# This file is NOT consumed directly: the dev stack uses LIVEKIT_CONFIG.
+# Placeholders are only expanded by deployment tooling and must NEVER be
+# committed with real values.
+# ==============================================================================
 port: 7880
 
 keys:
-  myapikey: mysupersecret
+  ${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}
 
 redis:
-  # address: localhost:6379 # EC2 host network mode
+  # address: 127.0.0.1:6379 # host network mode
   address: redis:6379
 
 rtc:
   tcp_port: 7881
   port_range_start: 10000
   port_range_end: 20000
-

@@ -24,7 +24,6 @@ class RegisterRequest(BaseModel):
     last_name: str = Field(..., min_length=1)
     phone: Optional[str] = None
     avatar_url: Optional[str] = None
-    role_name: Optional[str] = "CLIENT"
 
 
 class LoginRequest(BaseModel):
@@ -64,6 +63,8 @@ async def register(req_body: RegisterRequest, request: Request):
     user_agent = request.headers.get("user-agent", "")
     
     # Map input schema to database DTO keys
+    # Public registration always creates a standard user. Privileged roles
+    # (ADMIN, SUPER_ADMIN, etc.) are only assignable via the users module.
     dto = {
         "email": req_body.email,
         "password_hash": req_body.password,
@@ -71,7 +72,7 @@ async def register(req_body: RegisterRequest, request: Request):
         "last_name": req_body.last_name,
         "phone": req_body.phone,
         "avatar_url": req_body.avatar_url,
-        "role_name": req_body.role_name
+        "role_name": "CLIENT"
     }
     
     user = await auth_service.register(dto, client_ip, user_agent)

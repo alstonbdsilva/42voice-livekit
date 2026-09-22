@@ -138,6 +138,10 @@ CREATE TABLE IF NOT EXISTS agents (
     client_id UUID REFERENCES clients(id) ON DELETE SET NULL,
     voice_name VARCHAR(50) DEFAULT 'aria',
     voice_gender VARCHAR(20) DEFAULT 'female',
+    tts_provider VARCHAR(50),
+    tts_model VARCHAR(100),
+    tts_voice_id VARCHAR(100),
+    tts_voice_name VARCHAR(100),
     guardrails JSONB DEFAULT '{}'::jsonb,
     custom_guardrails TEXT,
     knowledge_items JSONB DEFAULT '[]'::jsonb,
@@ -145,6 +149,11 @@ CREATE TABLE IF NOT EXISTS agents (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS tts_provider VARCHAR(50);
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS tts_model VARCHAR(100);
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS tts_voice_id VARCHAR(100);
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS tts_voice_name VARCHAR(100);
 
 CREATE TABLE IF NOT EXISTS agent_resellers (
     agent_id UUID REFERENCES agents(id) ON DELETE CASCADE,
@@ -406,6 +415,77 @@ INSERT INTO roles (name, description) VALUES
 ON CONFLICT (name) DO NOTHING;
 """
 
+# Default bootstrap users. Passwords are NOT stored here; each account is only
+# seeded when the corresponding SEED_<ROLE>_PASSWORD environment variable is set.
+DEFAULT_SEED_USERS = [
+    {
+        "email": "admin@42voice.com",
+        "password_env": "SEED_SUPER_ADMIN_PASSWORD",
+        "first_name": "Super",
+        "last_name": "Admin",
+        "role_name": "SUPER_ADMIN",
+    },
+    {
+        "email": "finance@42voice.com",
+        "password_env": "SEED_FINANCE_ADMIN_PASSWORD",
+        "first_name": "Finance",
+        "last_name": "Admin",
+        "role_name": "FINANCE_ADMIN",
+    },
+    {
+        "email": "reseller@42voice.com",
+        "password_env": "SEED_RESELLER_PASSWORD",
+        "first_name": "Reseller",
+        "last_name": "Admin",
+        "role_name": "RESELLER",
+    },
+    {
+        "email": "client@42voice.com",
+        "password_env": "SEED_CLIENT_PASSWORD",
+        "first_name": "Client",
+        "last_name": "User",
+        "role_name": "CLIENT",
+    },
+]
+
+
+async def seed_default_users(roles_map: dict, salt_rounds: int, env_getter=None) -> None:
+    """
+    Seed bootstrap users using passwords supplied via environment variables.
+
+    A user is skipped unless its SEED_*_PASSWORD env var is set (min 8 chars).
+    Inserts use ON CONFLICT (email) DO NOTHING so existing accounts are never
+    modified, including their passwords. No password value is ever logged.
+    """
+    import os
+    env_getter = env_getter or os.getenv
+
+    for u in DEFAULT_SEED_USERS:
+        role_id = roles_map.get(u["role_name"])
+        if not role_id:
+            logger.warning(f"Role {u['role_name']} not found, skipping user {u['email']}")
+            continue
+
+        password = env_getter(u["password_env"])
+        if not password:
+            logger.warning(f"Seed user {u['email']} skipped: env var {u['password_env']} is not set")
+            continue
+
+        if len(password) < 8:
+            logger.warning(f"Seed user {u['email']} skipped: env var {u['password_env']} must be at least 8 characters")
+            continue
+
+        # Cryptographic hash password in python
+        hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt(salt_rounds))
+        hashed_str = hashed.decode('utf-8')
+
+        await database.query(
+            """INSERT INTO users (email, password_hash, first_name, last_name, role_id, is_active, is_verified)
+               VALUES ($1, $2, $3, $4, $5, true, true)
+               ON CONFLICT (email) DO NOTHING""",
+            [u["email"], hashed_str, u["first_name"], u["last_name"], role_id]
+        )
+
 
 async def init_db() -> None:
     logger.info("Initializing database...")
@@ -449,71 +529,27 @@ async def init_db() -> None:
 
                 ALTER TABLE calendar_integrations ADD COLUMN IF NOT EXISTS refresh_token TEXT;
                 ALTER TABLE calendar_integrations ADD COLUMN IF NOT EXISTS provider_user_id VARCHAR(255);
+                
+                ALTER TABLE conversations ADD COLUMN IF NOT EXISTS room_name VARCHAR(255);
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_conversations_room_name
+                    ON conversations(room_name) WHERE room_name IS NOT NULL;
             """)
             
         logger.info("Tables created and roles seeded successfully.")
         
         # 3. Seed default users
+        # Default users are only created when an explicit password is provided
+        # through environment variables (e.g. SEED_SUPER_ADMIN_PASSWORD).
+        # Existing rows are NEVER modified (ON CONFLICT DO NOTHING), so admin
+        # passwords cannot be reset/overwritten on startup/deployment.
+        # Passwords are never logged and are not stored in source control.
         logger.info("Seeding default users...")
         roles = await database.query("SELECT id, name FROM roles")
         roles_map = {r["name"]: r["id"] for r in roles}
         
-        default_users = [
-            {
-                "email": "admin@42voice.com",
-                "password": "Admin@42voice",
-                "first_name": "Super",
-                "last_name": "Admin",
-                "role_name": "SUPER_ADMIN",
-            },
-            {
-                "email": "finance@42voice.com",
-                "password": "Finance@42voice",
-                "first_name": "Finance",
-                "last_name": "Admin",
-                "role_name": "FINANCE_ADMIN",
-            },
-            {
-                "email": "reseller@42voice.com",
-                "password": "Reseller@42voice",
-                "first_name": "Reseller",
-                "last_name": "Admin",
-                "role_name": "RESELLER",
-            },
-            {
-                "email": "client@42voice.com",
-                "password": "Client@42voice",
-                "first_name": "Client",
-                "last_name": "User",
-                "role_name": "CLIENT",
-            },
-        ]
+        current_salt_rounds = settings.bcrypt_salt_rounds
+        await seed_default_users(roles_map, current_salt_rounds)
         
-        salt_rounds = settings.bcrypt_salt_rounds
-        
-        for u in default_users:
-            role_id = roles_map.get(u["role_name"])
-            if not role_id:
-                logger.warning(f"Role {u['role_name']} not found, skipping user {u['email']}")
-                continue
-                
-            # Cryptographic hash password in python
-            hashed = bcrypt.hashpw(u["password"].encode('utf-8'), bcrypt.gensalt(salt_rounds))
-            hashed_str = hashed.decode('utf-8')
-            
-            await database.query(
-                """INSERT INTO users (email, password_hash, first_name, last_name, role_id, is_active, is_verified)
-                   VALUES ($1, $2, $3, $4, $5, true, true)
-                   ON CONFLICT (email) DO UPDATE 
-                   SET password_hash = EXCLUDED.password_hash,
-                       first_name = EXCLUDED.first_name,
-                       last_name = EXCLUDED.last_name,
-                       role_id = EXCLUDED.role_id,
-                       is_active = true,
-                       is_verified = true""",
-                [u["email"], hashed_str, u["first_name"], u["last_name"], role_id]
-            )
-            
         logger.info("Default users seeded successfully.")
         
         logger.info("Database schema setup and seeding completed successfully!")

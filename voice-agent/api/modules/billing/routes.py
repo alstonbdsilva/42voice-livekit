@@ -164,7 +164,7 @@ async def process_successful_payment(
 @router.post("/buy-plan")
 async def buy_plan(req_body: BuyPlanRequest, request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     settings = get_settings()
-    origin = request.headers.get("origin") or "http://localhost:3002"
+    origin = request.headers.get("origin") or settings.frontend_url
     plan_id = req_body.planId
 
     # Find the plan
@@ -228,7 +228,7 @@ async def buy_plan(req_body: BuyPlanRequest, request: Request, current_user: Dic
         charge_amount = wholesale_price
 
     # Determine if Stripe is in Mock Mode
-    is_mock = settings.stripe_secret_key.startswith("sk_test_mock") or not settings.stripe_secret_key
+    is_mock = not settings.stripe_secret_key or settings.stripe_secret_key.startswith("sk_test_mock")
 
     if is_mock:
         # Return mock checkout redirect URL
@@ -335,7 +335,7 @@ async def mock_checkout_success(req_body: MockSuccessRequest, current_user: Dict
     Can be called by client/reseller upon clicking 'Simulate Success' in frontend.
     """
     settings = get_settings()
-    is_mock = settings.stripe_secret_key.startswith("sk_test_mock") or not settings.stripe_secret_key
+    is_mock = not settings.stripe_secret_key or settings.stripe_secret_key.startswith("sk_test_mock")
     if not is_mock:
         return ApiResponse.error(400, "Mock endpoints are disabled in production Stripe configuration", "MOCK_DISABLED")
 

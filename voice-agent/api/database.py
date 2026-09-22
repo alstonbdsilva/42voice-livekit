@@ -4,6 +4,7 @@ Asynchronous PostgreSQL database connector using asyncpg.
 
 import asyncio
 import logging
+import ssl
 import asyncpg
 from typing import List, Dict, Any, Optional
 from config import get_settings
@@ -16,18 +17,66 @@ _pool_lock: Optional[asyncio.Lock] = None
 
 def _get_lock() -> asyncio.Lock:
     global _pool_lock
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if _pool_lock is not None:
+        lock_loop = getattr(_pool_lock, "_loop", None)
+        if lock_loop is not None and (lock_loop.is_closed() or (current_loop is not None and lock_loop != current_loop)):
+            _pool_lock = None
+
     if _pool_lock is None:
         _pool_lock = asyncio.Lock()
     return _pool_lock
+
+
+def build_ssl_context(settings) -> Optional["ssl.SSLContext"]:
+    """
+    Build the SSL context for the PostgreSQL connection based on DB_SSL_MODE.
+
+    Modes:
+      - disable:      no TLS (local development compatible).
+      - auto:         production -> full certificate verification; local -> no TLS.
+      - require:      TLS encryption only (explicit operator opt-in; no verification).
+      - verify-full:  TLS with full certificate verification.
+    The production "auto" path NEVER disables certificate verification.
+    """
+    mode = (getattr(settings, "db_ssl_mode", None) or "auto").lower().strip()
+    environment = (getattr(settings, "environment", None) or "development").lower().strip()
+    is_production = environment in ("production", "prod") or "supabase.co" in (settings.pghost or "")
+
+    if mode == "disable":
+        return None
+
+    if mode == "auto":
+        if not is_production:
+            return None
+        mode = "verify-full"
+
+    ctx = ssl.create_default_context()
+    if mode == "require":
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    elif mode == "verify-full":
+        ctx.check_hostname = True
+        ctx.verify_mode = ssl.CERT_REQUIRED
+    else:
+        raise ValueError(f"Unsupported DB_SSL_MODE: {mode}")
+    return ctx
 
 
 async def init_pool() -> None:
     """Initialize the PostgreSQL connection pool without running schema verification queries."""
     global pool
     
+    current_loop = asyncio.get_running_loop()
+
     if pool is not None:
         try:
-            if hasattr(pool, "_loop") and pool._loop.is_closed():
+            pool_loop = getattr(pool, "_loop", None)
+            if pool_loop is not None and (pool_loop.is_closed() or pool_loop != current_loop):
                 pool = None
             else:
                 return
@@ -39,8 +88,10 @@ async def init_pool() -> None:
         # Double check inside lock
         if pool is not None:
             try:
-                if hasattr(pool, "_loop") and not pool._loop.is_closed():
+                pool_loop = getattr(pool, "_loop", None)
+                if pool_loop is not None and not pool_loop.is_closed() and pool_loop == current_loop:
                     return
+                pool = None
             except Exception:
                 pool = None
             
@@ -48,14 +99,7 @@ async def init_pool() -> None:
         logger.info(f"Connecting to PostgreSQL database at {settings.pghost}:{settings.pgport}...")
         
         try:
-            # Construct SSL context if necessary
-            ssl_ctx = None
-            if "supabase.co" in settings.pghost or settings.log_level != "DEBUG":
-                import ssl
-                ssl_ctx = ssl.create_default_context()
-                ssl_ctx.check_hostname = False
-                ssl_ctx.verify_mode = ssl.CERT_NONE
-                
+            ssl_ctx = build_ssl_context(settings)
             pool = await asyncpg.create_pool(
                 host=settings.pghost,
                 port=settings.pgport,
@@ -64,7 +108,12 @@ async def init_pool() -> None:
                 password=settings.pgpassword,
                 min_size=1,
                 max_size=settings.pgmax_connections,
-                max_inactive_connection_lifetime=30.0,
+                # Kept conservative but raised from 30s: asyncpg closes an idle
+                # connection after this timeout and re-establishes it inline on
+                # the next acquire (a multi-second reconnect on a live call).
+                # 300s keeps the warm worker pool alive across typical
+                # call-to-call gaps without pinning connections for too long.
+                max_inactive_connection_lifetime=300.0,
                 command_timeout=10.0,
                 ssl=ssl_ctx
             )
@@ -237,13 +286,20 @@ async def verify_schema() -> None:
 
 async def close_pool() -> None:
     """Close the database pool."""
-    global pool
+    global pool, _pool_lock
     if pool is None:
         return
         
     logger.info("Closing PostgreSQL connection pool...")
-    await pool.close()
-    pool = None
+    try:
+        pool_loop = getattr(pool, "_loop", None)
+        if pool_loop is not None and not pool_loop.is_closed():
+            await pool.close()
+    except Exception as e:
+        logger.warning(f"Error closing PostgreSQL pool: {e}")
+    finally:
+        pool = None
+        _pool_lock = None
     logger.info("PostgreSQL connection pool terminated")
 
 
@@ -252,6 +308,16 @@ async def query(query_text: str, params: Optional[List[Any]] = None, client: Opt
     Run a raw parameterized SQL query and return rows as dictionaries.
     Compatible with transaction connections (client) or pool fallback.
     """
+    current_loop = asyncio.get_running_loop()
+    if client is None:
+        if pool is None:
+            await init_pool()
+        else:
+            pool_loop = getattr(pool, "_loop", None)
+            if pool_loop is not None and (pool_loop.is_closed() or pool_loop != current_loop):
+                logger.info("[Database] Re-initializing pool for active worker event loop...")
+                await init_pool()
+
     target = client if client is not None else pool
     if target is None:
         raise RuntimeError("Database pool has not been initialized.")
@@ -270,6 +336,15 @@ async def transaction(callback_coro):
     Executes a callback coroutine inside a database transaction block.
     Passes the connection client to the callback.
     """
+    current_loop = asyncio.get_running_loop()
+    if pool is None:
+        await init_pool()
+    else:
+        pool_loop = getattr(pool, "_loop", None)
+        if pool_loop is not None and (pool_loop.is_closed() or pool_loop != current_loop):
+            logger.info("[Database] Re-initializing pool for active worker event loop...")
+            await init_pool()
+
     if pool is None:
         raise RuntimeError("Database pool has not been initialized.")
         

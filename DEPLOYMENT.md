@@ -1,114 +1,96 @@
-# 🚀 42Voice - Hostinger VPS Multi-Domain Deployment Guide
+# 42Voice Deployment Guide
 
-Complete step-by-step guide for deploying **42Voice** on a **Hostinger VPS** using **Docker Compose**, multi-subdomain SSL proxying via **Caddy**, and **Supabase PostgreSQL**.
+This document is the canonical reference for deploying the 42Voice stack.
+It complements `deploy.sh` and the environment templates (`.env.docker.example`,
+`.env.local.example`).
 
----
+## Canonical deployment stack
 
-## 🌐 Subdomain Architecture
+The **canonical production stack is the root `docker-compose.yml`**.
+`scripts/deploy.sh`, `voice-agent/entrypoint.sh`, and this repo's CI assume it.
 
-Your production stack is configured to run on 3 dedicated subdomains:
+| Concern | Canonical configuration |
+| --- | --- |
+| Compose file | `docker-compose.yml` (repo root) |
+| Backend/worker | `voice-agent` image + `./entrypoint.sh backend` / `./entrypoint.sh worker` |
+| Frontend | `fe` service; build args `REACT_APP_BACKEND_URL`, `REACT_APP_LIVEKIT_URL` |
+| Postgres | External (Supabase); never containerized |
+| Redis | `redis:7-alpine` with `REDIS_PASSWORD` |
+| LiveKit SFU | `livekit/livekit-server` via `LIVEKIT_CONFIG` |
+| LiveKit SIP | `livekit/sip` via `SIP_CONFIG_BODY` |
+| LiveKit Egress | `livekit/egress` via `EGRESS_CONFIG_BODY` |
 
-| Subdomain | Purpose | Target Service |
-|---|---|---|
-| `dashboard.42voice.com` | Web Application UI | `fe:80` (React SPA) |
-| `api.42voice.com` | REST API Backend | `backend:8000` (FastAPI) |
-| `ws.42voice.com` | LiveKit SFU WebRTC / WSS | `livekit:7880` (LiveKit Server) |
+The alternative files are **not** used in production:
 
----
+- `docker-compose.local.yml` - local development stack.
+- `voice-agent/livekit/docker-compose.yml` - low-level LiveKit dev services.
+- `livekit.yaml`, `livekit.local.yaml`, `voice-agent/livekit/*.yaml` - reference
+  templates only; they are **not** mounted by any compose file and must never
+  be committed with real values.
 
-## 📋 Step 1: Set Up Hostinger / Cloudflare DNS A-Records
+## Credentials are injected from the environment only
 
-Point the following **3 DNS A-Records** to your **Hostinger VPS Public IP**:
+No credential values are committed or defaulted anywhere in the compose files.
+Verified with `docker compose config`:
 
-| Type | Name / Host | Value / Target IP |
-|---|---|---|
-| **A Record** | `dashboard` | `<YOUR_HOSTINGER_VPS_IP>` |
-| **A Record** | `api` | `<YOUR_HOSTINGER_VPS_IP>` |
-| **A Record** | `ws` | `<YOUR_HOSTINGER_VPS_IP>` |
-
----
-
-## 🛡️ Step 2: Configure Hostinger VPS Firewall
-
-Log into Hostinger hPanel $\rightarrow$ VPS Management $\rightarrow$ **Firewall**, or set up UFW directly on your server:
-
-```bash
-# Allow SSH
-sudo ufw allow 22/tcp
-
-# Allow Web & SSL (Caddy Reverse Proxy)
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
-
-# Allow LiveKit WebRTC Signaling & Media Ports
-sudo ufw allow 7880/tcp
-sudo ufw allow 7881/tcp
-sudo ufw allow 50000:60000/udp
-
-# Enable firewall
-sudo ufw enable
+```
+$ docker compose -f docker-compose.yml config
+error ... REDIS_PASSWORD is required
+error ... LIVEKIT_API_KEY is required
+error ... LIVEKIT_API_SECRET is required
 ```
 
----
+The stack refuses to start unless these variables are provided.
 
-## 🔑 Step 3: Deploy to Hostinger VPS
+### Required environment variables
 
-1. SSH into your Hostinger VPS:
-```bash
-ssh root@<YOUR_HOSTINGER_VPS_IP>
-```
+| Variable | Purpose |
+| --- | --- |
+| `REDIS_PASSWORD` | Redis `requirepass`; used by livekit, sip, egress, backend, worker |
+| `LIVEKIT_API_KEY` | LiveKit API key (`keys:` section) |
+| `LIVEKIT_API_SECRET` | LiveKit API secret |
+| `DATABASE_URL` / `PGHOST`+`PGPORT`+`PGUSER`+`PGPASSWORD`+`PGDATABASE` | Supabase Postgres |
+| `DB_SSL_MODE` | `auto` (default) / `disable` / `require` / `verify-full` |
+| `SEED_SUPER_ADMIN_PASSWORD` + `SEED_FINANCE_ADMIN_PASSWORD` + `SEED_RESELLER_PASSWORD` + `SEED_CLIENT_PASSWORD` | Initial user passwords, used once (idempotent) |
+| `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` | Auth token signing |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_SIP_DOMAIN` | Outbound/inbound PSTN |
+| `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `CARTESIA_API_KEY`, `OPENAI_API_KEY` | STT/TTS/LLM providers |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_BUCKET_NAME` | Recordings/transcripts |
+| `FRONTEND_URL`, `BACKEND_URL` | CORS allow-list (scheme + host only) and links |
 
-2. Clone repository to `/opt/42voice-livekit`:
-```bash
-git clone <YOUR_GIT_REPO_URL> /opt/42voice-livekit
-cd /opt/42voice-livekit
-```
+## Networking model
 
-3. Make entrypoint and deploy scripts executable:
-```bash
-chmod +x scripts/deploy.sh voice-agent/entrypoint.sh
-```
+- `redis`, `livekit`, `egress` run on the bridge network `app-network` and
+  address each other by **service name** (`redis:6379`, `ws://livekit:7880`).
+- The `sip` service uses `network_mode: host` because SIP/RTP media needs the
+  wide UDP port range. **In host mode Docker service names do not resolve**, so
+  the SIP config (`SIP_CONFIG_BODY`) must use the host loopback ports:
+  `ws://127.0.0.1:7880` and `redis: 127.0.0.1:6379`.
+- Do not "fix" the SIP `ws_url` back to `ws://livekit:7880` while `sip` uses
+  host networking - that breaks SIP registration.
+- The SIP service additionally requires `LIVEKIT_SIP_PUBLIC_URI`
+  (e.g. `sip:voice@your-ip-or-host:<5060>`) to be advertised correctly.
 
-4. Launch deployment:
-```bash
-./scripts/deploy.sh
-```
-*Or directly via Docker Compose:*
-```bash
-docker compose -f docker-compose.prod.yml up -d --build
-```
+## Egress configuration
 
----
+Egress reads its config from `EGRESS_CONFIG_BODY`, where the `${...}` variables
+are expanded by the compose engine **before** reaching egress.
+Do NOT switch egress back to `EGRESS_CONFIG_FILE` + a template file containing
+literal `${LIVEKIT_API_KEY}` - egress does not interpolate those placeholders.
 
-## 🔍 Step 4: Verification & Default Credentials
+## Startup order
 
-Once deployed:
-- **Frontend Dashboard**: Open `https://dashboard.42voice.com`
-- **FastAPI Health Check**: `https://api.42voice.com/health` (returns `{"status":"ok"}`)
-- **LiveKit Server**: `https://ws.42voice.com`
+Compose `depends_on` handles ordering (`redis` first, then `livekit`,
+`sip`, `egress`, then `backend`/`voice-agent`). The backend entrypoint runs
+`init_db.py`, which applies schema and seeds initial users idempotently
+(`ON CONFLICT ... DO NOTHING`) - existing passwords are never overwritten.
 
-### Default Admin Credentials (Auto-seeded to Supabase)
-| Role | Email | Password |
-|---|---|---|
-| **Super Admin** | `admin@42voice.com` | `Admin@42voice` |
-| **Finance Admin** | `finance@42voice.com` | `Finance@42voice` |
-| **Reseller** | `reseller@42voice.com` | `Reseller@42voice` |
-| **Client** | `client@42voice.com` | `Client@42voice` |
-
----
-
-## 🛠️ Logs & Management Commands
+## Deploying
 
 ```bash
-# View all container logs
-docker compose -f docker-compose.prod.yml logs -f
-
-# View LiveKit Voice Agent Worker logs
-docker compose -f docker-compose.prod.yml logs -f voice-agent
-
-# View FastAPI Backend logs
-docker compose -f docker-compose.prod.yml logs -f backend
-
-# Re-build and restart containers
-docker compose -f docker-compose.prod.yml up -d --build
+cp .env.docker.example .env      # fill in all values
+./scripts/deploy.sh              # builds and starts the canonical stack
 ```
+
+`scripts/deploy.sh` loads `.env` (`export $(grep -v '^#' .env | xargs)`) and
+runs `docker compose build` and `docker compose up -d`.

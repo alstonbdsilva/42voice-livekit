@@ -18,7 +18,7 @@ class TestInboundLookupAndRecording(unittest.IsolatedAsyncioTestCase):
         
         mock_sync.get_cached_lookup.return_value = None
         mock_db.query = AsyncMock(side_effect=[
-            # 1. telephony_phone_numbers + telephony_configurations JOIN
+            # Single consolidated query: number + telephony config + agent + client minutes
             [{
                 "phone_number_id": "pn-123",
                 "address": "+6498736772",
@@ -26,16 +26,11 @@ class TestInboundLookupAndRecording(unittest.IsolatedAsyncioTestCase):
                 "agent_id": "agent-123",
                 "telephony_configuration_id": "config-123",
                 "client_id": "client-123",
-                "provider": "twilio"
-            }],
-            # 2. client minutes_balance
-            [{"minutes_balance": 100}],
-            # 3. agents details
-            [{
-                "id": "agent-123",
-                "name": "Test Support Agent",
-                "status": "active",
-                "call_type": "inbound",
+                "provider": "twilio",
+                "minutes_balance": 100,
+                "agent_name": "Test Support Agent",
+                "agent_status": "active",
+                "agent_type": "inbound",
                 "activity_description": "You are a support agent.",
                 "use_case": "Customer Support"
             }]
@@ -43,7 +38,8 @@ class TestInboundLookupAndRecording(unittest.IsolatedAsyncioTestCase):
         
         result = await lookup_number("+6498736772")
         
-        # Verify query executed against telephony_phone_numbers
+        # Verify a single consolidated query against the telephony tables
+        self.assertEqual(mock_db.query.await_count, 1)
         first_call_sql = mock_db.query.call_args_list[0][0][0]
         self.assertIn("telephony_phone_numbers", first_call_sql)
         self.assertIn("telephony_configurations", first_call_sql)
@@ -56,6 +52,8 @@ class TestInboundLookupAndRecording(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["client_id"], "client-123")
         self.assertEqual(result["telephony_configuration_id"], "config-123")
         self.assertEqual(result["provider"], "twilio")
+        self.assertEqual(result["agent_name"], "Test Support Agent")
+        self.assertEqual(result["prompt"], "You are a support agent.")
 
     @patch("api.modules.phone_numbers.routes.database")
     @patch("api.modules.phone_numbers.routes.phone_sync_service")

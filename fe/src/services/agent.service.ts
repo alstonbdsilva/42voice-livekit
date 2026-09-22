@@ -11,6 +11,10 @@ export interface CreateAgentDto {
   clientIds?: string[];
   voiceName?: string;
   voiceGender?: string;
+  ttsProvider?: string;
+  ttsModel?: string;
+  ttsVoiceId?: string;
+  ttsVoiceName?: string;
   guardrails?: any;
   customGuardrails?: string;
   knowledgeItems?: any[];
@@ -57,6 +61,10 @@ class AgentServiceClass {
     callType?: string;
     voiceName?: string;
     voiceGender?: string;
+    ttsProvider?: string;
+    ttsModel?: string;
+    ttsVoiceId?: string;
+    ttsVoiceName?: string;
     guardrails?: any;
     customGuardrails?: string;
     knowledgeItems?: any[];

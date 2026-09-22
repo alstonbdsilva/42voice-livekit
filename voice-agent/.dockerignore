@@ -1,0 +1,35 @@
+# Secrets - never bake env files into image layers
+.env
+.env.*
+!.env.example
+
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local dev / runtime artifacts
+livekit/recordings/
+.venv/
+venv/
+*.log
+
+# Tests & tooling
+# keep tests about Docker images unless needed at runtime
+tests/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/

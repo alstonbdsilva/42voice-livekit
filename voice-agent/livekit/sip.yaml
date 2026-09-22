@@ -1,11 +1,23 @@
-api_key: myapikey
-api_secret: mysupersecret
+# ==============================================================================
+# REFERENCE TEMPLATE for the LiveKit SIP service config.
+# This file is NOT consumed directly: docker-compose stacks inject this
+# configuration via the SIP_CONFIG_BODY environment variable (see
+# DEPLOYMENT.md). Placeholders are only expanded by deployment tooling and
+# must NEVER be committed with real values.
+#
+# Networking note: with network_mode: host (production/local stacks) the
+# ws_url and redis.address must use 127.0.0.1, because Docker service names
+# do not resolve in host networking. On a plain bridge network the
+# ws://livekit:7880 service-name form is correct instead.
+# ==============================================================================
+api_key: ${LIVEKIT_API_KEY}
+api_secret: ${LIVEKIT_API_SECRET}
 
-ws_url: ws://127.0.0.1:7880
+ws_url: ws://livekit:7880
 
 redis:
-  address: 127.0.0.1:6379
-  password: redissecret
+  address: redis:6379
+  password: ${REDIS_PASSWORD}
 
 sip_port: 5060
 rtp_port: 10000-20000
@@ -13,6 +25,4 @@ rtp_port: 10000-20000
 use_external_ip: true
 
 logging:
-  level: debug
-
-
+  level: info

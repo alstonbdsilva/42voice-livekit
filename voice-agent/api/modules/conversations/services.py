@@ -81,9 +81,25 @@ class ConversationsService:
                 "humanHandoff": dto.get("humanHandoff", False),
                 "escalationReason": dto.get("escalationReason"),
                 "userId": dto.get("userId") or agent.get("user_id"),
-                "clientId": dto.get("clientId") or agent.get("client_id")
+                "clientId": dto.get("clientId") or agent.get("client_id"),
+                "roomName": dto.get("roomName") or dto.get("room_name")
             }
             conv = await self.conversation_repository.create(conv_data, client=conn)
+
+            # Idempotency short-circuit: if the repository detected that a
+            # conversation for this LiveKit room was ALREADY registered (either
+            # because the unique-index insert returned no row, or because the
+            # room_name column already holds that value), treat this call as a
+            # duplicate and return the previously-persisted conversation WITHOUT
+            # re-running recording/transcript/stats/billing. This prevents the
+            # "double-billing / double-recording on duplicate POST /register"
+            # problem.
+            if conv.get("_is_duplicate"):
+                logger.info(f"Duplicate register_call for room '{dto.get('roomName')}'. "
+                            f"Skipping recording/transcript/stats/billing; returning existing "
+                            f"conversation {conv['id']}.")
+                conv["agent_name"] = agent.get("name") or dto.get("agentName") or "AI Orchestrator"
+                return conv
             
             # 3. Create the recording log if provided
             if dto.get("recording"):
@@ -147,9 +163,9 @@ class ConversationsService:
                         )
                         logger.info(f"Deducted {duration_minutes} minutes from Reseller {res_id} balance.")
             
-            # Retrieve complete conversation for payload formatting
-            full_conv = await self.conversation_repository.find_by_id(conv["id"], client=conn)
-            return full_conv or conv
+            # Attach resolved agent name for payload formatting without redundant find_by_id query
+            conv["agent_name"] = agent.get("name") or dto.get("agentName") or "AI Orchestrator"
+            return conv
             
         result = await database.transaction(trans_cb)
         return self.map_to_response(result)

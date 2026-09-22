@@ -144,8 +144,8 @@ async def get_available_twilio_numbers(
     Fetches real-time pricing dynamically from Twilio Pricing API.
     """
     settings = get_settings()
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID") or settings.twilio_account_sid
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN") or settings.twilio_auth_token
+    account_sid = settings.twilio_account_sid
+    auth_token = settings.twilio_auth_token
 
     country_code = country.upper()
     type_clean = type.lower()
@@ -567,7 +567,9 @@ async def lookup_number(number: str):
             logger.info(f"Cache HIT for {canonical_number}")
             return cached_lookup
 
-        # Query active telephony_phone_numbers joined with telephony_configurations
+        # Query active telephony_phone_numbers joined with telephony_configurations,
+        # the assigned agent's routing data, and the tenant client's minutes balance
+        # in a single round trip (previously three sequential WAN queries).
         # Legacy phone_numbers table is deprecated and MUST NOT be queried.
         rows = await database.query(
             """SELECT 
@@ -577,11 +579,28 @@ async def lookup_number(number: str):
                    p.inbound_agent_id AS agent_id,
                    c.id AS telephony_configuration_id,
                    COALESCE(c.client_id, a.client_id, u.client_id) AS client_id,
-                   c.provider
+                   c.provider,
+                   cl.name AS client_name,
+                   cl.minutes_balance,
+                   a.name AS agent_name,
+                   a.status AS agent_status,
+                   a.call_type AS agent_type,
+                   a.activity_description,
+                   a.use_case,
+                   a.tool_ids,
+                   a.voice_name,
+                   a.voice_gender,
+                   a.tts_provider,
+                   a.tts_model,
+                   a.tts_voice_id,
+                   a.tts_voice_name,
+                   a.custom_guardrails,
+                   a.knowledge_items
                FROM telephony_phone_numbers p
                JOIN telephony_configurations c ON p.telephony_configuration_id = c.id
                LEFT JOIN agents a ON a.id = p.inbound_agent_id
                LEFT JOIN users u ON u.id = a.user_id
+               LEFT JOIN clients cl ON cl.id = COALESCE(c.client_id, a.client_id, u.client_id)
                WHERE p.address = ANY($1::text[]) AND p.is_active = true""",
             [number_candidates]
         )
@@ -593,11 +612,11 @@ async def lookup_number(number: str):
                 detail={"error": "PHONE_NUMBER_NOT_FOUND", "message": f"Phone number {number} not found"}
             )
 
-        num_record = rows[0]
-        client_uuid = num_record["client_id"]
-        agent_uuid = num_record["agent_id"]
-        telephony_config_uuid = num_record["telephony_configuration_id"]
-        provider = num_record["provider"]
+        num_record = dict(rows[0])
+        client_uuid = num_record.get("client_id")
+        agent_uuid = num_record.get("agent_id")
+        telephony_config_uuid = num_record.get("telephony_configuration_id")
+        provider = num_record.get("provider")
 
         # CRITICAL: Verify agent is assigned. Unassigned phone numbers cannot accept calls.
         if not agent_uuid:
@@ -611,15 +630,24 @@ async def lookup_number(number: str):
                 }
             )
 
-        # Check Credits Status from tenant (client)
+        # Check Credits Status from tenant (client).
+        # Preserves legacy behavior: a client row that exists with balance 0 is a
+        # credit failure; a missing client row degrades to tolerated (credits OK).
         has_credits = True
         minutes_balance = 0
 
         if client_uuid:
-            cl_rows = await database.query("SELECT minutes_balance FROM clients WHERE id = $1", [client_uuid])
-            if cl_rows:
-                minutes_balance = cl_rows[0]["minutes_balance"]
-                has_credits = minutes_balance > 0
+            cl_balance = num_record.get("minutes_balance")
+            if cl_balance is not None:
+                minutes_balance = cl_balance
+            else:
+                # Fallback if joined query did not return client minutes_balance (e.g. legacy tests)
+                cl_rows = await database.query("SELECT minutes_balance, name FROM clients WHERE id = $1", [client_uuid])
+                if cl_rows:
+                    minutes_balance = cl_rows[0].get("minutes_balance") or 0
+                    if not num_record.get("client_name"):
+                        num_record["client_name"] = cl_rows[0].get("name")
+            has_credits = minutes_balance > 0
 
         if not has_credits:
             logger.warning(f"INSUFFICIENT_CREDITS for phone number {number}. Balance: {minutes_balance}")
@@ -632,9 +660,20 @@ async def lookup_number(number: str):
                 }
             )
 
-        # Resolve linked agent details
-        agent_rows = await database.query("SELECT * FROM agents WHERE id = $1", [agent_uuid])
-        if not agent_rows:
+        # Resolve linked agent details from the joined row.
+        # Fallback to direct query if agent columns are missing (e.g. legacy test mocks)
+        agent_name = num_record.get("agent_name")
+        if agent_name is None and agent_uuid:
+            agent_rows = await database.query("SELECT * FROM agents WHERE id = $1", [agent_uuid])
+            if agent_rows:
+                ag_data = agent_rows[0]
+                num_record.update(ag_data)
+                agent_name = ag_data.get("name") or ag_data.get("agent_name")
+                num_record["agent_name"] = agent_name
+                num_record["agent_status"] = ag_data.get("status")
+                num_record["agent_type"] = ag_data.get("call_type")
+
+        if agent_name is None:
             logger.error(f"INTERNAL_ERROR: Agent {agent_uuid} referenced by phone number {number} not found in database.")
             raise HTTPException(
                 status_code=500,
@@ -645,17 +684,20 @@ async def lookup_number(number: str):
                 }
             )
 
-        agent_record = agent_rows[0]
-        agent_name = agent_record["name"]
-        agent_status = agent_record["status"]
-        agent_type = agent_record["call_type"] or "general"
-        prompt = agent_record["activity_description"] or agent_record["use_case"] or f"You are {agent_name}. Help the caller."
+        agent_status = num_record.get("agent_status") or num_record.get("status")
+        agent_type = num_record.get("agent_type") or num_record.get("call_type") or "general"
+        prompt = (
+            num_record.get("activity_description")
+            or num_record.get("use_case")
+            or f"You are {agent_name}. Help the caller."
+        )
 
         result = {
             "exists": True,
             "has_credits": has_credits,
             "minutes_balance": minutes_balance,
             "client_id": str(client_uuid) if client_uuid else None,
+            "client_name": num_record.get("client_name"),
             "agent_id": str(agent_uuid),
             "agent_name": agent_name,
             "agent_status": agent_status,
@@ -663,7 +705,16 @@ async def lookup_number(number: str):
             "prompt": prompt,
             "telephony_configuration_id": str(telephony_config_uuid) if telephony_config_uuid else None,
             "phone_number": canonical_number,
-            "provider": provider
+            "provider": provider,
+            "tool_ids": num_record.get("tool_ids"),
+            "voice_name": num_record.get("voice_name"),
+            "voice_gender": num_record.get("voice_gender"),
+            "tts_provider": num_record.get("tts_provider"),
+            "tts_model": num_record.get("tts_model"),
+            "tts_voice_id": num_record.get("tts_voice_id"),
+            "tts_voice_name": num_record.get("tts_voice_name"),
+            "custom_guardrails": num_record.get("custom_guardrails"),
+            "knowledge_items": num_record.get("knowledge_items")
         }
 
         # Cache the successful routing lookup

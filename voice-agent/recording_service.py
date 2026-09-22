@@ -12,6 +12,20 @@ from livekit.protocol import egress, room
 from config import get_settings
 
 logger = logging.getLogger(__name__)
+class S3VerificationResult:
+    """Result of S3 verification containing boolean status and ContentLength."""
+    def __init__(self, verified: bool, size: int = 0):
+        self.verified = bool(verified)
+        self.size = int(size)
+
+    def __bool__(self):
+        return self.verified
+
+    def __iter__(self):
+        return iter((self.verified, self.size))
+
+    def __repr__(self):
+        return f"S3VerificationResult(verified={self.verified}, size={self.size})"
 
 
 class RecordingService:
@@ -299,6 +313,7 @@ class RecordingService:
             Number of egress sessions cleaned up
         """
         cleaned_count = 0
+        client = None
         try:
             client = self._get_client()
             response = await client.egress.list_egress(egress.ListEgressRequest())
@@ -324,10 +339,17 @@ class RecordingService:
         except Exception as e:
             logger.error(f"Failed to cleanup orphaned egress for room {room_name}: {e}")
             return 0
-    
-    async def verify_s3_upload(self, s3_key: str, max_retries: int = 3, retry_delay: float = 1.0) -> bool:
+        finally:
+            # Always close the client to prevent unclosed session warnings
+            if client is not None:
+                try:
+                    await client.aclose()
+                    logger.debug("LiveKit API client closed after orphaned egress cleanup")
+                except Exception as close_err:
+                    logger.debug(f"Error closing LiveKit client: {close_err}")
+    async def verify_s3_upload(self, s3_key: str, max_retries: int = 3, retry_delay: float = 1.0) -> S3VerificationResult:
         """
-        Verify that a recording has been uploaded to S3.
+        Verify that a recording has been uploaded to S3 and return verification result with size.
         Retries with bounded backoff to account for egress upload delay and S3 eventual consistency.
         
         Args:
@@ -336,7 +358,7 @@ class RecordingService:
             retry_delay: Initial delay between retries in seconds (default 1.0s)
             
         Returns:
-            True if file exists in S3, False otherwise
+            S3VerificationResult with .verified and .size attributes (evaluates as boolean).
         """
         import boto3
         
@@ -353,13 +375,14 @@ class RecordingService:
             for attempt in range(max_retries):
                 try:
                     # Use asyncio.to_thread to avoid blocking event loop
-                    await asyncio.to_thread(
+                    head_res = await asyncio.to_thread(
                         s3_client.head_object,
                         Bucket=self.settings.s3_bucket_name,
                         Key=s3_key
                     )
-                    logger.info(f"[S3_VERIFY] verified {s3_key} (attempt {attempt + 1}/{max_retries})")
-                    return True
+                    content_length = head_res.get("ContentLength", 0) if isinstance(head_res, dict) else 0
+                    logger.info(f"[S3_VERIFY] verified {s3_key} (attempt {attempt + 1}/{max_retries}) size={content_length}")
+                    return S3VerificationResult(True, content_length)
                 except Exception as e:
                     # Distinguish pending verification from definitely failed
                     if attempt < max_retries - 1:
@@ -373,13 +396,13 @@ class RecordingService:
                         logger.warning(
                             f"[S3_VERIFY] recording upload definitely failed after {max_retries} attempts for {s3_key}: {e}"
                         )
-                        return False
+                        return S3VerificationResult(False, 0)
             
-            return False
+            return S3VerificationResult(False, 0)
             
         except Exception as e:
             logger.error(f"[S3_VERIFY] Failed to initialize S3 client or verify upload: {e}", exc_info=True)
-            return False
+            return S3VerificationResult(False, 0)
     
     async def close(self):
         """No-op, connections are handled via async context manager on demand."""

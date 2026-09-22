@@ -85,6 +85,7 @@ class LiveKitSipService:
                 trunk_info = lk_api.SIPInboundTrunkInfo(
                     name=f"Trunk - {name} ({number})",
                     numbers=numbers_list,
+                    include_headers=lk_api.SIPHeaderOptions.SIP_X_HEADERS,
                 )
             else:
                 auth_password = safe_decrypt(sip_config.get("sip_password") or sip_config.get("password") or "")
@@ -373,6 +374,7 @@ class LiveKitSipService:
                 trunk_info = lk_api.SIPInboundTrunkInfo(
                     name=f"Trunk - {name} ({number})",
                     numbers=numbers_list,
+                    include_headers=lk_api.SIPHeaderOptions.SIP_X_HEADERS,
                 )
             else:
                 auth_password = safe_decrypt(sip_config.get("sip_password") or sip_config.get("password") or "")

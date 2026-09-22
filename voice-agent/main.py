@@ -120,10 +120,31 @@ app = FastAPI(
 # Configuration and Mounts
 
 
+def build_cors_origins() -> list:
+    """
+    Build the CORS origin allowlist from the configured frontend/backend URLs.
+
+    Origins are derived at runtime from FRONTEND_URL and BACKEND_URL rather than
+    being hardcoded or using a wildcard regex. Only scheme://netloc is used.
+    """
+    settings = get_settings()
+    origins = []
+    for url in (settings.frontend_url, settings.backend_url):
+        if not url:
+            continue
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.scheme and parsed.netloc:
+            origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+            if origin not in origins:
+                origins.append(origin)
+    return origins
+
+
 # 1. Mount CORS Middlewares (Express settings replication)
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex="https?://.*",
+    allow_origins=build_cors_origins(),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Request-ID"],

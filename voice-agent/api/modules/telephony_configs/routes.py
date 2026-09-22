@@ -27,9 +27,136 @@ from api.modules.telephony_configs.schemas import (
 )
 from api.modules.telephony_configs import db_service
 from api.modules.phone_numbers.livekit_sip import livekit_sip_service
+from api.modules.telephony_configs import inbound_sip_bridge
+from api.utils.phone import normalize_phone_number
 
 router = APIRouter()
 logger = logging.getLogger("voice-agent.api.telephony_configs")
+
+_sip_bridge_tasks = set()
+
+
+def _schedule_inbound_sip_bridge(caller_id: str, metadata: str, agent_name: str) -> None:
+    task = asyncio.create_task(
+        inbound_sip_bridge.ensure_inbound_sip_agent_dispatch(
+            caller_id=caller_id,
+            metadata=metadata,
+            agent_name=agent_name,
+        )
+    )
+    _sip_bridge_tasks.add(task)
+    task.add_done_callback(_sip_bridge_tasks.discard)
+    logger.info(f"Scheduled inbound SIP bridge for caller '{caller_id}' (agent '{agent_name}')")
+
+
+class OutboundDialGuard:
+    """Idempotency guard against duplicate/double outbound dials.
+
+    Serializes concurrent `initiate-call` requests keyed on
+    (client_id, config_id, destination). If an identical dial is already in
+    flight, a second request is suppressed instead of dialing the phone twice.
+    """
+
+    def __init__(self) -> None:
+        self._state: Dict[str, int] = {}
+        self._global = asyncio.Lock()
+
+    def _key(self, client_id: str, config_id: str, dest_number: str) -> str:
+        canonical = normalize_phone_number(dest_number) or str(dest_number).strip()
+        return f"{client_id}:{config_id}:{canonical}"
+
+    async def try_begin(self, client_id: str, config_id: str, dest_number: str) -> bool:
+        """Return True if the caller may dial; False if an identical dial is in flight."""
+        key = self._key(client_id, config_id, dest_number)
+        async with self._global:
+            count = self._state.get(key, 0)
+            if count > 0:
+                return False
+            self._state[key] = count + 1
+            return True
+
+    async def end(self, client_id: str, config_id: str, dest_number: str) -> None:
+        """Release the in-flight marker for a dial that has finished."""
+        key = self._key(client_id, config_id, dest_number)
+        async with self._global:
+            count = self._state.get(key, 0)
+            if count > 1:
+                self._state[key] = count - 1
+            else:
+                self._state.pop(key, None)
+
+    async def clear(self) -> None:
+        """Reset all in-flight markers (used by tests)."""
+        async with self._global:
+            self._state.clear()
+
+
+_outbound_dial_guard = OutboundDialGuard()
+
+
+class AgentDispatchError(Exception):
+    """Raised when the LiveKit agent worker cannot be dispatched to the room.
+
+    Outbound dialing must abort when this happens: placing the call with no
+    agent available to answer would waste the call and confuse the recipient.
+    """
+
+
+async def _dispatch_livekit_sip_participant(
+    trunk_id_to_use: str,
+    settings,
+    dest_number: str,
+    from_number: Optional[str],
+    metadata_payload: str,
+) -> Optional[str]:
+    lk = None
+    try:
+        from livekit import api as lk_api
+        lk = lk_api.LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret)
+        room_name = f"call-{uuid.uuid4().hex[:8]}"
+
+        # Dispatch agent worker to the room
+        if settings.livekit_agent_name:
+            try:
+                await lk.agent_dispatch.create_dispatch(
+                    lk_api.CreateAgentDispatchRequest(
+                        agent_name=settings.livekit_agent_name,
+                        room=room_name,
+                        metadata=metadata_payload
+                    )
+                )
+                logger.info(f"Dispatched agent '{settings.livekit_agent_name}' to room '{room_name}' with metadata: {metadata_payload}")
+            except Exception as dispatch_err:
+                # P1-10: never dial the phone when the agent worker could not be
+                # dispatched - nobody would answer the call.
+                logger.error(
+                    f"Agent dispatch to room {room_name} failed ({dispatch_err}); "
+                    f"aborting outbound dial to {dest_number} to avoid ringing with no agent."
+                )
+                raise AgentDispatchError(str(dispatch_err)) from dispatch_err
+
+        # Initiate SIP Participant Outbound Call
+        sip_req = lk_api.CreateSIPParticipantRequest(
+            sip_trunk_id=trunk_id_to_use,
+            sip_call_to=dest_number,
+            sip_number=from_number or "",
+            room_name=room_name,
+            participant_identity=f"sip-{dest_number}",
+            participant_name=dest_number,
+            participant_metadata=metadata_payload,
+            play_ringtone=True,
+            wait_until_answered=True,
+        )
+        res = await lk.sip.create_sip_participant(sip_req)
+        await lk.aclose()
+        return res.participant_id
+    except Exception as err:
+        if lk:
+            try:
+                await lk.aclose()
+            except Exception:
+                pass
+        raise err
 
 # Metadata definitions for Twilio and Vobiz ONLY
 TWILIO_METADATA = {
@@ -939,10 +1066,6 @@ async def initiate_call(
     req: InitiateCallRequest,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    import httpx
-    from config import get_settings
-    from api import database
-
     if not req.phone_number or not req.phone_number.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1023,51 +1146,51 @@ async def initiate_call(
         or raw_creds.get("twilio_sip_trunk_id")
     )
 
-    async def _dispatch_livekit_sip_participant(trunk_id_to_use: str) -> Optional[str]:
-        lk = None
-        try:
-            from livekit import api as lk_api
-            lk = lk_api.LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret)
-            room_name = f"call-{uuid.uuid4().hex[:8]}"
+    # 5. Guard against duplicate/double dials, then dispatch the call
+    #    (LiveKit SIP first, Twilio REST fallback) via _dispatch_outbound_call.
+    if not await _outbound_dial_guard.try_begin(client_id, config["id"], dest_number):
+        logger.info(f"Duplicate outbound dial suppressed for {dest_number} on config {config['id']}")
+        return ApiResponse.success(
+            message=f"Duplicate call request for {dest_number} is already in progress; not dialing again."
+        )
+    try:
+        result_message = await _dispatch_outbound_call(
+            config=config,
+            phone_obj=phone_obj,
+            from_number=from_number,
+            dest_number=dest_number,
+            agent_name=agent_name,
+            metadata_payload=metadata_payload,
+            provider=provider,
+            raw_creds=raw_creds,
+            sip_trunk_id=sip_trunk_id,
+            req=req,
+            settings=settings,
+        )
+        return ApiResponse.success(message=result_message)
+    finally:
+        await _outbound_dial_guard.end(client_id, config["id"], dest_number)
 
-            # Dispatch agent worker to the room
-            if settings.livekit_agent_name:
-                try:
-                    await lk.agent_dispatch.create_dispatch(
-                        lk_api.CreateAgentDispatchRequest(
-                            agent_name=settings.livekit_agent_name,
-                            room=room_name,
-                            metadata=metadata_payload
-                        )
-                    )
-                    logger.info(f"Dispatched agent '{settings.livekit_agent_name}' to room '{room_name}' with metadata: {metadata_payload}")
-                except Exception as dispatch_err:
-                    logger.warning(f"Could not dispatch agent to room {room_name}: {dispatch_err}")
 
-            # Initiate SIP Participant Outbound Call
-            sip_req = lk_api.CreateSIPParticipantRequest(
-                sip_trunk_id=trunk_id_to_use,
-                sip_call_to=dest_number,
-                sip_number=from_number or "",
-                room_name=room_name,
-                participant_identity=f"sip-{dest_number}",
-                participant_name=dest_number,
-                participant_metadata=metadata_payload,
-                play_ringtone=True,
-                wait_until_answered=True,
-            )
-            res = await lk.sip.create_sip_participant(sip_req)
-            await lk.aclose()
-            return res.participant_id
-        except Exception as err:
-            if lk:
-                try:
-                    await lk.aclose()
-                except Exception:
-                    pass
-            raise err
+async def _dispatch_outbound_call(
+    config: Dict[str, Any],
+    phone_obj: Optional[Dict[str, Any]],
+    from_number: Optional[str],
+    dest_number: str,
+    agent_name: str,
+    metadata_payload: str,
+    provider: str,
+    raw_creds: Dict[str, Any],
+    sip_trunk_id: str,
+    req: InitiateCallRequest,
+    settings,
+) -> str:
+    """Run the LiveKit SIP or Twilio outbound dial and return a success message.
 
-    # 5. Initiate via LiveKit SIP API if outbound trunk is configured
+    Raises HTTPException with an actionable message on failure. Never dials the
+    phone twice; duplicate concurrent dials are filtered by OutboundDialGuard.
+    """
+    # 6. Initiate via LiveKit SIP API if outbound trunk is configured
     if settings.livekit_url and settings.livekit_api_key and settings.livekit_api_secret:
         reconciled = False
         current_trunk_id = sip_trunk_id
@@ -1092,10 +1215,21 @@ async def initiate_call(
 
         if current_trunk_id:
             try:
-                participant_id = await _dispatch_livekit_sip_participant(current_trunk_id)
-                return ApiResponse.success(
-                    message=f"Call initiated to {dest_number} with agent '{agent_name}' via LiveKit SIP (Participant ID: {participant_id})"
+                participant_id = await _dispatch_livekit_sip_participant(
+                    current_trunk_id,
+                    settings,
+                    dest_number,
+                    from_number,
+                    metadata_payload,
                 )
+                return f"Call initiated to {dest_number} with agent '{agent_name}' via LiveKit SIP (Participant ID: {participant_id})"
+            except AgentDispatchError as dispatch_fail:
+                # The agent could not be dispatched, so nobody could answer.
+                # Abort instead of falling through to another dialing provider.
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Agent dispatch failed; outbound call to {dest_number} was NOT placed. ({dispatch_fail})"
+                ) from dispatch_fail
             except Exception as lk_err:
                 err_str = str(lk_err).lower()
                 is_trunk_not_found = (
@@ -1123,14 +1257,18 @@ async def initiate_call(
                         )
                         logger.info(f"Updated lk_outbound_sip_trunk_id to {new_outbound_id} in DB. Retrying LiveKit SIP dispatch (1 retry only)...")
                         try:
-                            participant_id = await _dispatch_livekit_sip_participant(new_outbound_id)
-                            return ApiResponse.success(
-                                message=f"Call initiated to {dest_number} with agent '{agent_name}' via LiveKit SIP (Participant ID: {participant_id})"
+                            participant_id = await _dispatch_livekit_sip_participant(
+                                new_outbound_id,
+                                settings,
+                                dest_number,
+                                from_number,
+                                metadata_payload,
                             )
+                            return f"Call initiated to {dest_number} with agent '{agent_name}' via LiveKit SIP (Participant ID: {participant_id})"
                         except Exception as retry_err:
                             logger.error(f"Retry after outbound trunk reconciliation failed: {retry_err}")
 
-    # 6. Fallback to Twilio REST API if provider is Twilio
+    # 7. Fallback to Twilio REST API if provider is Twilio
     # Use credentials strictly from selected telephony configuration
     account_sid = raw_creds.get("account_sid")
     raw_auth_token = raw_creds.get("auth_token")
@@ -1151,10 +1289,53 @@ async def initiate_call(
             )
 
         url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Calls.json"
-        
-        # If Twilio SIP domain is set in credentials or defaults, bridge call
-        sip_domain = raw_creds.get("sip_domain") or settings.twilio_sip_domain or "42voice.pstn.sydney.twilio.com"
-        twiml = f"<Response><Dial><Sip>sip:{dest_number}@{sip_domain}</Sip></Dial></Response>"
+
+        # Resolve the public LiveKit SIP ingress endpoint
+        livekit_sip_uri = (
+            settings.livekit_sip_public_uri
+            or raw_creds.get("livekit_sip_uri")
+            or raw_creds.get("origination_uri")
+        )
+
+        # If not in settings or raw_creds, resolve dynamically from Twilio trunk Origination URL
+        if not livekit_sip_uri and raw_creds.get("twilio_trunk_sid"):
+            try:
+                client = Client(account_sid, auth_token)
+                trunk_sid_str = str(raw_creds.get("twilio_trunk_sid"))
+                ou_sid = raw_creds.get("twilio_origination_url_sid")
+                if ou_sid:
+                    try:
+                        ou = client.trunking.v1.trunks(trunk_sid_str).origination_urls(str(ou_sid)).fetch()
+                        if ou and ou.sip_url:
+                            livekit_sip_uri = str(ou.sip_url).strip()
+                    except Exception:
+                        pass
+                if not livekit_sip_uri:
+                    orig_urls = client.trunking.v1.trunks(trunk_sid_str).origination_urls.list(limit=5)
+                    for ou_item in orig_urls:
+                        if getattr(ou_item, "enabled", True) and getattr(ou_item, "sip_url", None):
+                            livekit_sip_uri = str(ou_item.sip_url).strip()
+                            break
+            except Exception as ou_err:
+                logger.warning(f"Could not resolve Origination URL from Twilio trunk: {ou_err}")
+
+        if not livekit_sip_uri:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="LiveKit SIP public endpoint is not configured (LIVEKIT_SIP_PUBLIC_URI). Outbound call cannot be bridged to LiveKit."
+            )
+
+        clean_endpoint = livekit_sip_uri.strip()
+        if clean_endpoint.lower().startswith("sip:"):
+            clean_endpoint = clean_endpoint[4:]
+
+        # Bridge call to LiveKit Inbound SIP Trunk matching caller_id
+        sip_destination = f"sip:{caller_id}@{clean_endpoint}"
+        if req.agent_id:
+            separator = "&" if "?" in sip_destination else "?"
+            sip_destination = f"{sip_destination}{separator}X-Agent-Id={req.agent_id}"
+
+        twiml = f"<Response><Dial><Sip>{sip_destination}</Sip></Dial></Response>"
         data = {
             "To": dest_number,
             "From": caller_id,
@@ -1168,9 +1349,15 @@ async def initiate_call(
                 if resp.status_code in (200, 201):
                     call_sid = resp_json.get("sid", "N/A")
                     logger.info(f"Twilio call dispatched successfully for Account '{account_sid}'. Call SID: {call_sid}")
-                    return ApiResponse.success(
-                        message=f"Outbound call successfully initiated to {dest_number} with agent '{agent_name}'! (Twilio Call SID: {call_sid})"
-                    )
+
+                    if settings.livekit_url and settings.livekit_api_key and settings.livekit_api_secret:
+                        _schedule_inbound_sip_bridge(
+                            caller_id=caller_id,
+                            metadata=metadata_payload,
+                            agent_name=settings.livekit_agent_name,
+                        )
+
+                    return f"Outbound call successfully initiated to {dest_number} with agent '{agent_name}'! (Twilio Call SID: {call_sid})"
                 else:
                     err_msg = resp_json.get("message") or resp_json.get("detail") or resp.text or "Twilio API error"
                     logger.error(f"Twilio call error ({resp.status_code}): {err_msg}")
@@ -1188,7 +1375,7 @@ async def initiate_call(
             )
 
     # Fallback response
-    return ApiResponse.success(message=f"Test call simulation initiated for {dest_number}. (Telephony configuration verified)")
+    return f"Test call simulation initiated for {dest_number}. (Telephony configuration verified)"
 
 
 

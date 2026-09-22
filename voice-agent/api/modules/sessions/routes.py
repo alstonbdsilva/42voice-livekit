@@ -6,10 +6,14 @@ Defines endpoints for session management, message processing, and agent handoffs
 import uuid
 import logging
 from typing import Optional, Dict, Any
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Depends
 from pydantic import BaseModel
+from typing import Dict
 
+from api import database
+from api.utils.api_response import ApiResponse
 from api.utils.errors import AppError, NotFoundError
+from api.middlewares.auth import get_current_user
 
 router = APIRouter()
 logger = logging.getLogger("voice-agent.api.sessions")
@@ -29,7 +33,7 @@ class MessageRequest(BaseModel):
 # --- Endpoints ---
 
 @router.post("/sessions")
-async def create_session(request: SessionCreate, req: Request):
+async def create_session(request: SessionCreate, req: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     """Create a new session."""
     session_manager = req.app.state.session_manager
     try:
@@ -46,7 +50,7 @@ async def create_session(request: SessionCreate, req: Request):
 
 
 @router.get("/sessions/{session_id}")
-async def get_session(session_id: str, req: Request):
+async def get_session(session_id: str, req: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     """Get session data."""
     session_manager = req.app.state.session_manager
     try:
@@ -62,7 +66,7 @@ async def get_session(session_id: str, req: Request):
 
 
 @router.delete("/sessions/{session_id}")
-async def delete_session(session_id: str, req: Request):
+async def delete_session(session_id: str, req: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     """Delete a session."""
     session_manager = req.app.state.session_manager
     try:
@@ -78,7 +82,7 @@ async def delete_session(session_id: str, req: Request):
 
 
 @router.get("/sessions/{session_id}/history")
-async def get_conversation_history(session_id: str, req: Request, limit: Optional[int] = None):
+async def get_conversation_history(session_id: str, req: Request, limit: Optional[int] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
     """Get conversation history for a session."""
     session_manager = req.app.state.session_manager
     try:
@@ -95,8 +99,38 @@ async def get_conversation_history(session_id: str, req: Request, limit: Optiona
         raise AppError(f"Failed to retrieve conversation history: {e}", 500, "HISTORY_RETRIEVAL_FAILED")
 
 
+@router.get("/messages")
+async def list_messages(req: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """List recent conversation messages from the inbox."""
+    try:
+        rows = await database.query(
+            """
+            SELECT id, customer_name, customer_contact, channel, summary, started_at
+            FROM conversations
+            ORDER BY started_at DESC
+            LIMIT 100
+            """
+        )
+        messages = []
+        for row in rows:
+            messages.append({
+                "id": str(row["id"]),
+                "createdAt": row["started_at"],
+                "from": row["customer_name"] or row["customer_contact"] or "Unknown",
+                "channel": row["channel"],
+                "preview": row["summary"] or row["customer_contact"] or "",
+                "unread": False,
+            })
+        return ApiResponse.success(data=messages)
+    except AppError:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to list messages: {e}")
+        raise AppError(f"Failed to list messages: {e}", 500, "MESSAGES_LIST_FAILED")
+
+
 @router.post("/messages")
-async def process_message(request: MessageRequest, req: Request):
+async def process_message(request: MessageRequest, req: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     """Process a text message through the agent system."""
     session_manager = req.app.state.session_manager
     orchestrator = req.app.state.orchestrator
@@ -126,7 +160,7 @@ async def process_message(request: MessageRequest, req: Request):
 
 
 @router.post("/agents/handoff")
-async def request_handoff(session_id: str, target_agent: str, req: Request):
+async def request_handoff(session_id: str, target_agent: str, req: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     """Request a handoff to a specific agent."""
     session_manager = req.app.state.session_manager
     orchestrator = req.app.state.orchestrator
@@ -148,7 +182,7 @@ async def request_handoff(session_id: str, target_agent: str, req: Request):
 
 
 @router.post("/agents/return-to-orchestrator")
-async def return_to_orchestrator(session_id: str, req: Request):
+async def return_to_orchestrator(session_id: str, req: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     """Return control to the orchestrator."""
     session_manager = req.app.state.session_manager
     orchestrator = req.app.state.orchestrator

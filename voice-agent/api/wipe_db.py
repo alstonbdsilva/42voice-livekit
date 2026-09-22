@@ -53,4 +53,16 @@ async def wipe_db() -> None:
 
 
 if __name__ == "__main__":
+    # Safety guard: refuse to run when the environment looks like production
+    # unless an explicit override is provided. Prevents accidental destructive
+    # wipes against a live database.
+    environment = os.getenv("ENVIRONMENT", "development").lower()
+    override = os.getenv("WIPE_DB_OVERRIDE", "0") == "1"
+    if environment in ("production", "prod") and not override:
+        logger.critical(
+            "Refusing to wipe the database: ENVIRONMENT=%s. "
+            "Set WIPE_DB_OVERRIDE=1 to run this script explicitly.",
+            environment,
+        )
+        sys.exit(1)
     asyncio.run(wipe_db())

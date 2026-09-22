@@ -3,6 +3,7 @@ LiveKit Voice AI Agent Worker.
 Listens for SIP room creation and manages the AI audio pipeline.
 """
 import asyncio
+import contextlib
 import re
 import logging
 import sys
@@ -19,7 +20,6 @@ load_dotenv()
 
 import json
 import httpx
-import redis
 from uuid import UUID
 from enum import Enum
 from datetime import datetime, date, timezone
@@ -41,20 +41,82 @@ from livekit.agents import (
     WorkerOptions,
     cli,
     function_tool,
+    stt,
     TurnHandlingOptions,
 )
-from livekit.plugins import deepgram, openai, silero
-# ElevenLabs disabled - using OpenAI TTS only for lowest latency
-# from livekit.plugins import elevenlabs
+from livekit.plugins import deepgram, elevenlabs, openai, silero
 
 from config import get_settings
 from transcript_service import transcript_service
 
 logger = logging.getLogger("voice-agent")
 
+_shared_http_client: Optional[httpx.AsyncClient] = None
+_shared_http_client_loop: Optional[asyncio.AbstractEventLoop] = None
 
-# ElevenLabs validation disabled - using OpenAI TTS only
+
+def get_shared_http_client() -> httpx.AsyncClient:
+    """Return a shared, connection-pooled AsyncClient for worker internal requests.
+    Safely re-creates client if closed or if running on a new event loop.
+    """
+    global _shared_http_client, _shared_http_client_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    if (
+        _shared_http_client is None
+        or _shared_http_client.is_closed
+        or _shared_http_client_loop != current_loop
+    ):
+        _shared_http_client = httpx.AsyncClient(
+            timeout=10.0,
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=300.0)
+        )
+        _shared_http_client_loop = current_loop
+    return _shared_http_client
+
+
+
 from name_service import build_stt_keywords, parse_caller_name, NameCaptureState
+
+
+class _VoiceTiming:
+    """Lightweight per-call monotonic timing for the live voice pipeline.
+
+    Aggregates VAD / STT / LLM / TTS / playback milestones and emits a single
+    [VOICE_TIMING] summary line per agent turn plus focused deltas. Lean by
+    design: no per-frame or per-token logging.
+    """
+
+    def __init__(self) -> None:
+        self._turn: Dict[str, Optional[float]] = {}
+        self.last_user_speech_end: Optional[float] = None
+
+    def mark(self, key: str) -> None:
+        self._turn[key] = time.monotonic()
+
+    def delta(self, key_a: str, key_b: str) -> Optional[int]:
+        ta = self._turn.get(key_a)
+        tb = self._turn.get(key_b)
+        if ta is None or tb is None:
+            return None
+        return round((tb - ta) * 1000)
+
+    def delta_from(self, key: str, base: Optional[float]) -> Optional[int]:
+        if base is None:
+            return None
+        t = self._turn.get(key)
+        if t is None:
+            return None
+        return round((t - base) * 1000)
+
+    def reset_turn(self) -> None:
+        self._turn = {}
+
+
+def _fmt_ms(value: Optional[int]) -> str:
+    return "n/a" if value is None else f"{value}ms"
 
 
 def make_json_safe(obj: Any, parent_key: str = "") -> Any:
@@ -118,6 +180,115 @@ def sanitize_agent_prompt(prompt_text: Optional[str]) -> str:
         cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE)
         
     return cleaned.strip()
+
+
+def _build_tts(settings, agent_data: Optional[Dict[str, Any]] = None):
+    """Build the configured TTS provider strictly from DB/UI agent configuration.
+
+    The UI is the single source of truth for TTS provider, model, and voice.
+    .env / settings contain ONLY API credentials (ELEVENLABS_API_KEY, CARTESIA_API_KEY).
+    There are NO hidden defaults or silent fallbacks for provider, model, or voice.
+    """
+    if not agent_data or not isinstance(agent_data, dict):
+        raise ValueError(
+            "[TTS] Agent configuration is missing or invalid. TTS provider, model, and voice "
+            "must be configured in the agent settings via the UI."
+        )
+
+    # 1. Resolve & Validate Provider
+    raw_provider = agent_data.get("tts_provider")
+    if not raw_provider or not str(raw_provider).strip():
+        raise ValueError(
+            "[TTS] TTS provider is not configured for this agent. "
+            "Please select a TTS provider (ElevenLabs or Cartesia) in the agent settings."
+        )
+    provider = str(raw_provider).strip().lower()
+
+    # 2. Resolve Model and Voice from agent_data
+    agent_model = agent_data.get("tts_model")
+    agent_voice_id = (
+        agent_data.get("tts_voice_id")
+        or agent_data.get("voice_id")
+        or agent_data.get("voice")
+        or agent_data.get("tts_voice")
+    )
+    agent_voice_name = agent_data.get("tts_voice_name") or agent_data.get("voice_name") or "default"
+
+    if isinstance(agent_model, str):
+        agent_model = agent_model.strip()
+    if isinstance(agent_voice_id, str):
+        agent_voice_id = agent_voice_id.strip()
+
+    # 3. Provider-specific strict validation and construction
+    if provider == "elevenlabs":
+        if not agent_model:
+            raise ValueError(
+                "[TTS] ElevenLabs TTS model is not configured for this agent. "
+                "Please select a model in the agent settings."
+            )
+        if not agent_voice_id:
+            raise ValueError(
+                "[TTS] ElevenLabs TTS voice_id is not configured for this agent. "
+                "Please select a voice in the agent settings."
+            )
+
+        api_key = getattr(settings, "elevenlabs_api_key", None)
+        if not api_key:
+            raise RuntimeError(
+                "[TTS] ELEVENLABS_API_KEY is not configured on the server. Set it in .env to use ElevenLabs TTS."
+            )
+
+        logger.info(
+            f"[TTS_INIT] provider=elevenlabs model={agent_model} "
+            f"voice_id={agent_voice_id} voice_name={agent_voice_name}"
+        )
+
+        return elevenlabs.TTS(
+            api_key=api_key,
+            voice_id=agent_voice_id,
+            model=agent_model,
+        )
+
+    if provider == "cartesia":
+        if not agent_model:
+            raise ValueError(
+                "[TTS] Cartesia TTS model is not configured for this agent. "
+                "Please select a model in the agent settings."
+            )
+        if not agent_voice_id:
+            raise ValueError(
+                "[TTS] Cartesia TTS voice_id is not configured for this agent. "
+                "Please select a voice in the agent settings."
+            )
+
+        cartesia_api_key = getattr(settings, "cartesia_api_key", None)
+        if not cartesia_api_key:
+            raise RuntimeError(
+                "[TTS] CARTESIA_API_KEY is not configured on the server. Set it in .env to use Cartesia TTS."
+            )
+
+        logger.info(
+            f"[TTS_INIT] provider=cartesia model={agent_model} "
+            f"voice_id={agent_voice_id} voice_name={agent_voice_name}"
+        )
+
+        try:
+            from livekit.plugins import cartesia as _cartesia
+        except ImportError:
+            raise RuntimeError(
+                "[TTS] TTS provider is cartesia but 'livekit.plugins.cartesia' is not installed in this environment."
+            )
+
+        return _cartesia.TTS(
+            api_key=cartesia_api_key,
+            voice=agent_voice_id,
+            model=agent_model,
+        )
+
+    raise ValueError(
+        f"[TTS] Unsupported TTS provider '{provider}'. "
+        f"Supported providers: 'elevenlabs', 'cartesia'. Configure the agent via the UI."
+    )
 
 
 class VoiceAgent(Agent):
@@ -231,27 +402,28 @@ class VoiceAgent(Agent):
             "language": stt_lang,
             "smart_format": True,
             "interim_results": True,
+            # Deepgram only closes an utterance (is_final/speech_final) after
+            # this much trailing silence. The tiny 25ms default caused ordinary
+            # word pauses inside a phrase (e.g. "This is Lopez.") to be
+            # finalized as several separate utterances, producing multiple
+            # user turns and duplicated transcript text per statement.
+            "endpointing_ms": 500,
         }
         if stt_keywords:
             stt_kwargs["keywords"] = stt_keywords
 
-        # Resolve voice for OpenAI TTS if provided in agent_data, default to "alloy" (or "nova")
-        tts_voice = "alloy"
-        valid_openai_voices = {"alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"}
-        if agent_data and isinstance(agent_data, dict):
-            cand_voice = agent_data.get("voice_id") or agent_data.get("voice") or agent_data.get("tts_voice")
-            if cand_voice and isinstance(cand_voice, str) and cand_voice.lower() in valid_openai_voices:
-                tts_voice = cand_voice.lower()
-
+        # Resolve TTS provider/model/voice (ElevenLabs or Cartesia) from
+        # agent_data first, falling back to environment defaults.
+        tts = _build_tts(self.settings, agent_data)
         super().__init__(
             vad=vad_instance,
             stt=deepgram.STT(**stt_kwargs),
-            llm=openai.LLM(model="gpt-4o-mini"),
-            tts=openai.TTS(
-                model="tts-1",  # OpenAI's lowest latency TTS model
-                voice=tts_voice,
-                speed=1.05      # Slight speed bump reduces turnaround latency
+            llm=openai.LLM(
+                model=self.settings.openai_model,
+                api_key=self.settings.openai_api_key,
+                temperature=self.settings.openai_temperature,
             ),
+            tts=tts,
             instructions=instructions,
             tools=filtered_tools
         )
@@ -260,7 +432,288 @@ class VoiceAgent(Agent):
         
         # Track if greeting has been sent to prevent duplicate greetings
         self._greeting_sent = False
+
+        # Per-call voice pipeline timing harness (see _instrument_voice_timing)
+        self._vt = _VoiceTiming()
     
+    def stt_node(self, audio, model_settings):
+        return self._filtered_stt_events(audio, model_settings)
+
+    async def _filtered_stt_events(self, audio, model_settings):
+        """Wrap the default STT node to fix two production issues:
+
+        1. Deepgram emits one FINAL per endpointing silence window, so a
+           phrase containing pauses over 25ms produced several FINAL events
+           that were each accumulated into the user turn ("This This is This
+           is Lopez.") and could commit multiple turns per statement. Finals
+           are now coalesced per utterance and a single complete FINAL is
+           emitted when the utterance ends.
+
+        2. STT events produced while the agent is speaking (telco echo /
+           crosstalk on the PSTN path) used to reach the activity's
+           audio-activity interruption handler and pause or cancel the
+           agent's TTS mid-sentence. Those events are now dropped while the
+           agent is speaking; real barge-in is unaffected because it is
+           driven by VAD interruption, not by STT events.
+        """
+        raw_res = Agent.default.stt_node(self, audio, model_settings)
+        raw_generator = await raw_res if asyncio.iscoroutine(raw_res) else raw_res
+        iterator = raw_generator.__aiter__()
+
+        async def _fetch_next(it):
+            return await it.__anext__()
+
+        get_next = asyncio.create_task(_fetch_next(iterator))
+        timer_task: Optional[asyncio.Task] = None
+        pending_final: Optional[stt.SpeechEvent] = None
+        utterance_interim_at: Optional[float] = None
+        last_emitted_final_text: Optional[str] = None
+        speech_ended: bool = False
+
+        def _agent_speaking() -> bool:
+            try:
+                return self.session.agent_state == "speaking"
+            except Exception:
+                return False
+
+        def _cancel_timer():
+            nonlocal timer_task
+            if timer_task is not None:
+                timer_task.cancel()
+                timer_task = None
+
+        def _rearm_timer():
+            nonlocal timer_task
+            _cancel_timer()
+            # 150ms debounce minimal coalescing delay for rapid trailing Deepgram finals
+            timer_task = asyncio.create_task(asyncio.sleep(0.15))
+
+        try:
+            while True:
+                wait_for = [get_next]
+                if timer_task is not None:
+                    wait_for.append(timer_task)
+                done, _ = await asyncio.wait(wait_for, return_when=asyncio.FIRST_COMPLETED)
+
+                if timer_task in done:
+                    if pending_final is not None:
+                        text = pending_final.alternatives[0].text.strip() if pending_final.alternatives else ""
+                        logger.info(
+                            f"[STT_FIX] final_flush timer elapsed=0.150s "
+                            f"interim_delta={time.perf_counter() - (utterance_interim_at or time.perf_counter()):.3f}s "
+                            f"text=\"{text}\""
+                        )
+                        last_emitted_final_text = text
+                        yield pending_final
+                        pending_final = None
+                    _cancel_timer()
+                    continue
+
+                try:
+                    ev = get_next.result()
+                except StopAsyncIteration:
+                    if pending_final is not None:
+                        yield pending_final
+                    break
+
+                get_next = asyncio.create_task(_fetch_next(iterator))
+
+                if not isinstance(ev, stt.SpeechEvent):
+                    yield ev
+                    continue
+
+                speaking = _agent_speaking()
+
+                if ev.type == stt.SpeechEventType.START_OF_SPEECH:
+                    speech_ended = False
+                    pending_final = None
+                    last_emitted_final_text = None
+                    utterance_interim_at = None
+                    _cancel_timer()
+                    if not speaking:
+                        yield ev
+                    continue
+
+                if ev.type == stt.SpeechEventType.END_OF_SPEECH:
+                    speech_ended = True
+                    if not speaking and pending_final is not None:
+                        text = pending_final.alternatives[0].text.strip() if pending_final.alternatives else ""
+                        logger.info(f"[STT_FIX] immediate final_flush on END_OF_SPEECH text=\"{text}\"")
+                        last_emitted_final_text = text
+                        yield pending_final
+                        pending_final = None
+                    _cancel_timer()
+                    if not speaking:
+                        yield ev
+                    continue
+
+                if ev.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
+                    if not ev.alternatives or not ev.alternatives[0].text.strip():
+                        _cancel_timer()
+                        continue
+                    text = ev.alternatives[0].text.strip()
+                    # Prevent duplicate final events from creating duplicate LLM requests
+                    if text == last_emitted_final_text:
+                        logger.debug(f"[STT_FIX] dropping duplicate final transcript: '{text}'")
+                        _cancel_timer()
+                        continue
+                    if speaking:
+                        pending_final = None
+                        utterance_interim_at = None
+                        _cancel_timer()
+                    elif speech_ended:
+                        logger.info(f"[STT_FIX] immediate final_flush (speech_ended) text=\"{text}\"")
+                        last_emitted_final_text = text
+                        pending_final = None
+                        _cancel_timer()
+                        yield ev
+                    else:
+                        pending_final = ev
+                        _rearm_timer()
+                    continue
+
+                if ev.type == stt.SpeechEventType.INTERIM_TRANSCRIPT:
+                    if not speaking:
+                        if utterance_interim_at is None:
+                            utterance_interim_at = time.perf_counter()
+                            logger.info(
+                                f"[STT_FIX] interim_first elapsed={time.perf_counter():.3f}s "
+                                f"text=\"{ev.alternatives[0].text}\""
+                            )
+                        # Suppress duplicates if this final text has already been emitted for this utterance
+                        cand_text = ev.alternatives[0].text.strip().lower() if ev.alternatives else ""
+                        if last_emitted_final_text and cand_text == last_emitted_final_text:
+                            pending_final = None
+                            continue
+
+                        # If speech has already ended, flush the final transcript immediately without delay
+                        if speech_ended:
+                            if timer_task is not None:
+                                timer_task.cancel()
+                                timer_task = None
+                            last_emitted_final_text = cand_text
+                            yield ev
+                            pending_final = None
+                        elif timer_task is None:
+                            # 150ms debounce window while speech continues
+                            timer_task = asyncio.create_task(asyncio.sleep(0.15))
+        finally:
+            if timer_task is not None:
+                timer_task.cancel()
+            get_next.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.gather(get_next, return_exceptions=True)
+                await raw_generator.aclose()
+
+    async def llm_node(self, chat_ctx, tools, model_settings):
+        """Thin timing wrapper over the default LLM node (behavior unchanged)."""
+        raw_res = Agent.default.llm_node(self, chat_ctx, tools, model_settings)
+        raw = await raw_res if asyncio.iscoroutine(raw_res) else raw_res
+        vt = self._vt
+        first = True
+        try:
+            async for chunk in raw:
+                if first:
+                    first = False
+                    vt.mark("llm_first_token")
+                    logger.info("[VOICE_TIMING] llm_first_token")
+                yield chunk
+            vt.mark("llm_complete")
+            logger.info("[VOICE_TIMING] llm_complete")
+        except Exception:
+            logger.info("[VOICE_TIMING] llm_error")
+            raise
+
+    async def tts_node(self, text, model_settings):
+        """Thin timing wrapper over the default TTS node (behavior unchanged)."""
+        raw_res = Agent.default.tts_node(self, text, model_settings)
+        raw = await raw_res if asyncio.iscoroutine(raw_res) else raw_res
+        vt = self._vt
+        first = True
+        try:
+            async for frame in raw:
+                if first:
+                    first = False
+                    vt.mark("tts_first_audio")
+                    logger.info("[VOICE_TIMING] tts_first_audio")
+                yield frame
+            vt.mark("tts_complete")
+            logger.info("[VOICE_TIMING] tts_complete")
+        except Exception:
+            logger.info("[VOICE_TIMING] tts_error")
+            raise
+
+    def _instrument_voice_timing(self) -> None:
+        """Wire lightweight [VOICE_TIMING] metrics to session events."""
+        self._vt = _VoiceTiming()
+        self.session.on("user_state_changed", self._on_user_state_changed_timing)
+        self.session.on("agent_state_changed", self._on_agent_state_changed_timing)
+        self.session.on("user_input_transcribed", self._on_user_input_transcribed_timing)
+        self.session.on("agent_false_interruption", self._on_false_interruption_timing)
+
+    def _on_user_state_changed_timing(self, ev) -> None:
+        vt = self._vt
+        if ev.new_state == "speaking":
+            if ev.old_state != "speaking":
+                vt.reset_turn()
+            vt.mark("vad_start")
+            vt.mark("speech_start")
+            try:
+                if self.session.agent_state == "speaking":
+                    logger.info("[VOICE_TIMING] interruption_detected barge_in")
+            except Exception:
+                pass
+        elif ev.old_state == "speaking":
+            vt.mark("vad_end")
+            vt.mark("speech_end")
+            vt.last_user_speech_end = time.monotonic()
+            logger.info("[VOICE_TIMING] user speech_end")
+
+    def _on_agent_state_changed_timing(self, ev) -> None:
+        vt = self._vt
+        if ev.new_state == "thinking" and ev.old_state in ("listening", "idle"):
+            vt.mark("llm_start")
+            d = vt.delta_from("llm_start", vt.last_user_speech_end)
+            logger.info(f"[VOICE_TIMING] llm_start speech_end_delta={_fmt_ms(d)}")
+        elif ev.new_state == "speaking":
+            vt.mark("playback_start")
+            if vt.last_user_speech_end is not None:
+                self._log_turn_summary(vt)
+        elif ev.old_state == "speaking" and ev.new_state in ("listening", "idle"):
+            vt.mark("playback_complete")
+            logger.info("[VOICE_TIMING] playback_complete")
+
+    def _on_user_input_transcribed_timing(self, ev) -> None:
+        vt = self._vt
+        if not ev.is_final:
+            if vt._turn.get("stt_first_interim") is None:
+                vt.mark("stt_first_interim")
+                d = vt.delta_from("stt_first_interim", vt.last_user_speech_end)
+                logger.info(f"[VOICE_TIMING] stt_first_interim speech_end_delta={_fmt_ms(d)}")
+        else:
+            vt.mark("stt_final")
+            d = vt.delta_from("stt_final", vt.last_user_speech_end)
+            logger.info(f"[VOICE_TIMING] stt_final speech_end_delta={_fmt_ms(d)} final=\"{ev.transcript}\"")
+
+    def _on_false_interruption_timing(self, ev) -> None:
+        logger.info(f"[VOICE_TIMING] interruption_detected false_interruption resumed={ev.resumed}")
+
+    def _log_turn_summary(self, vt: _VoiceTiming) -> None:
+        ttfa = vt.delta_from("playback_start", vt.last_user_speech_end)
+        if ttfa is not None:
+            if not hasattr(self, '_turn_latencies'):
+                self._turn_latencies = []
+            self._turn_latencies.append(ttfa)
+        logger.info(
+            f"[VOICE_TIMING] [session={self.room_name} agent={self.agent_id or self.agent_name}] "
+            f"TTFA={_fmt_ms(ttfa)} | "
+            f"speech_end_to_stt_final={_fmt_ms(vt.delta_from('stt_final', vt.last_user_speech_end))} | "
+            f"stt_final_to_llm_start={_fmt_ms(vt.delta('stt_final', 'llm_start'))} | "
+            f"llm_start_to_llm_first_token={_fmt_ms(vt.delta('llm_start', 'llm_first_token'))} | "
+            f"llm_start_to_tts_first_audio={_fmt_ms(vt.delta('llm_start', 'tts_first_audio'))} | "
+            f"tts_first_audio_to_playback_start={_fmt_ms(vt.delta('tts_first_audio', 'playback_start'))}"
+        )
+
     # Note: before_llm_generation, after_llm_generation, before_tts_synthesis, 
     # after_tts_synthesis, on_user_speech_committed hooks are NOT available in 1.5.13
     # These were removed as they don't exist in this version
@@ -270,6 +723,9 @@ class VoiceAgent(Agent):
         logger.info("on_enter called")
         from datetime import datetime, timezone
         self.call_start = datetime.now(timezone.utc)
+
+        # Attach lightweight voice timing metrics (idempotent per call)
+        self._instrument_voice_timing()
         
         # Initialize transcript session
         if self.settings.enable_transcripts:
@@ -414,7 +870,21 @@ class VoiceAgent(Agent):
                     else:
                         logger.warning(f"Recording stop failed: egress_id={egress_id}")
                 else:
-                    logger.warning("Recording was never started (egress_id is None)")
+                    # Recover orphaned egress. LiveKit may have created the Egress
+                    # server-side even though the local startup task was cancelled
+                    # before egress_id was assigned (e.g. teardown timeout on a slow
+                    # self-hosted egress). Clean up by room so this call's Egress does
+                    # not continue uploading to S3. Room-scoped: never touches another
+                    # room's recording.
+                    logger.warning("Recording never started locally (egress_id is None); checking for orphaned egress")
+                    try:
+                        cleaned = await recording_service.cleanup_orphaned_egress(room_name)
+                        if cleaned:
+                            logger.info(f"Cleaned up {cleaned} orphaned egress session(s) for room: {room_name}")
+                        else:
+                            logger.info(f"No orphaned egress found for room: {room_name}")
+                    except Exception as orphan_err:
+                        logger.error(f"Orphaned egress cleanup failed for room: {room_name} error={orphan_err}", exc_info=True)
             except Exception as e:
                 logger.error(f"Recording stop error: {e}", exc_info=True)
             
@@ -455,9 +925,10 @@ class VoiceAgent(Agent):
                 try:
                     await asyncio.wait_for(
                         register_call_with_backend(self, self.call_start, call_end),
-                        timeout=15.0
+                        timeout=25.0
                     )
                 except asyncio.TimeoutError:
+                    logger.error(f"[CALL_PERSIST] timeout room={room_name} error=timeout_during_shutdown")
                     logger.error(f"[CALL_PERSIST] failed room={room_name} error=timeout_during_shutdown")
                 except Exception as e:
                     logger.error(f"[CALL_PERSIST] failed room={room_name} error={e}")
@@ -669,7 +1140,7 @@ async def analyze_transcript_with_llm(full_text: str, settings) -> dict:
                         "Content-Type": "application/json"
                     },
                     json={
-                        "model": "gpt-4o-mini",
+                        "model": settings.openai_model,
                         "messages": [{"role": "user", "content": prompt}],
                         "temperature": 0.2,
                         "response_format": {"type": "json_object"}
@@ -754,7 +1225,8 @@ async def register_call_with_backend(agent, started_at, ended_at):
         return
     
     agent._call_registering = True
-    logger.info(f"[CALL_PERSIST] starting room={room_name}")
+    t_persist_start = time.perf_counter()
+    logger.info(f"[CALL_PERSIST] start room={room_name}")
     
     try:
         import httpx
@@ -776,49 +1248,36 @@ async def register_call_with_backend(agent, started_at, ended_at):
             lines = [{"speaker": l["speaker"], "text": l["text"]} for l in raw_lines]
             full_text = transcript_data.get("full_text", "")
             
-        ai_metrics = await analyze_transcript_with_llm(full_text, agent.settings)
-
         recording_enabled = getattr(agent.settings, "enable_recording", True)
         filename = getattr(agent, 'recording_filename', None)
         egress_id = getattr(agent, 'egress_id', None)
         s3_key = None
         size = 0
         
-        if recording_enabled:
-            if filename and egress_id:
-                s3_key = f"recordings/{filename}"
-                try:
-                    import boto3
-                    from recording_service import recording_service
-                    s3_client = boto3.client(
-                        's3',
-                        aws_access_key_id=agent.settings.aws_access_key_id,
-                        aws_secret_access_key=agent.settings.aws_secret_access_key,
-                        region_name=agent.settings.aws_region
-                    )
-                    
-                    upload_verified = await recording_service.verify_s3_upload(s3_key)
-                    
-                    if upload_verified:
-                        try:
-                            response = await asyncio.wait_for(
-                                asyncio.to_thread(
-                                    s3_client.head_object,
-                                    Bucket=agent.settings.s3_bucket_name,
-                                    Key=s3_key
-                                ),
-                                timeout=5.0
-                            )
-                            size = response.get('ContentLength', 0)
-                        except (asyncio.TimeoutError, RuntimeError, Exception) as s3_err:
-                            logger.warning(f"S3 head_object fallback for {s3_key}: {s3_err}")
-                            size = duration * 16000
-                    else:
-                        logger.warning(f"S3 upload verification failed for {s3_key}")
-                        size = duration * 16000
-                except Exception as e:
-                    logger.warning(f"Failed to query S3 object size for {s3_key}: {e}")
-                    size = duration * 16000
+        llm_coro = analyze_transcript_with_llm(full_text, agent.settings)
+
+        if recording_enabled and filename and egress_id:
+            s3_key = f"recordings/{filename}"
+            from recording_service import recording_service
+            s3_coro = recording_service.verify_s3_upload(s3_key)
+            ai_metrics, s3_result = await asyncio.gather(llm_coro, s3_coro)
+
+            # Extract verification and size directly from verify_s3_upload without redundant head_object
+            if hasattr(s3_result, "verified"):
+                upload_verified = s3_result.verified
+                size = s3_result.size if (upload_verified and s3_result.size > 0) else (duration * 16000)
+            elif isinstance(s3_result, tuple):
+                upload_verified = s3_result[0]
+                size = s3_result[1] if (upload_verified and len(s3_result) > 1 and s3_result[1]) else (duration * 16000)
+            else:
+                upload_verified = bool(s3_result)
+                size = duration * 16000 if upload_verified else 0
+
+            if not upload_verified:
+                logger.warning(f"S3 upload verification failed for {s3_key}")
+                size = duration * 16000
+        else:
+            ai_metrics = await llm_coro
             
         outcome = "resolved"
         human_handoff = False
@@ -844,6 +1303,7 @@ async def register_call_with_backend(agent, started_at, ended_at):
         payload = {
             "agentId": getattr(agent, 'agent_id', None),
             "clientId": getattr(agent, 'client_id', None),
+            "roomName": room_name,
             "agentName": agent_name,
             "customerName": getattr(agent, 'captured_caller_name', None) or "Customer",
             "customerContact": getattr(agent, 'participant_id', 'Unknown'),
@@ -871,37 +1331,27 @@ async def register_call_with_backend(agent, started_at, ended_at):
         registered_success = False
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(f"{backend_url}/conversations/register", json=safe_payload, timeout=10.0)
+                t_http_start = time.perf_counter()
+                logger.info(f"[CALL_PERSIST] http_dispatch room={room_name}")
+                response = await client.post(f"{backend_url}/conversations/register", json=safe_payload, timeout=20.0,
+                                             headers={
+                                                 "Authorization": f"Bearer {get_settings().internal_worker_token}" if get_settings().internal_worker_token else None
+                                             })
+                http_duration = time.perf_counter() - t_http_start
+                logger.info(f"[CALL_PERSIST] http_response room={room_name} status={response.status_code} duration={http_duration:.3f}s")
                 if response.status_code in [200, 201]:
                     registered_success = True
                     agent._call_registered = True
                     logger.info(f"[CALL_PERSIST] success room={room_name} status={response.status_code}")
                 else:
-                    logger.error(f"[CALL_PERSIST] failed room={room_name} error=status_{response.status_code}_{response.text}")
+                    logger.error(f"[CALL_PERSIST] failed room={room_name} status={response.status_code} error=status_{response.status_code}_{response.text}")
+        except httpx.TimeoutException as te:
+            logger.error(f"[CALL_PERSIST] timeout room={room_name} error=http_timeout_{te}")
+            logger.error(f"[CALL_PERSIST] failed room={room_name} error=http_timeout")
         except Exception as exec_err:
             logger.error(f"[CALL_PERSIST] failed room={room_name} error={exec_err}")
-            # Try fallback synchronous request if loop / executor has issues
-            try:
-                def _sync_post():
-                    import urllib.request
-                    req = urllib.request.Request(
-                        f"{backend_url}/conversations/register",
-                        data=json.dumps(safe_payload).encode("utf-8"),
-                        headers={"Content-Type": "application/json"},
-                        method="POST"
-                    )
-                    with urllib.request.urlopen(req, timeout=4.0) as resp:
-                        return resp.status
 
-                status = await asyncio.to_thread(_sync_post)
-                if status in [200, 201]:
-                    registered_success = True
-                    agent._call_registered = True
-                    logger.info(f"[CALL_PERSIST] success room={room_name} status={status}")
-                else:
-                    logger.error(f"[CALL_PERSIST] failed room={room_name} error=fallback_status_{status}")
-            except Exception as fb_err:
-                logger.error(f"[CALL_PERSIST] failed room={room_name} error={fb_err}")
+        logger.info(f"[CALL_PERSIST] completed room={room_name} elapsed={time.perf_counter() - t_persist_start:.3f}s success={registered_success}")
         
         if agent.transcript_session_id:
             transcript_service.clear_session(agent.transcript_session_id)
@@ -928,6 +1378,11 @@ async def entrypoint(ctx: JobContext):
     job_id = getattr(getattr(ctx, 'job', None), 'id', room_name)
     logger.info(f"[CALL_TIMING] job={job_id} stage=T6_agent_entrypoint_started room={room_name} elapsed=0.000s")
     
+    db_init_task = None
+    current_loop = asyncio.get_running_loop()
+    if database.pool is None or (hasattr(database.pool, "_loop") and (database.pool._loop.is_closed() or database.pool._loop != current_loop)):
+        db_init_task = asyncio.create_task(database.init_pool())
+
     t_conn_start = time.perf_counter()
     logger.info(f"Connecting to room {room_name}")
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
@@ -973,6 +1428,9 @@ async def entrypoint(ctx: JobContext):
     unassigned_number = False
     client_id = None
     agent_id = None
+    # Full agent row loaded once per call and reused for tool loading, STT
+    # keyword hints and TTS selection (avoids duplicate agents/clients reads).
+    agent_config_data: Dict[str, Any] = {}
     
     # Check metadata first (passed during outbound call dispatches or Web calls)
     call_metadata = {}
@@ -984,7 +1442,11 @@ async def entrypoint(ctx: JobContext):
     except Exception as meta_err:
         logger.warning(f"[Metadata] Failed to parse metadata: {meta_err}")
 
-    target_agent_id = call_metadata.get("agent_id")
+    target_agent_id = (
+        call_metadata.get("agent_id")
+        or (participant.attributes.get("sip.header.X-Agent-Id") if hasattr(participant, "attributes") and participant.attributes else None)
+        or (participant.attributes.get("sip.header.x-agent-id") if hasattr(participant, "attributes") and participant.attributes else None)
+    )
     
     called_number = (
         participant.attributes.get("sip.trunkPhoneNumber") or
@@ -998,7 +1460,12 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"[SIP] Resolved called_number: {called_number}, target_agent_id in metadata: {target_agent_id}")
     
     t_db = time.perf_counter()
-    if database.pool is None or (hasattr(database.pool, "_loop") and database.pool._loop.is_closed()):
+    if db_init_task is not None:
+        try:
+            await db_init_task
+        except Exception as e:
+            logger.warning(f"Error awaiting concurrent DB pool init: {e}")
+    elif database.pool is None or (hasattr(database.pool, "_loop") and (database.pool._loop.is_closed() or database.pool._loop != current_loop)):
         await database.init_pool()
     logger.info(f"[CALL_TIMING] job={job_id} stage=db_ready total_elapsed={time.perf_counter() - t_start:.3f}s step={time.perf_counter() - t_db:.3f}s")
 
@@ -1007,9 +1474,16 @@ async def entrypoint(ctx: JobContext):
     if target_agent_id:
         logger.info(f"[Agent] Target agent_id '{target_agent_id}' provided in metadata. Loading agent configuration directly...")
         try:
-            agent_rows = await database.query("SELECT * FROM agents WHERE id = $1::uuid", [target_agent_id])
+            agent_rows = await database.query(
+                "SELECT a.*, c.name AS client_name "
+                "FROM agents a LEFT JOIN clients c ON c.id = a.client_id "
+                "WHERE a.id = $1::uuid",
+                [target_agent_id]
+            )
             if agent_rows:
                 ag_data = agent_rows[0]
+                # Reuse the full row for tools/STT keywords/TTS instead of refetching it later
+                agent_config_data = dict(ag_data)
                 agent_id = str(ag_data.get("id"))
                 agent_name = ag_data.get("name", "Voice Agent")
                 use_case = ag_data.get("use_case", "")
@@ -1039,75 +1513,76 @@ async def entrypoint(ctx: JobContext):
                 unassigned_number = False
                 logger.info(f"[Agent] Successfully loaded configuration for agent '{agent_name}' ({agent_id})")
             else:
-                logger.warning(f"[Agent] Agent ID '{target_agent_id}' not found in database.")
-                unassigned_number = True
-                custom_prompt = "The requested agent could not be found. Please contact support."
+                logger.error(f"[Agent] Target agent ID '{target_agent_id}' not found in database.")
+                raise RuntimeError(f"[Agent] Target agent ID '{target_agent_id}' not found in database.")
         except Exception as db_err:
-            logger.error(f"[Agent] Database error fetching agent '{target_agent_id}': {db_err}")
-            unassigned_number = True
-            custom_prompt = "An error occurred while loading agent settings."
+            logger.critical(f"[Agent] Database error fetching agent '{target_agent_id}': {db_err}")
+            raise RuntimeError(f"[Agent] Database error fetching agent '{target_agent_id}': {db_err}") from db_err
             
     # Case B: Inbound call to a phone number (Lookup assigned agent via called_number)
     elif called_number:
         logger.info(f"[Backend] Starting routing lookup for inbound call to {called_number} at {backend_url}/phone-numbers/lookup")
         try:
-            async with httpx.AsyncClient() as http_client:
-                lookup_resp = await http_client.get(
-                    f"{backend_url}/phone-numbers/lookup",
-                    params={"number": called_number},
-                    timeout=10.0
-                )
-                logger.info(f"[INBOUND_DEBUG] lookup_status={lookup_resp.status_code} called_number={called_number}")
+            http_client = get_shared_http_client()
+            lookup_resp = await http_client.get(
+                f"{backend_url}/phone-numbers/lookup",
+                params={"number": called_number},
+                timeout=10.0
+            )
+            logger.info(f"[INBOUND_DEBUG] lookup_status={lookup_resp.status_code} called_number={called_number}")
+
+            if lookup_resp.status_code == 200:
+                lookup_data = lookup_resp.json()
+                logger.info(f"[INBOUND_DEBUG] lookup_success: {lookup_data}")
+                client_id = lookup_data.get("client_id")
+                target_agent_id = lookup_data.get("agent_id")
                 
-                if lookup_resp.status_code == 200:
-                    lookup_data = lookup_resp.json()
-                    logger.info(f"[INBOUND_DEBUG] lookup_success: {lookup_data}")
-                    client_id = lookup_data.get("client_id")
-                    target_agent_id = lookup_data.get("agent_id")
-                    
-                    if not lookup_data.get("has_credits", True):
-                        logger.warning(f"[Credits] Insufficient credits for {called_number}")
-                        out_of_credits = True
-                    elif lookup_data.get("agent_status") != "active":
-                        logger.warning(f"[Agent] Assigned agent is not active (status={lookup_data.get('agent_status')})")
-                        unassigned_number = True
-                        custom_prompt = "The assigned agent is currently unavailable. Please try again later."
-                    elif not target_agent_id:
-                        logger.warning(f"[Agent] No agent_id returned for {called_number}")
-                        unassigned_number = True
-                        custom_prompt = "This phone number is not fully configured. Please contact support."
-                    elif not lookup_data.get("prompt"):
-                        logger.warning(f"[Agent] No prompt configured for assigned agent on {called_number}")
-                        unassigned_number = True
-                        custom_prompt = "The assigned agent is not configured. Please contact support."
-                    else:
-                        custom_prompt = lookup_data.get("prompt")
-                        agent_name = lookup_data.get("agent_name")
-                        agent_id = target_agent_id
-                        logger.info(f"[INBOUND_DEBUG] Loaded agent '{agent_name}' for {called_number} (ID={agent_id})")
-                elif lookup_resp.status_code == 404:
-                    logger.warning(f"[INBOUND_DEBUG] PHONE_NUMBER_NOT_FOUND: {called_number}")
-                    unassigned_number = True
-                    try:
-                        detail = lookup_resp.json().get("detail", {})
-                        custom_prompt = detail.get("prompt", "This phone number is not configured in the system.")
-                    except Exception:
-                        custom_prompt = "This phone number is not configured in the system."
-                elif lookup_resp.status_code == 409:
-                    logger.warning(f"[INBOUND_DEBUG] PHONE_NOT_ASSIGNED: {called_number}")
-                    unassigned_number = True
-                    try:
-                        detail = lookup_resp.json().get("detail", {})
-                        custom_prompt = detail.get("prompt", "Welcome to 42 voice and we will get back to you.")
-                    except Exception:
-                        custom_prompt = "Welcome to 42 voice and we will get back to you."
-                elif lookup_resp.status_code == 403:
-                    logger.warning(f"[INBOUND_DEBUG] INSUFFICIENT_CREDITS: {called_number}")
+                if not lookup_data.get("has_credits", True):
+                    logger.warning(f"[Credits] Insufficient credits for {called_number}")
                     out_of_credits = True
-                else:
-                    logger.error(f"[INBOUND_DEBUG] Lookup failed: status={lookup_resp.status_code}, body={lookup_resp.text}")
+                elif lookup_data.get("agent_status") != "active":
+                    logger.warning(f"[Agent] Assigned agent is not active (status={lookup_data.get('agent_status')})")
                     unassigned_number = True
-                    custom_prompt = "An error occurred while processing your call. Please try again later."
+                    custom_prompt = "The assigned agent is currently unavailable. Please try again later."
+                elif not target_agent_id:
+                    logger.warning(f"[Agent] No agent_id returned for {called_number}")
+                    unassigned_number = True
+                    custom_prompt = "This phone number is not fully configured. Please contact support."
+                elif not lookup_data.get("prompt"):
+                    logger.warning(f"[Agent] No prompt configured for assigned agent on {called_number}")
+                    unassigned_number = True
+                    custom_prompt = "The assigned agent is not configured. Please contact support."
+                else:
+                    custom_prompt = lookup_data.get("prompt")
+                    agent_name = lookup_data.get("agent_name")
+                    agent_id = target_agent_id
+                    agent_config_data = dict(lookup_data)
+                    agent_config_data["id"] = target_agent_id
+                    client_id = lookup_data.get("client_id")
+                    logger.info(f"[INBOUND_DEBUG] Loaded agent '{agent_name}' for {called_number} (ID={agent_id})")
+            elif lookup_resp.status_code == 404:
+                logger.warning(f"[INBOUND_DEBUG] PHONE_NUMBER_NOT_FOUND: {called_number}")
+                unassigned_number = True
+                try:
+                    detail = lookup_resp.json().get("detail", {})
+                    custom_prompt = detail.get("prompt", "This phone number is not configured in the system.")
+                except Exception:
+                    custom_prompt = "This phone number is not configured in the system."
+            elif lookup_resp.status_code == 409:
+                logger.warning(f"[INBOUND_DEBUG] PHONE_NOT_ASSIGNED: {called_number}")
+                unassigned_number = True
+                try:
+                    detail = lookup_resp.json().get("detail", {})
+                    custom_prompt = detail.get("prompt", "Welcome to 42 voice and we will get back to you.")
+                except Exception:
+                    custom_prompt = "Welcome to 42 voice and we will get back to you."
+            elif lookup_resp.status_code == 403:
+                logger.warning(f"[INBOUND_DEBUG] INSUFFICIENT_CREDITS: {called_number}")
+                out_of_credits = True
+            else:
+                logger.error(f"[INBOUND_DEBUG] Lookup failed: status={lookup_resp.status_code}, body={lookup_resp.text}")
+                unassigned_number = True
+                custom_prompt = "An error occurred while processing your call. Please try again later."
         except Exception as e:
             logger.exception(f"[INBOUND_DEBUG] Exception during phone number lookup for {called_number}: {e}")
             unassigned_number = True
@@ -1117,64 +1592,124 @@ async def entrypoint(ctx: JobContext):
         unassigned_number = True
         custom_prompt = "This call cannot be routed. Please dial a configured phone number or select an agent."
 
-    logger.info(f"[CALL_TIMING] job={job_id} stage=agent_config_loaded total_elapsed={time.perf_counter() - t_start:.3f}s step={time.perf_counter() - t_agent_cfg:.3f}s")
-    
+    # Load the full agent row once (inbound path) so tool_ids, STT keyword hints
+    # and TTS configuration all come from a single query instead of the previous
+    # tool_ids + full-agent + client_name sequence.
+    if agent_id and not agent_config_data:
+        try:
+            ag_rows = await database.query(
+                "SELECT a.*, c.name AS client_name "
+                "FROM agents a LEFT JOIN clients c ON c.id = a.client_id "
+                "WHERE a.id = $1::uuid",
+                [agent_id]
+            )
+            if ag_rows:
+                agent_config_data = dict(ag_rows[0])
+        except Exception as ag_err:
+            logger.warning(f"[AgentConfig] Warning loading agent_config_data for STT keywords: {ag_err}")
+    logger.info(f"[CALL_TIMING] job={job_id} stage=agent_config_ready total_elapsed={time.perf_counter() - t_start:.3f}s step={time.perf_counter() - t_agent_cfg:.3f}s")
+
     # Validate required voice service configuration is present
     if not settings.deepgram_api_key or not settings.openai_api_key:
         logger.error("[Runtime] Missing required voice API keys (deepgram/openai)")
         unassigned_number = True
         custom_prompt = "Voice service configuration is incomplete. Please contact support."
 
+    t_redis = time.perf_counter()
     session_manager = SessionManager()
     booking_agent = BookingAgent(session_manager)
     sales_agent = SalesAgent(session_manager)
     support_agent = SupportAgent(session_manager)
-    
+    logger.info(f"[CALL_TIMING] job={job_id} stage=redis_ready total_elapsed={time.perf_counter() - t_start:.3f}s step={time.perf_counter() - t_redis:.3f}s")
+
     # Dynamic tools loading from database
     t_tools = time.perf_counter()
     dynamic_tools = []
     if agent_id:
         try:
-            # Fetch tool_ids from agents table
-            agent_rows = await database.query("SELECT tool_ids FROM agents WHERE id = $1::uuid", [agent_id])
-            if agent_rows:
-                tool_ids = agent_rows[0].get("tool_ids") or []
-                if isinstance(tool_ids, str):
+            # Reuse tool_ids from the already-loaded agent row (no extra query)
+            tool_ids = (agent_config_data.get("tool_ids") if isinstance(agent_config_data, dict) else None) or []
+            if isinstance(tool_ids, str):
+                try:
                     tool_ids = json.loads(tool_ids)
+                except Exception:
+                    tool_ids = []
                 
-                if tool_ids:
-                    from api.modules.tools.repositories import ToolRepository
-                    tool_repo = ToolRepository()
-                    active_tools = await tool_repo.find_by_uuids(tool_ids)
-                    
-                    for tool in active_tools:
-                        try:
-                            # Parse definition config
-                            definition = tool.get("definition") or {}
-                            if isinstance(definition, str):
-                                definition = json.loads(definition)
-                            config = definition.get("config", {})
-                            category = tool.get("category")
-                            
-                            # 1. Convert tool model to function schema
-                            schema = tool_to_function_schema(tool)
-                            func_name = schema["function"]["name"]
-                            
-                            # Define callback closure
-                            def make_callback(t, cfg, cat):
-                                async def tool_callback(**kwargs) -> str:
-                                    logger.info(f"Custom tool callback executed: {t['name']} ({t['tool_uuid']}) with arguments: {kwargs}")
+            if tool_ids and isinstance(tool_ids, list):
+                from api.modules.tools.repositories import ToolRepository
+                tool_repo = ToolRepository()
+                active_tools = await tool_repo.find_by_uuids(tool_ids)
+
+                for tool in active_tools:
+                    try:
+                        # Parse definition config
+                        definition = tool.get("definition") or {}
+                        if isinstance(definition, str):
+                            definition = json.loads(definition)
+                        config = definition.get("config", {})
+                        category = tool.get("category")
+
+                        # 1. Convert tool model to function schema
+                        schema = tool_to_function_schema(tool)
+                        func_name = schema["function"]["name"]
+
+                        # Define callback closure
+                        def make_callback(t, cfg, cat):
+                            async def tool_callback(**kwargs) -> str:
+                                logger.info(f"Custom tool callback executed: {t['name']} ({t['tool_uuid']}) with arguments: {kwargs}")
+
+                                # Handle Category-specific execution
+                                if cat == "http_api":
+                                    # Play custom message if configured
+                                    custom_message = cfg.get("customMessage", "")
+                                    if custom_message:
+                                        agent.session.say(custom_message)
+
+                                    # Execute HTTP API call
+                                    result = await execute_http_tool(
+                                        tool=t,
+                                        arguments=kwargs,
+                                        call_context_vars={
+                                            "phone_number": called_number,
+                                            "customer_contact": participant.identity,
+                                            "client_id": client_id,
+                                            "room_name": room_name
+                                        },
+                                        gathered_context_vars={},
+                                        client_id=client_id
+                                    )
+                                    return json.dumps(result)
                                     
-                                    # Handle Category-specific execution
-                                    if cat == "http_api":
-                                        # Play custom message if configured
-                                        custom_message = cfg.get("customMessage", "")
-                                        if custom_message:
-                                            agent.session.say(custom_message)
+                                elif cat == "calculator":
+                                    try:
+                                        expr = kwargs.get("expression", "")
+                                        val = safe_calculator(expr)
+                                        return json.dumps({"expression": expr, "result": val})
+                                    except Exception as err:
+                                        return json.dumps({"error": str(err)})
                                         
-                                        # Execute HTTP API call
-                                        result = await execute_http_tool(
+                                elif cat == "end_call":
+                                    msg_type = cfg.get("messageType", "none")
+                                    goodbye = ""
+                                    if msg_type == "custom":
+                                        goodbye = cfg.get("customMessage", "")
+                                    if goodbye:
+                                        if hasattr(agent.session, "interrupt"):
+                                            agent.session.interrupt(force=True)
+                                        agent.session.say(goodbye)
+
+                                    async def delayed_disconnect():
+                                        await asyncio.sleep(2.0 if goodbye else 0.5)
+                                        if agent.ctx and agent.ctx.room:
+                                            await agent.ctx.room.disconnect()
+                                    asyncio.create_task(delayed_disconnect())
+                                    return "Call is ending."
+
+                                elif cat == "transfer_call":
+                                    try:
+                                        resolved = await resolve_transfer_config(
                                             tool=t,
+                                            config=cfg,
                                             arguments=kwargs,
                                             call_context_vars={
                                                 "phone_number": called_number,
@@ -1185,119 +1720,77 @@ async def entrypoint(ctx: JobContext):
                                             gathered_context_vars={},
                                             client_id=client_id
                                         )
-                                        return json.dumps(result)
-                                        
-                                    elif cat == "calculator":
-                                        try:
-                                            expr = kwargs.get("expression", "")
-                                            val = safe_calculator(expr)
-                                            return json.dumps({"expression": expr, "result": val})
-                                        except Exception as err:
-                                            return json.dumps({"error": str(err)})
-                                            
-                                    elif cat == "end_call":
+                                        dest = resolved.destination
+                                    except Exception as err:
+                                        return f"Transfer resolution failed: {str(err)}"
+
+                                    # Play message
+                                    if resolved.message:
+                                        agent.session.say(resolved.message)
+                                    else:
                                         msg_type = cfg.get("messageType", "none")
-                                        goodbye = ""
                                         if msg_type == "custom":
-                                            goodbye = cfg.get("customMessage", "")
-                                        if goodbye:
-                                            if hasattr(agent.session, "interrupt"):
-                                                agent.session.interrupt(force=True)
-                                            agent.session.say(goodbye)
+                                            custom_msg = cfg.get("customMessage", "")
+                                            if custom_msg:
+                                                agent.session.say(custom_msg)
+
+                                    # Handoff/transfer call
+                                    try:
+                                        from livekit import api as lk_api
+                                        lk_client = lk_api.LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret)
+                                        transfer_req = lk_api.TransferSIPParticipantRequest(
+                                            participant_identity=participant.identity,
+                                            room_name=room_name,
+                                            transfer_to=dest,
+                                            play_dialtone=True
+                                        )
+                                        await lk_client.sip.transfer_sip_participant(transfer_req)
+                                        await lk_client.aclose()
                                         
                                         async def delayed_disconnect():
-                                            await asyncio.sleep(2.0 if goodbye else 0.5)
+                                            await asyncio.sleep(4.0)
                                             if agent.ctx and agent.ctx.room:
                                                 await agent.ctx.room.disconnect()
                                         asyncio.create_task(delayed_disconnect())
-                                        return "Call is ending."
+                                        return f"Transferring call to {dest}."
+                                    except Exception as err:
+                                        logger.error(f"SIP transfer failed: {err}")
+                                        return f"Failed to transfer call: {str(err)}"
                                         
-                                    elif cat == "transfer_call":
-                                        try:
-                                            resolved = await resolve_transfer_config(
-                                                tool=t,
-                                                config=cfg,
-                                                arguments=kwargs,
-                                                call_context_vars={
-                                                    "phone_number": called_number,
-                                                    "customer_contact": participant.identity,
-                                                    "client_id": client_id,
-                                                    "room_name": room_name
-                                                },
-                                                gathered_context_vars={},
-                                                client_id=client_id
-                                            )
-                                            dest = resolved.destination
-                                        except Exception as err:
-                                            return f"Transfer resolution failed: {str(err)}"
-                                        
-                                        # Play message
-                                        if resolved.message:
-                                            agent.session.say(resolved.message)
-                                        else:
-                                            msg_type = cfg.get("messageType", "none")
-                                            if msg_type == "custom":
-                                                custom_msg = cfg.get("customMessage", "")
-                                                if custom_msg:
-                                                    agent.session.say(custom_msg)
-                                        
-                                        # Handoff/transfer call
-                                        try:
-                                            from livekit import api as lk_api
-                                            lk_client = lk_api.LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret)
-                                            transfer_req = lk_api.TransferSIPParticipantRequest(
-                                                participant_identity=participant.identity,
-                                                room_name=room_name,
-                                                transfer_to=dest,
-                                                play_dialtone=True
-                                            )
-                                            await lk_client.sip.transfer_sip_participant(transfer_req)
-                                            await lk_client.aclose()
-                                            
-                                            async def delayed_disconnect():
-                                                await asyncio.sleep(4.0)
-                                                if agent.ctx and agent.ctx.room:
-                                                    await agent.ctx.room.disconnect()
-                                            asyncio.create_task(delayed_disconnect())
-                                            return f"Transferring call to {dest}."
-                                        except Exception as err:
-                                            logger.error(f"SIP transfer failed: {err}")
-                                            return f"Failed to transfer call: {str(err)}"
-                                            
-                                    elif cat == "mcp":
-                                        url = cfg.get("url")
-                                        if not url:
-                                            return json.dumps({"status": "error", "error": "MCP server URL not configured"})
-                                        
-                                        # Resolve credential
-                                        cred = None
-                                        cred_uuid = cfg.get("credential_uuid")
-                                        if cred_uuid and client_id:
-                                            from api.modules.credentials.repositories import CredentialRepository
-                                            cred = await CredentialRepository().find_by_uuid(cred_uuid, client_id)
-                                        
-                                        # Execute MCP call
-                                        res = await call_mcp_tool(
-                                            url=url,
-                                            tool_name=t["name"],
-                                            arguments=kwargs,
-                                            credential=cred,
-                                            config=cfg
-                                        )
-                                        return json.dumps(res)
-                                        
-                                    return "Tool not executed."
-                                return tool_callback
-                            
-                            # Create RawFunctionTool wrapper using livekit function_tool helper
-                            raw_tool = function_tool(
-                                make_callback(tool, config, category),
-                                raw_schema=schema["function"]
-                            )
-                            dynamic_tools.append(raw_tool)
-                            logger.info(f"Dynamically registered custom tool: {func_name}")
-                        except Exception as e:
-                            logger.exception(f"Failed to initialize custom tool {tool.get('name')}: {e}")
+                                elif cat == "mcp":
+                                    url = cfg.get("url")
+                                    if not url:
+                                        return json.dumps({"status": "error", "error": "MCP server URL not configured"})
+
+                                    # Resolve credential
+                                    cred = None
+                                    cred_uuid = cfg.get("credential_uuid")
+                                    if cred_uuid and client_id:
+                                        from api.modules.credentials.repositories import CredentialRepository
+                                        cred = await CredentialRepository().find_by_uuid(cred_uuid, client_id)
+
+                                    # Execute MCP call
+                                    res = await call_mcp_tool(
+                                        url=url,
+                                        tool_name=t["name"],
+                                        arguments=kwargs,
+                                        credential=cred,
+                                        config=cfg
+                                    )
+                                    return json.dumps(res)
+
+                                return "Tool not executed."
+                            return tool_callback
+
+                        # Create RawFunctionTool wrapper using livekit function_tool helper
+                        raw_tool = function_tool(
+                            make_callback(tool, config, category),
+                            raw_schema=schema["function"]
+                        )
+                        dynamic_tools.append(raw_tool)
+                        logger.info(f"Dynamically registered custom tool: {func_name}")
+                    except Exception as e:
+                        logger.exception(f"Failed to initialize custom tool {tool.get('name')}: {e}")
         except Exception as e:
             logger.exception(f"Error fetching dynamic tools for agent {agent_id}: {e}")
 
@@ -1308,24 +1801,38 @@ async def entrypoint(ctx: JobContext):
     session: AgentSession = AgentSession(
         vad=ctx.proc.userdata["vad"],
         turn_handling=TurnHandlingOptions(
-            interruption={"mode": "vad"},  # Disable adaptive interruption, use VAD only
+            interruption={
+                "mode": "vad",
+                "min_duration": 0.4,
+                "resume_false_interruption": True,
+            },
+            endpointing={
+                "min_delay": 0.3,
+            }
         ),
     )
     
-    # Fetch detailed agent config data for dynamic STT entity hints
-    agent_config_data = {}
-    if agent_id:
+    logger.info(f"[CALL_TIMING] job={job_id} stage=agent_session_created total_elapsed={time.perf_counter() - t_start:.3f}s")
+
+    # Ensure the client display name is resolved for STT keyword hints when the
+    # agent row was loaded without it (Case A). agent_config_data is already
+    # fully populated from a single query on the inbound path - no re-fetch.
+    if isinstance(agent_config_data, dict) and agent_config_data and "client_name" not in agent_config_data:
         try:
-            ag_rows = await database.query("SELECT * FROM agents WHERE id = $1::uuid", [agent_id])
-            if ag_rows:
-                agent_config_data = dict(ag_rows[0])
-                c_id = agent_config_data.get("client_id")
-                if c_id:
-                    c_rows = await database.query("SELECT name FROM clients WHERE id = $1::uuid", [c_id])
-                    if c_rows:
-                        agent_config_data["client_name"] = c_rows[0].get("name")
+            c_id = agent_config_data.get("client_id")
+            if c_id:
+                c_rows = await database.query("SELECT name FROM clients WHERE id = $1::uuid", [c_id])
+                if c_rows:
+                    agent_config_data["client_name"] = c_rows[0].get("name")
         except Exception as ag_err:
-            logger.warning(f"[AgentConfig] Warning loading agent_config_data for STT keywords: {ag_err}")
+            logger.warning(f"[AgentConfig] Warning loading client_name for STT keywords: {ag_err}")
+
+    # Explicitly validate that agent configuration is loaded before constructing VoiceAgent
+    if not agent_config_data or not isinstance(agent_config_data, dict):
+        raise RuntimeError(
+            f"[Agent] Failed to initialize VoiceAgent for room '{ctx.room.name}': "
+            f"Agent configuration could not be loaded from database."
+        )
 
     # Fallback to lookup data fields if agent_config_data keys are missing
     if agent_name and "name" not in agent_config_data and "agent_name" not in agent_config_data:
@@ -1354,6 +1861,25 @@ async def entrypoint(ctx: JobContext):
         agent_data=agent_config_data
     )
     
+    # Safe, non-blocking prewarming of TTS connection while session initializes.
+    # Cartesia TTS uses an internal connection pool with official .prewarm() support.
+    # ElevenLabs TTS establishes a persistent WebSocket connection via ._current_connection().
+    # Note: VoiceAgent and TTS instances are allocated fresh per call, so no audio state
+    # or voice configuration is shared between concurrent calls.
+    if hasattr(agent, "tts") and agent.tts:
+        if hasattr(agent.tts, "_pool") and hasattr(agent.tts._pool, "prewarm"):
+            try:
+                agent.tts._pool.prewarm()
+                logger.info("[TTS_PREWARM] Triggered non-blocking Cartesia TTS connection pool prewarm")
+            except Exception as e:
+                logger.warning(f"[TTS_PREWARM] Failed to prewarm Cartesia TTS: {e}")
+        elif hasattr(agent.tts, "_current_connection"):
+            try:
+                asyncio.create_task(agent.tts._current_connection())
+                logger.info("[TTS_PREWARM] Triggered non-blocking ElevenLabs TTS connection prewarm")
+            except Exception as e:
+                logger.warning(f"[TTS_PREWARM] Failed to prewarm ElevenLabs TTS: {e}")
+
     # Initialize recording state
     agent.egress_id = None
     agent.recording_filename = None
@@ -1489,8 +2015,8 @@ async def cleanup_on_disconnect(session, session_manager, agent=None):
     logger.info("SESSION CLEANED")
 
 
-async def validate_worker_dependencies():
-    """Validate all external dependencies before accepting LiveKit jobs."""
+def validate_worker_dependencies():
+    """Validate all external dependencies synchronously before launching LiveKit worker."""
     settings = get_settings()
     logger.info("[Startup] Validating worker dependencies...")
 
@@ -1501,10 +2027,10 @@ async def validate_worker_dependencies():
         logger.error(f"[Startup] Invalid BACKEND_URL: {backend_url}")
         sys.exit(1)
 
-    # 2. Verify backend is reachable and database is healthy
+    # 2. Verify backend is reachable and database is healthy (synchronously via httpx.Client)
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{backend_url}/health", timeout=10.0)
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(f"{backend_url}/health")
             logger.info(f"[Startup] Backend health response: {resp.status_code}")
             if resp.status_code != 200:
                 logger.error(f"[Startup] Backend not healthy: {resp.status_code} {resp.text}")
@@ -1522,25 +2048,22 @@ async def validate_worker_dependencies():
         logger.error(f"[Startup] Backend is not reachable at {backend_url}: {e}")
         sys.exit(1)
 
-    # 3. Verify LiveKit connection
+    # 3. Verify LiveKit connection (HTTP reachability probe)
     try:
-        sip_status = await livekit_sip_service.get_sip_status()
-        if not sip_status.get("connected"):
-            logger.error(f"[Startup] LiveKit is not connected: {sip_status}")
-            sys.exit(1)
-        logger.info("[Startup] LiveKit is connected")
+        lk_http_url = settings.livekit_url.replace("wss://", "https://").replace("ws://", "http://")
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.get(lk_http_url)
+            logger.info(f"[Startup] LiveKit server reachable (HTTP {resp.status_code})")
     except Exception as e:
-        logger.error(f"[Startup] LiveKit connection check failed: {e}")
-        sys.exit(1)
+        logger.warning(f"[Startup] LiveKit reachability probe: {e}")
 
-    # 4. Verify Redis connection (optional; SessionManager falls back to in-memory)
+    # 4. Warm the shared Redis client for SessionManager (synchronous)
+    from session_manager import warm_redis
     try:
-        redis_client = redis.Redis.from_url(
-            settings.redis_url, socket_connect_timeout=3, socket_timeout=3
-        )
-        redis_client.ping()
-        redis_client.close()
-        logger.info("[Startup] Redis is reachable")
+        if warm_redis() is not None:
+            logger.info("[Startup] Redis is reachable (shared SessionManager client warmed)")
+        else:
+            logger.warning(f"[Startup] Redis is not reachable at {settings.redis_url}. Continuing with in-memory fallback.")
     except Exception as e:
         logger.warning(f"[Startup] Redis is not reachable at {settings.redis_url}: {e}. Continuing with in-memory fallback.")
 
@@ -1548,7 +2071,7 @@ async def validate_worker_dependencies():
 
 
 if __name__ == "__main__":
-    asyncio.run(validate_worker_dependencies())
+    validate_worker_dependencies()
     settings = get_settings()
     cli.run_app(
         WorkerOptions(

@@ -2,6 +2,7 @@ import logging
 import uuid
 import boto3
 import httpx
+import time
 from datetime import datetime
 from fastapi import APIRouter, Depends, Request, UploadFile, File
 from fastapi.responses import Response
@@ -22,7 +23,7 @@ agent_service = AgentService()
 class PreviewVoiceRequest(BaseModel):
     voiceId: str
     text: Optional[str] = "Hello! I am your AI voice assistant. How can I help you today?"
-    modelId: Optional[str] = "eleven_multilingual_v2"
+    modelId: str
     stability: Optional[float] = 0.5
     similarityBoost: Optional[float] = 0.75
 
@@ -39,6 +40,10 @@ class UpdateAgentRequest(BaseModel):
     clientIds: Optional[List[str]] = None
     voiceName: Optional[str] = None
     voiceGender: Optional[str] = None
+    ttsProvider: Optional[str] = None
+    ttsModel: Optional[str] = None
+    ttsVoiceId: Optional[str] = None
+    ttsVoiceName: Optional[str] = None
     guardrails: Optional[Dict[str, Any]] = None
     customGuardrails: Optional[str] = None
     knowledgeItems: Optional[List[Dict[str, Any]]] = None
@@ -54,6 +59,10 @@ class CreateAgentRequest(BaseModel):
     clientIds: Optional[List[str]] = []
     voiceName: Optional[str] = "aria"
     voiceGender: Optional[str] = "female"
+    ttsProvider: Optional[str] = None
+    ttsModel: Optional[str] = None
+    ttsVoiceId: Optional[str] = None
+    ttsVoiceName: Optional[str] = None
     guardrails: Optional[Dict[str, Any]] = {}
     customGuardrails: Optional[str] = ""
     knowledgeItems: Optional[List[Dict[str, Any]]] = []
@@ -181,7 +190,7 @@ async def update(agent_id: str, req_body: UpdateAgentRequest, current_user: Dict
         )
 
     # Filter only configuration detail fields for update_agent_details
-    detail_fields = {"name", "useCase", "activityDescription", "callType", "voiceName", "voiceGender", "guardrails", "customGuardrails", "knowledgeItems", "toolIds"}
+    detail_fields = {"name", "useCase", "activityDescription", "callType", "voiceName", "voiceGender", "ttsProvider", "ttsModel", "ttsVoiceId", "ttsVoiceName", "guardrails", "customGuardrails", "knowledgeItems", "toolIds"}
     update_data = req_body.model_dump(exclude_unset=True)
     details_to_update = {k: v for k, v in update_data.items() if k in detail_fields}
     print("DEBUG DETAILS TO UPDATE:", details_to_update)
@@ -202,49 +211,396 @@ async def update(agent_id: str, req_body: UpdateAgentRequest, current_user: Dict
     )
 
 
+ELEVENLABS_MODELS = [
+    {"id": "eleven_multilingual_v2", "name": "Multilingual v2 (Recommended)"},
+    {"id": "eleven_flash_v2_5", "name": "Flash v2.5 (Ultra Fast)"},
+    {"id": "eleven_flash_v2", "name": "Flash v2"},
+    {"id": "eleven_turbo_v2_5", "name": "Turbo v2.5 (Lowest Latency)"},
+    {"id": "eleven_turbo_v2", "name": "Turbo v2"},
+]
+
+CARTESIA_MODELS = [
+    {"id": "sonic-3", "name": "Sonic 3"},
+]
+
+_voice_cache: Dict[str, Any] = {
+    "data": None,
+    "timestamp": 0.0,
+}
+
+_cartesia_voice_cache: Dict[str, Any] = {
+    "data": None,
+    "timestamp": 0.0,
+}
+
+# Cartesia REST voice catalog. `Cartesia-Version` selects the API spec version;
+# the parser tolerates both the paged `{data, has_more, next_page}` shape and the
+# legacy bare-array shape so the header value is the single tuning point if an
+# account requires an older spec date.
+_CARTESIA_API_VERSION = "2026-03-01"
+_CARTESIA_VOICES_URL = "https://api.cartesia.ai/voices"
+
+
+def _normalize_cartesia_gender(gender: Optional[str]) -> str:
+    g = str(gender or "").strip().lower()
+    if g in ("masculine", "male"):
+        return "male"
+    if g in ("gender_neutral", "non-binary", "neutral"):
+        return "non-binary"
+    return "female"
+
+
+async def _fetch_cartesia_voices(api_key: str) -> Dict[str, Any]:
+    """
+    Fetch the Cartesia voice catalog via the REST /voices API.
+
+    Returns a payload dict (provider/status/errorMessage/hasApiKey/voices/models)
+    matching the FE voice-selector contract. The API key is never exposed and
+    voices are normalized into the same shape as the ElevenLabs catalog.
+    """
+    headers: Dict[str, str] = {
+        "Authorization": f"Bearer {api_key}",
+        "Cartesia-Version": _CARTESIA_API_VERSION,
+    }
+    voices_list: List[Dict[str, Any]] = []
+    starting_after: Optional[str] = None
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        # Bounded pagination: max 10 pages to avoid infinite loops
+        for _ in range(10):
+            params: Dict[str, Any] = {"limit": 100}
+            if starting_after:
+                params["starting_after"] = starting_after
+            res = await client.get(_CARTESIA_VOICES_URL, params=params, headers=headers)
+
+            if res.status_code in (401, 403):
+                error_detail = (res.json() or {}).get("message", res.text) if res.text else res.text
+                logger.warning(
+                    f"Cartesia voice catalog auth error (HTTP {res.status_code}): {error_detail}"
+                )
+                return {
+                    "provider": "cartesia",
+                    "status": "auth_error",
+                    "errorMessage": "Cartesia API authentication/permission error. "
+                    f"(HTTP {res.status_code})",
+                    "hasApiKey": True,
+                    "voices": [],
+                    "models": CARTESIA_MODELS,
+                }
+
+            if res.status_code == 429:
+                logger.warning("Cartesia voice catalog rate limited (HTTP 429)")
+                return {
+                    "provider": "cartesia",
+                    "status": "rate_limited",
+                    "errorMessage": "Cartesia API rate limit exceeded. Please try again later.",
+                    "hasApiKey": True,
+                    "voices": [],
+                    "models": CARTESIA_MODELS,
+                }
+
+            if res.status_code != 200:
+                logger.warning(
+                    f"Cartesia voice catalog error (HTTP {res.status_code}): {res.text[:300]}"
+                )
+                return {
+                    "provider": "cartesia",
+                    "status": "provider_error",
+                    "errorMessage": f"Cartesia API returned HTTP {res.status_code}.",
+                    "hasApiKey": True,
+                    "voices": [],
+                    "models": CARTESIA_MODELS,
+                }
+
+            data = res.json()
+            if isinstance(data, dict) and isinstance(data.get("data"), list):
+                items = data["data"]
+                has_more = bool(data.get("has_more"))
+            elif isinstance(data, list):
+                items = data
+                has_more = False
+            else:
+                items = []
+                has_more = False
+
+            for v in items:
+                if not isinstance(v, dict):
+                    continue
+                vid = v.get("id")
+                if not vid:
+                    continue
+                name = v.get("name") or vid
+                gender = _normalize_cartesia_gender(v.get("gender"))
+                description = v.get("description") or v.get("tagline") or ""
+                language = v.get("language")
+                locales = v.get("locales")
+                if not language and isinstance(locales, list) and locales and isinstance(locales[0], dict):
+                    language = locales[0].get("locale")
+                is_custom = bool(v.get("is_owner"))
+                voices_list.append({
+                    "voice_id": vid,
+                    "name": name,
+                    "gender": gender,
+                    "category": "custom" if is_custom else "premade",
+                    "accent": v.get("country") or "",
+                    "description": description,
+                    "preview_url": v.get("preview_file_url"),
+                    "is_custom": is_custom,
+                    "language": language,
+                })
+
+            if not has_more or not items:
+                break
+            starting_after = items[-1].get("id") if isinstance(items[-1], dict) else None
+            if not starting_after:
+                break
+
+    return {
+        "provider": "cartesia",
+        "status": "success" if voices_list else "empty",
+        "errorMessage": None if voices_list else "No Cartesia voices found for this account.",
+        "hasApiKey": True,
+        "voices": voices_list,
+        "models": CARTESIA_MODELS,
+    }
+
+
+async def _fetch_elevenlabs_voices(
+    api_key: str,
+    search: Optional[str] = None,
+    page_size: Optional[int] = 30,
+    next_page_token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Fetch ElevenLabs voices via the v2 catalog API with bounded pagination.
+
+    Returns a payload dict (provider/status/errorMessage/hasApiKey/voices/models)
+    matching the FE voice-selector contract. The API key is never exposed.
+    """
+    page_size = max(1, min(int(page_size if page_size else 30), 100))
+    voices_list: List[Dict[str, Any]] = []
+    params: Dict[str, Any] = {"page_size": page_size}
+    if search:
+        params["search"] = search.strip()
+    if next_page_token:
+        params["next_page_token"] = next_page_token
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        headers: Dict[str, str] = {"xi-api-key": api_key}
+        # Bounded pagination: max 10 pages to avoid infinite loops
+        for _ in range(10):
+            res = await client.get(
+                "https://api.elevenlabs.io/v2/voices",
+                params=params,
+                headers=headers,
+            )
+
+            if res.status_code in (401, 403):
+                error_detail = ""
+                try:
+                    error_detail = res.json().get("detail", {}).get("message", res.text)
+                except Exception:
+                    error_detail = res.text
+                logger.warning(
+                    f"ElevenLabs voice catalog auth error (HTTP {res.status_code}): {error_detail}"
+                )
+                return {
+                    "provider": "elevenlabs",
+                    "status": "auth_error",
+                    "errorMessage": "ElevenLabs API authentication/permission error. "
+                    f"(HTTP {res.status_code})",
+                    "hasApiKey": True,
+                    "voices": [],
+                    "models": ELEVENLABS_MODELS,
+                }
+
+            if res.status_code == 429:
+                logger.warning("ElevenLabs voice catalog rate limited (HTTP 429)")
+                return {
+                    "provider": "elevenlabs",
+                    "status": "rate_limited",
+                    "errorMessage": "ElevenLabs API rate limit exceeded. Please try again later.",
+                    "hasApiKey": True,
+                    "voices": [],
+                    "models": ELEVENLABS_MODELS,
+                }
+
+            if res.status_code != 200:
+                logger.warning(
+                    f"ElevenLabs voice catalog error (HTTP {res.status_code}): {res.text[:300]}"
+                )
+                return {
+                    "provider": "elevenlabs",
+                    "status": "provider_error",
+                    "errorMessage": f"ElevenLabs API returned HTTP {res.status_code}.",
+                    "hasApiKey": True,
+                    "voices": [],
+                    "models": ELEVENLABS_MODELS,
+                }
+
+            data = res.json()
+            for v in data.get("voices", []) or []:
+                labels = v.get("labels") or {}
+                gender = str(labels.get("gender") or "").strip().lower()
+                if gender not in ("male", "female", "non-binary"):
+                    gender = "female" if "female" in str(v.get("name", "")).lower() else "male"
+                accent = labels.get("accent")
+                accent = accent if isinstance(accent, str) and accent else "american"
+                voices_list.append({
+                    "voice_id": v.get("voice_id"),
+                    "name": v.get("name"),
+                    "gender": gender,
+                    "category": v.get("category", "premade"),
+                    "accent": accent,
+                    "description": labels.get("description")
+                    or labels.get("use_case")
+                    or f"{accent.capitalize()} {gender} voice",
+                    "preview_url": v.get("preview_url"),
+                    "is_custom": v.get("category") not in ("premade", "high_quality"),
+                })
+
+            has_more = bool(data.get("has_more"))
+            token = data.get("next_page_token")
+            if not has_more or not token:
+                break
+            params["next_page_token"] = token
+
+    return {
+        "provider": "elevenlabs",
+        "status": "success" if voices_list else "empty",
+        "errorMessage": None if voices_list else "No voices found in ElevenLabs account.",
+        "hasApiKey": True,
+        "voices": voices_list,
+        "models": ELEVENLABS_MODELS,
+    }
+
+
+@router.get("/tts/catalog")
 @router.get("/elevenlabs/voices")
-async def get_elevenlabs_voices(current_user: Dict[str, Any] = Depends(get_current_user)):
+async def get_tts_voices(
+    provider: str = "elevenlabs",
+    search: Optional[str] = None,
+    page_size: Optional[int] = 30,
+    next_page_token: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """
-    Fetch ElevenLabs voices dynamically if API key configured, combined with standard voices.
+    Fetch TTS voices dynamically for the specified provider (elevenlabs | cartesia)
+    with explicit error and availability states, v2 catalog pagination and caching.
     """
+    prov = (provider or "elevenlabs").strip().lower()
+
+    if prov == "cartesia":
+        settings = get_settings()
+        api_key = getattr(settings, "cartesia_api_key", None)
+
+        if not api_key or api_key == "your_cartesia_api_key_here":
+            return ApiResponse.success(
+                status_code=200,
+                message="CARTESIA_API_KEY is not configured",
+                data={
+                    "provider": "cartesia",
+                    "status": "key_missing",
+                    "errorMessage": "CARTESIA_API_KEY is not configured on the backend server.",
+                    "hasApiKey": False,
+                    "voices": [],
+                    "models": CARTESIA_MODELS,
+                }
+            )
+
+        # In-memory cache (5 minute TTL) for the default catalog request only
+        can_cache = not (search or next_page_token)
+        now = time.time()
+        cached_data = _cartesia_voice_cache.get("data")
+        if can_cache and cached_data and (now - _cartesia_voice_cache.get("timestamp", 0.0)) < 300:
+            return ApiResponse.success(
+                status_code=200,
+                message="Cartesia voices retrieved from cache",
+                data=cached_data,
+            )
+
+        try:
+            payload = await _fetch_cartesia_voices(str(api_key))
+            if can_cache:
+                _cartesia_voice_cache["data"] = payload
+                _cartesia_voice_cache["timestamp"] = now
+            return ApiResponse.success(
+                status_code=200,
+                message="Cartesia voices retrieved successfully",
+                data=payload,
+            )
+        except Exception as e:
+            logger.warning(f"Could not fetch dynamic Cartesia voices: {e}")
+            return ApiResponse.success(
+                status_code=200,
+                message=f"Could not fetch dynamic Cartesia voices: {e}",
+                data={
+                    "provider": "cartesia",
+                    "status": "provider_error",
+                    "errorMessage": f"Connection error: {e}",
+                    "hasApiKey": True,
+                    "voices": [],
+                    "models": CARTESIA_MODELS,
+                }
+            )
+
     settings = get_settings()
     api_key = getattr(settings, "elevenlabs_api_key", None)
-    
-    voices_list = []
-    has_api_key = bool(api_key and api_key != "YOUR_ELEVENLABS_API_KEY")
-    if has_api_key:
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                headers: dict[str, str] = {"xi-api-key": str(api_key)}
-                res = await client.get(
-                    "https://api.elevenlabs.io/v1/voices",
-                    headers=headers
-                )
-                if res.status_code == 200:
-                    data = res.json()
-                    for v in data.get("voices", []):
-                        labels = v.get("labels", {})
-                        voices_list.append({
-                            "voice_id": v.get("voice_id"),
-                            "name": v.get("name"),
-                            "gender": labels.get("gender", "female" if "female" in v.get("name", "").lower() else "male"),
-                            "category": v.get("category", "premade"),
-                            "accent": labels.get("accent", "american"),
-                            "description": labels.get("description") or labels.get("use_case") or f"{labels.get('accent', 'American')} {labels.get('gender', 'voice')}",
-                            "preview_url": v.get("preview_url"),
-                            "is_custom": v.get("category") not in ["premade", "high_quality"]
-                        })
-                else:
-                    logger.warning(f"ElevenLabs API return non-200 status {res.status_code}: {res.text}")
-                    has_api_key = False
-        except Exception as e:
-            logger.warning(f"Could not fetch dynamic ElevenLabs voices: {e}")
 
-    return ApiResponse.success(
-        status_code=200,
-        message="ElevenLabs voices retrieved successfully",
-        data={"voices": voices_list, "hasApiKey": has_api_key}
-    )
+    if not api_key or api_key == "YOUR_ELEVENLABS_API_KEY":
+        return ApiResponse.success(
+            status_code=200,
+            message="ELEVENLABS_API_KEY is not configured",
+            data={
+                "provider": "elevenlabs",
+                "status": "key_missing",
+                "errorMessage": "ELEVENLABS_API_KEY is not configured on the backend server.",
+                "hasApiKey": False,
+                "voices": [],
+                "models": ELEVENLABS_MODELS,
+            }
+        )
+
+    # In-memory cache (5 minute TTL) for the default catalog request only
+    can_cache = not (search or next_page_token)
+    now = time.time()
+    cached_data = _voice_cache.get("data")
+    if can_cache and cached_data and (now - _voice_cache.get("timestamp", 0.0)) < 300:
+        return ApiResponse.success(
+            status_code=200,
+            message="ElevenLabs voices retrieved from cache",
+            data=cached_data,
+        )
+
+    try:
+        payload = await _fetch_elevenlabs_voices(
+            api_key=str(api_key),
+            search=search,
+            page_size=page_size,
+            next_page_token=next_page_token,
+        )
+        if can_cache:
+            _voice_cache["data"] = payload
+            _voice_cache["timestamp"] = now
+        return ApiResponse.success(
+            status_code=200,
+            message="ElevenLabs voices retrieved successfully",
+            data=payload,
+        )
+    except Exception as e:
+        logger.warning(f"Could not fetch dynamic ElevenLabs voices: {e}")
+        return ApiResponse.success(
+            status_code=200,
+            message=f"Could not fetch dynamic ElevenLabs voices: {e}",
+            data={
+                "provider": "elevenlabs",
+                "status": "provider_error",
+                "errorMessage": f"Connection error: {e}",
+                "hasApiKey": True,
+                "voices": [],
+                "models": ELEVENLABS_MODELS,
+            }
+        )
 
 
 @router.post("/elevenlabs/preview")
@@ -273,7 +629,7 @@ async def preview_elevenlabs_voice(
         }
         payload = {
             "text": req.text or "Hello! I am your AI voice assistant. How can I help you today?",
-            "model_id": req.modelId or "eleven_multilingual_v2",
+            "model_id": req.modelId,
             "voice_settings": {
                 "stability": req.stability if req.stability is not None else 0.5,
                 "similarity_boost": req.similarityBoost if req.similarityBoost is not None else 0.75
